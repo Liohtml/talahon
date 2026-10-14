@@ -248,7 +248,7 @@ Call `score_alert` with the rule level, rule groups, MITRE techniques from `map_
 
 Then decide the verdict — `true_positive`, `false_positive`, `benign_true_positive`, `needs_escalation` or `inconclusive` — and verify every claim you are about to make against the tool evidence you actually collected. Do not state facts you did not observe.
 
-Finish by calling **`submit_triage_report`** with `id` = the job id. It validates the structured verdict (severity, confidence, summary, IOCs with verdicts, MITRE techniques, timeline, evidence, recommended actions), stores it, and returns the Markdown report and the CoPilot `severity_assessment` label to use in Step 6.
+Finish by calling **`submit_triage_report`** with `report_id` = the job id. It validates the structured verdict (severity, confidence, summary, IOCs with verdicts, MITRE techniques, timeline, evidence, recommended actions), stores it, and returns the Markdown report and the CoPilot `severity_assessment` label to use in Step 6.
 
 
 ### Step 6 — Write back to CoPilot and deliver the report
