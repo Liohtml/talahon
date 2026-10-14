@@ -56,3 +56,6 @@ cve-mcp/.venv/
 .nanoclaw/
 
 agents-sdk-docs
+
+# Rust
+/target/

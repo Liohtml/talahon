@@ -1,0 +1,39 @@
+[package]
+name = "talon-agent"
+description = "In-container agent runtime: vLLM agent loop, MCP tools, sessions, compaction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+talon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+talon-llm = { workspace = true }
+talon-mcp = { workspace = true }
+talon-tools = { workspace = true }
+talon-intel = { workspace = true }
+talon-security = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "talon-agent"
+path = "src/main.rs"

@@ -1,0 +1,42 @@
+[package]
+name = "talon"
+description = "Talon — automated AI SOC analyst (host orchestrator)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+default-run = "talon"
+
+[[bin]]
+name = "talon"
+path = "src/main.rs"
+
+[dependencies]
+talon-core = { workspace = true }
+talon-db = { workspace = true }
+talon-llm = { workspace = true }
+talon-security = { workspace = true }
+talon-container = { workspace = true }
+talon-scheduler = { workspace = true }
+talon-ipc = { workspace = true }
+talon-router = { workspace = true }
+talon-channels = { workspace = true }
+talon-http = { workspace = true }
+talon-setup = { workspace = true }
+talon-intel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
