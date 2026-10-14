@@ -3,8 +3,9 @@
 //! Everything runtime-specific lives here: which binary to call
 //! (`docker` / `podman`), how to check it is up, how to find and stop
 //! orphaned Talon containers (by the `talon.managed=true` label instead of a
-//! name prefix), how containers reach the host, and which host address the
-//! LLM gateway should bind to so that `host.docker.internal` reaches it.
+//! name prefix), how containers reach the host, which host address the
+//! LLM gateway should bind to so that `host.docker.internal` reaches it, and
+//! the dedicated agent network ([`AGENT_NETWORK`], MYTH-05).
 //!
 //! All external commands go through the injectable [`CommandExecutor`] so the
 //! behaviour is unit-testable without a container daemon. Arguments are always
@@ -30,6 +31,20 @@ pub const GROUP_LABEL_KEY: &str = "talon.group";
 
 /// Hostname containers use to reach the host machine.
 pub const HOST_GATEWAY_NAME: &str = "host.docker.internal";
+
+/// Dedicated bridge network for agent containers (MYTH-05): inter-container
+/// communication disabled, fixed bridge interface [`AGENT_BRIDGE_NAME`] for
+/// host egress firewall rules (`talon setup egress`).
+pub const AGENT_NETWORK: &str = "talon-agents";
+
+/// Linux bridge interface of [`AGENT_NETWORK`].
+pub const AGENT_BRIDGE_NAME: &str = "br-talon";
+
+/// Docker bridge driver option controlling inter-container communication.
+pub const ICC_OPTION: &str = "com.docker.network.bridge.enable_icc";
+
+/// Bridge driver option naming the Linux bridge interface.
+pub const BRIDGE_NAME_OPTION: &str = "com.docker.network.bridge.name";
 
 /// `docker info` timeout (TS: 10 s).
 const INFO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -233,6 +248,75 @@ pub fn list_managed_args() -> Vec<String> {
         "--format".to_string(),
         "{{.Names}}".to_string(),
     ]
+}
+
+/// Argument vector inspecting a network (`network inspect <name>`).
+pub fn network_inspect_args(name: &str) -> Vec<String> {
+    vec![
+        "network".to_string(),
+        "inspect".to_string(),
+        name.to_string(),
+    ]
+}
+
+/// Argument vector creating the agent network:
+///
+/// - docker: `network create --driver bridge --opt
+///   com.docker.network.bridge.enable_icc=false --opt
+///   com.docker.network.bridge.name=br-talon --label talon.managed=true <name>`
+/// - podman: the same without `enable_icc` (netavark has no equivalent and
+///   rejects unknown bridge options).
+pub fn agent_network_create_args(kind: RuntimeKind, name: &str) -> Vec<String> {
+    let mut args: Vec<String> = ["network", "create", "--driver", "bridge"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if kind == RuntimeKind::Docker {
+        args.push("--opt".to_string());
+        args.push(format!("{ICC_OPTION}=false"));
+    }
+    args.push("--opt".to_string());
+    args.push(format!("{BRIDGE_NAME_OPTION}={AGENT_BRIDGE_NAME}"));
+    args.push("--label".to_string());
+    args.push(MANAGED_LABEL.to_string());
+    args.push(name.to_string());
+    args
+}
+
+/// Problems with an existing network that [`ContainerRuntime::ensure_agent_network`]
+/// did not create (reported as warnings; the operator owns that network).
+pub fn existing_network_warnings(kind: RuntimeKind, inspect_json: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(inspect_json) else {
+        return vec!["network inspect output is not JSON".to_string()];
+    };
+    let net = match &value {
+        serde_json::Value::Array(items) => match items.first() {
+            Some(first) => first,
+            None => return vec!["network inspect returned no network".to_string()],
+        },
+        other => other,
+    };
+    let mut warnings = Vec::new();
+    let driver = net
+        .get("Driver")
+        .or_else(|| net.get("driver"))
+        .and_then(|d| d.as_str())
+        .unwrap_or_default();
+    if driver != "bridge" {
+        warnings.push(format!("driver is {driver:?}, expected \"bridge\""));
+    }
+    if kind == RuntimeKind::Docker {
+        let icc = net
+            .pointer("/Options")
+            .and_then(|o| o.get(ICC_OPTION))
+            .and_then(|v| v.as_str());
+        if icc != Some("false") {
+            warnings.push(format!(
+                "{ICC_OPTION} is not \"false\": agent containers can reach each other"
+            ));
+        }
+    }
+    warnings
 }
 
 fn validate_binary(bin: &str) -> Result<()> {
@@ -485,6 +569,76 @@ impl ContainerRuntime {
                 out.stderr.trim()
             )))
         }
+    }
+
+    /// Create the agent network `name` (normally [`AGENT_NETWORK`]) unless it
+    /// already exists: a bridge with inter-container communication disabled
+    /// (docker), bridge interface [`AGENT_BRIDGE_NAME`] and the
+    /// `talon.managed=true` label. On podman `enable_icc` is unsupported and
+    /// skipped with a warning. An existing network is kept as-is; settings
+    /// that weaken isolation are logged. Concurrent creation is tolerated.
+    ///
+    /// `host.docker.internal:host-gateway` keeps working on the custom
+    /// network: `host-gateway` resolves to the daemon's host-gateway IP and
+    /// traffic to that host address is routed to the host, not forwarded
+    /// between bridges.
+    pub async fn ensure_agent_network(&self, name: &str) -> Result<()> {
+        crate::args::validate_network(name).map_err(|reason| {
+            Error::Config(format!("invalid agent network name {name:?}: {reason}"))
+        })?;
+        let inspect = network_inspect_args(name);
+        match self.exec(&inspect, QUERY_TIMEOUT).await {
+            Ok(out) if out.success() => {
+                if name != "none" {
+                    for warning in existing_network_warnings(self.kind, &out.stdout) {
+                        tracing::warn!(network = name, "{warning}");
+                    }
+                }
+                tracing::debug!(network = name, "agent network already exists");
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return Err(Error::Container(format!(
+                    "{} network inspect {name}: {err}",
+                    self.bin
+                )));
+            }
+        }
+        if self.kind == RuntimeKind::Podman {
+            tracing::warn!(
+                network = name,
+                "podman cannot disable inter-container communication on a bridge; \
+                 agent containers on this network can reach each other"
+            );
+        }
+        let create = agent_network_create_args(self.kind, name);
+        let out = self
+            .exec(&create, QUERY_TIMEOUT)
+            .await
+            .map_err(|e| Error::Container(format!("{} network create {name}: {e}", self.bin)))?;
+        if out.success() {
+            tracing::info!(
+                network = name,
+                bridge = AGENT_BRIDGE_NAME,
+                "created agent network"
+            );
+            return Ok(());
+        }
+        // Lost a creation race? Then the network exists now.
+        if out.stderr.to_ascii_lowercase().contains("already exists") {
+            if let Ok(again) = self.exec(&inspect, QUERY_TIMEOUT).await {
+                if again.success() {
+                    return Ok(());
+                }
+            }
+        }
+        Err(Error::Container(format!(
+            "{} network create {name} failed ({:?}): {}",
+            self.bin,
+            out.status,
+            out.stderr.trim().chars().take(500).collect::<String>()
+        )))
     }
 
     /// Extra `run` arguments so the container can resolve the host. On Linux
@@ -886,6 +1040,113 @@ mod tests {
         assert!(r.stop("talon-x-1", Duration::from_secs(1)).await.is_err());
         r.kill("talon-x-1").await.unwrap();
         assert_eq!(exec.subcommands(), sv(&["stop", "kill"]));
+    }
+
+    // --- agent network (MYTH-05) ---
+
+    #[tokio::test]
+    async fn ensure_agent_network_creates_isolated_bridge() {
+        let exec = Arc::new(FakeExecutor::default());
+        exec.push(Ok(CommandOutput::failed(1, "Error: No such network")));
+        rt(&exec).ensure_agent_network(AGENT_NETWORK).await.unwrap();
+        let calls = exec.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1, sv(&["network", "inspect", "talon-agents"]));
+        assert_eq!(
+            calls[1].1,
+            sv(&[
+                "network",
+                "create",
+                "--driver",
+                "bridge",
+                "--opt",
+                "com.docker.network.bridge.enable_icc=false",
+                "--opt",
+                "com.docker.network.bridge.name=br-talon",
+                "--label",
+                "talon.managed=true",
+                "talon-agents",
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_network_keeps_existing_network() {
+        let exec = Arc::new(FakeExecutor::default());
+        exec.push(Ok(CommandOutput::ok(
+            r#"[{"Name":"talon-agents","Driver":"bridge","Options":{"com.docker.network.bridge.enable_icc":"false"}}]"#,
+        )));
+        rt(&exec).ensure_agent_network(AGENT_NETWORK).await.unwrap();
+        assert_eq!(exec.subcommands(), sv(&["network"]));
+        assert!(
+            existing_network_warnings(
+                RuntimeKind::Docker,
+                r#"[{"Driver":"bridge","Options":{"com.docker.network.bridge.enable_icc":"false"}}]"#
+            )
+            .is_empty()
+        );
+        let warnings = existing_network_warnings(
+            RuntimeKind::Docker,
+            r#"[{"Driver":"overlay","Options":{}}]"#,
+        );
+        assert_eq!(warnings.len(), 2);
+        // Podman has no ICC switch: only the driver is checked.
+        assert!(
+            existing_network_warnings(RuntimeKind::Podman, r#"[{"driver":"bridge"}]"#).is_empty()
+        );
+        assert_eq!(existing_network_warnings(RuntimeKind::Docker, "x").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_network_podman_skips_icc_option() {
+        let exec = Arc::new(FakeExecutor::default());
+        exec.push(Ok(CommandOutput::failed(125, "network not found")));
+        let r = ContainerRuntime::new("podman")
+            .unwrap()
+            .with_executor(exec.clone())
+            .with_platform(HostPlatform::Linux);
+        r.ensure_agent_network("talon-agents").await.unwrap();
+        let create = &exec.calls()[1].1;
+        assert!(!create.iter().any(|a| a.contains("enable_icc")));
+        assert!(create.contains(&"com.docker.network.bridge.name=br-talon".to_string()));
+        assert_eq!(create.last().map(String::as_str), Some("talon-agents"));
+    }
+
+    #[tokio::test]
+    async fn ensure_agent_network_race_and_failures() {
+        // Lost the creation race: the re-inspect finds it.
+        let exec = Arc::new(FakeExecutor::default());
+        exec.push(Ok(CommandOutput::failed(1, "No such network")));
+        exec.push(Ok(CommandOutput::failed(
+            1,
+            "Error response from daemon: network with name talon-agents already exists",
+        )));
+        exec.push(Ok(CommandOutput::ok("[]")));
+        rt(&exec).ensure_agent_network(AGENT_NETWORK).await.unwrap();
+        assert_eq!(exec.calls().len(), 3);
+
+        // Other create failures are errors.
+        let exec = Arc::new(FakeExecutor::default());
+        exec.push(Ok(CommandOutput::failed(1, "No such network")));
+        exec.push(Ok(CommandOutput::failed(1, "bridge name br-talon in use")));
+        let err = rt(&exec)
+            .ensure_agent_network(AGENT_NETWORK)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("br-talon in use"));
+
+        // The runtime being unreachable is an error, not a create attempt.
+        let exec = Arc::new(FakeExecutor::default());
+        exec.push(Err(io::Error::other("daemon down")));
+        assert!(rt(&exec).ensure_agent_network(AGENT_NETWORK).await.is_err());
+        assert_eq!(exec.calls().len(), 1);
+
+        // Invalid names never reach the runtime.
+        let exec = Arc::new(FakeExecutor::default());
+        for bad in ["host", "-x", "container:abc", ""] {
+            assert!(rt(&exec).ensure_agent_network(bad).await.is_err());
+        }
+        assert!(exec.calls().is_empty());
     }
 
     // --- detection ---

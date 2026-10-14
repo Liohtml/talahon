@@ -12,6 +12,11 @@
 #   4. copies every staged secret /etc/mcp-staging/<id>.<file> (root-only
 #      host bind mounts) to /etc/mcp-secrets/<id>.<file>, owner mcp-<id>,
 #      mode 0600 — only that MCP's user can read it,
+#   4b. hands MemPalace data (/workspace/extra/mempalace-data) to
+#      mcp-palace, top directory 0700, nothing group/world accessible, so
+#      the agent can neither read nor plant files there (e.g. a malicious
+#      ChromaDB index_metadata.pickle — MYTH-01). Symlinks are never
+#      followed; a writable mount that cannot be secured is fatal,
 #   5. execs `talon-agent supervise`, which reads the ContainerInput from
 #      stdin, runs each MCP server as its mcp-* user and the agent as `agent`.
 #
@@ -36,6 +41,8 @@ unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CDPATH GLOBIGNORE \
 readonly AGENT_BIN=/usr/local/bin/talon-agent
 readonly STAGING_DIR=/etc/mcp-staging
 readonly SECRETS_DIR=/etc/mcp-secrets
+readonly PALACE_DATA=/workspace/extra/mempalace-data
+readonly PALACE_USER=mcp-palace
 readonly MAX_ID=4294967294
 
 log() { printf 'talon-entrypoint: %s\n' "$*" >&2; }
@@ -135,6 +142,52 @@ if [ -d "$STAGING_DIR" ]; then
             die "failed to stage $base for $user"
     done
 fi
+
+# --- 4b. MemPalace data: mcp-palace only ------------------------------------------
+# Runs as root BEFORE privileges are dropped. The host only mounts the palace
+# data at this exact path (talon-container refuses other names / overlaps).
+secure_palace_data() {
+    local dir=$PALACE_DATA puid pgid state hardlinked
+    if [ -L "$dir" ]; then
+        die "$dir is a symlink; refusing to start"
+    fi
+    [ -d "$dir" ] || return 0
+    puid=$(id -u "$PALACE_USER") || die "image has no $PALACE_USER user"
+    pgid=$(id -g "$PALACE_USER") || die "image has no $PALACE_USER group"
+    case "$puid:$pgid" in
+        0:* | *:0) die "$PALACE_USER must not be root" ;;
+    esac
+    if [ ! -w "$dir" ]; then
+        # access(2) reports EROFS even for root: a read-only mount cannot be
+        # planted into, and cannot be re-owned either.
+        log "$dir is mounted read-only; leaving ownership unchanged"
+        return 0
+    fi
+    # Files with several hard links may be inodes shared with other host
+    # files: never re-own or re-mode them (and the 0700 top directory keeps
+    # the agent away from them anyway).
+    # (`|| true`: `head` closing the pipe early is not an error.)
+    hardlinked=$(find -P "$dir" -xdev -type f -links +1 -print 2>/dev/null | head -n 5 | tr '\n' ' ') || true
+    if [ -n "$hardlinked" ]; then
+        log "palace data contains hard-linked files (left untouched): $hardlinked"
+    fi
+    # -P: never follow symlinks; -xdev: stay on the mounted filesystem;
+    # chown -h: change a symlink itself, never its target; chmod skips
+    # symlinks entirely (it would follow them).
+    if ! find -P "$dir" -xdev ! \( -type f -links +1 \) \
+        -exec chown -h -- "$puid:$pgid" {} + 2>/dev/null; then
+        die "cannot give $dir to $PALACE_USER"
+    fi
+    if ! find -P "$dir" -xdev ! -type l ! \( -type f -links +1 \) \
+        -exec chmod u+rwX,go-rwx -- {} + 2>/dev/null; then
+        die "cannot restrict permissions under $dir"
+    fi
+    chmod 0700 -- "$dir" || die "cannot chmod $dir"
+    state=$(stat -c '%u:%g:%a' -- "$dir") || die "cannot stat $dir"
+    [ "$state" = "$puid:$pgid:700" ] ||
+        die "$dir is $state after securing it (expected $puid:$pgid:700)"
+}
+secure_palace_data
 
 # --- 5. hand over to the supervisor ---------------------------------------------
 install -d -m 0755 -o root -g root /run/talon 2>/dev/null || true

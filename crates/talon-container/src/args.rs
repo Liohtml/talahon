@@ -11,7 +11,8 @@
 //!   --tmpfs /tmp:rw,nosuid,nodev,size=1g --tmpfs /run:rw,nosuid,nodev,size=16m
 //!   --tmpfs /etc/mcp-secrets:rw,nosuid,nodev,noexec,size=1m,mode=0711
 //!   --tmpfs /home/agent:rw,nosuid,nodev,size=256m
-//!   --pids-limit 512 --memory 4g --memory-swap 4g --cpus 2 [--network <net>]
+//!   --pids-limit 512 --memory 4g --memory-swap 4g --cpus 2
+//!   [--network <group network | default network (talon-agents)>]
 //!   -e TZ=<tz> -e RUN_UID=<uid> -e RUN_GID=<gid> [-e KEY=VALUE ...]
 //!   [--add-host host.docker.internal:host-gateway]       (Linux)
 //!   [--add-host <blocked>:127.0.0.1 ...]
@@ -503,6 +504,9 @@ pub struct RunArgsInput<'a> {
     pub mounts: &'a [VolumeMount],
     /// From [`crate::runtime::ContainerRuntime::host_gateway_args`].
     pub host_gateway_args: &'a [String],
+    /// Network used when the config sets none (or an invalid one), normally
+    /// [`crate::runtime::AGENT_NETWORK`]; `None` = the runtime default.
+    pub default_network: Option<&'a str>,
 }
 
 /// Output of [`build_run_args`].
@@ -516,7 +520,8 @@ pub struct RunArgs {
     pub env_keys: Vec<String>,
     /// Hosts routed to 127.0.0.1.
     pub blocked_hosts: Vec<String>,
-    /// Network, if not the runtime default.
+    /// `--network`: the config's network, else the default network;
+    /// `None` = the runtime default bridge.
     pub network: Option<String>,
     /// Refused config values (to audit).
     pub rejections: Vec<ConfigRejection>,
@@ -566,6 +571,24 @@ pub fn build_run_args(input: &RunArgsInput<'_>) -> Result<RunArgs> {
             Err(reason) => {
                 rejections.push(ConfigRejection::new("network", n, reason));
                 None
+            }
+        },
+    };
+    // No (valid) group network: the operator default, never silently the
+    // runtime's shared default bridge when a default is configured.
+    let network = match network {
+        Some(n) => Some(n),
+        None => match input
+            .default_network
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            None => None,
+            Some(d) => {
+                validate_network(d).map_err(|reason| {
+                    Error::Config(format!("invalid default container network {d:?}: {reason}"))
+                })?;
+                Some(d.to_string())
             }
         },
     };
@@ -649,6 +672,7 @@ mod tests {
             default_limits: limits,
             mounts,
             host_gateway_args: gw,
+            default_network: None,
         }
     }
 
@@ -740,6 +764,59 @@ mod tests {
         assert!(joined.contains("--network talon-net"));
         assert!(!joined.contains("host.docker.internal"));
         assert_eq!(out.network.as_deref(), Some("talon-net"));
+    }
+
+    #[test]
+    fn network_selection_prefers_group_then_default() {
+        let limits = ResourceLimits::default();
+        let none = ContainerConfig::default();
+        // Default network applies when the group sets none.
+        let mut i = input(&none, &[], &[], &limits);
+        i.default_network = Some(crate::runtime::AGENT_NETWORK);
+        let out = build_run_args(&i).unwrap();
+        assert_eq!(out.network.as_deref(), Some("talon-agents"));
+        let pos = out.args.iter().position(|a| a == "--network").unwrap();
+        assert_eq!(out.args[pos + 1], "talon-agents");
+        // Network flag sits with the limits, before env and mounts.
+        let cpus = out.args.iter().position(|a| a == "--cpus").unwrap();
+        assert_eq!(pos, cpus + 2);
+
+        // The group's network wins.
+        let own = ContainerConfig {
+            network: Some("lab-net".into()),
+            ..Default::default()
+        };
+        let mut i = input(&own, &[], &[], &limits);
+        i.default_network = Some("talon-agents");
+        let out = build_run_args(&i).unwrap();
+        assert_eq!(out.network.as_deref(), Some("lab-net"));
+        assert_eq!(out.args.iter().filter(|a| *a == "--network").count(), 1);
+
+        // An invalid group network is reported and the default used.
+        let bad = ContainerConfig {
+            network: Some("host".into()),
+            ..Default::default()
+        };
+        let mut i = input(&bad, &[], &[], &limits);
+        i.default_network = Some("talon-agents");
+        let out = build_run_args(&i).unwrap();
+        assert_eq!(out.network.as_deref(), Some("talon-agents"));
+        assert_eq!(out.rejections[0].field, "network");
+
+        // No default: runtime default bridge (no flag).
+        let out = build_run_args(&input(&none, &[], &[], &limits)).unwrap();
+        assert_eq!(out.network, None);
+        assert!(!out.args.contains(&"--network".to_string()));
+        let mut i = input(&none, &[], &[], &limits);
+        i.default_network = Some("  ");
+        assert_eq!(build_run_args(&i).unwrap().network, None);
+
+        // An invalid default is a configuration error (fail closed).
+        for d in ["host", "container:x", "-net"] {
+            let mut i = input(&none, &[], &[], &limits);
+            i.default_network = Some(d);
+            assert!(build_run_args(&i).is_err(), "{d}");
+        }
     }
 
     #[test]

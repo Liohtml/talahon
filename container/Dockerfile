@@ -22,8 +22,9 @@
 #     -e TZ -e RUN_UID -e RUN_GID ... talon-agent:latest
 #
 # and /usr/local/bin/talon-entrypoint (root) stages per-MCP secrets into
-# /etc/mcp-secrets (owner mcp-<id>, 0600) and execs `talon-agent supervise`,
-# which runs every MCP server as its mcp-* user and the agent as `agent`.
+# /etc/mcp-secrets (owner mcp-<id>, 0600), locks MemPalace data to
+# mcp-palace and execs `talon-agent supervise`, which runs every MCP server
+# as its mcp-* user and the agent as `agent`.
 
 ARG RUST_IMAGE=rust:1-bookworm
 ARG DEBIAN_IMAGE=debian:bookworm-slim
@@ -143,6 +144,10 @@ RUN set -eux; \
 # isolated MCP server gets its own system account; `mcp-default` runs servers
 # without a `runAs`. MCP ids live in a high range so they cannot collide with
 # host user ids (the entrypoint refuses RUN_UID/RUN_GID equal to any of them).
+# mcp-palace's 61008 is also used by the host for its one-shot palace
+# container (`--user 61008:61008`, talon_container::palace::MCP_PALACE_UID;
+# a unit test keeps both in sync) and owns /workspace/extra/mempalace-data
+# (the entrypoint re-owns it, 0700, before dropping privileges).
 RUN set -eux; \
     groupadd -g 1000 agent; \
     useradd -u 1000 -g 1000 -M -d /home/agent -s /bin/bash agent; \

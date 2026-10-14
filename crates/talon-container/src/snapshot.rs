@@ -8,7 +8,10 @@
 //! predictable temp name can never redirect the host's write.
 //!
 //! Visibility: the main group sees every task and every available group;
-//! other groups see only their own tasks and no groups.
+//! other groups see only their own tasks and no groups. Lanes that share a
+//! group folder (CoPilot analysts, webhook lanes) use
+//! [`write_lane_tasks_snapshot`], which filters by the lane's chat JIDs
+//! instead of the folder (MYTH-03).
 
 use std::fs;
 use std::io::{self, Write};
@@ -19,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 use talon_core::paths::{assert_valid_group_folder, group_ipc_path};
 use talon_core::protocol::container_paths;
-use talon_core::types::{AvailableGroup, TaskSnapshot};
+use talon_core::types::{AvailableGroup, ScheduledTask, TaskSnapshot};
 use talon_core::{Error, Result};
 
 /// File name of the tasks snapshot.
@@ -70,11 +73,41 @@ pub fn write_atomic(dir: &Path, file_name: &str, contents: &[u8]) -> Result<Path
     Ok(target)
 }
 
+/// `data/ipc/<key>` as a real directory: `data/ipc` is operator-controlled
+/// (created, symlinks followed); the lane directory itself must not be a
+/// symlink (a legacy alias would send one lane's snapshot into another
+/// lane's namespace) and is created without following links.
+fn lane_ipc_dir(data_dir: &Path, key: &str) -> Result<PathBuf> {
+    let dir = group_ipc_path(data_dir, key)?;
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let check = |meta: fs::Metadata| -> Result<PathBuf> {
+        if meta.file_type().is_dir() {
+            Ok(dir.clone())
+        } else {
+            Err(Error::security(format!(
+                "{} is not a real directory; refusing to write a snapshot",
+                dir.display()
+            )))
+        }
+    };
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) => check(meta),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::create_dir(&dir) {
+            Ok(()) => Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                check(fs::symlink_metadata(&dir)?)
+            }
+            Err(e) => Err(e.into()),
+        },
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn ipc_dir(data_dir: &Path, group_folder: &str, ipc_key: Option<&str>) -> Result<PathBuf> {
     assert_valid_group_folder(group_folder)?;
-    let dir = group_ipc_path(data_dir, ipc_key.unwrap_or(group_folder))?;
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
+    lane_ipc_dir(data_dir, ipc_key.unwrap_or(group_folder))
 }
 
 fn pretty<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
@@ -96,6 +129,26 @@ pub fn write_tasks_snapshot(
     let visible: Vec<&TaskSnapshot> = tasks
         .iter()
         .filter(|t| is_main || t.group_folder == group_folder)
+        .collect();
+    write_atomic(&dir, TASKS_SNAPSHOT, &pretty(&visible)?)
+}
+
+/// Write `current_tasks.json` into `data/ipc/<ipc_key>/` for one lane.
+/// Main sees every task; any other lane only tasks whose `chat_jid` is one
+/// of `lane_jids` (so lanes sharing a group folder never see each other's
+/// tasks). Same atomic, symlink-safe write as [`write_tasks_snapshot`].
+pub fn write_lane_tasks_snapshot(
+    data_dir: &Path,
+    ipc_key: &str,
+    is_main: bool,
+    lane_jids: &[String],
+    tasks: &[ScheduledTask],
+) -> Result<PathBuf> {
+    let dir = lane_ipc_dir(data_dir, ipc_key)?;
+    let visible: Vec<TaskSnapshot> = tasks
+        .iter()
+        .filter(|t| is_main || lane_jids.contains(&t.chat_jid))
+        .map(TaskSnapshot::from)
         .collect();
     write_atomic(&dir, TASKS_SNAPSHOT, &pretty(&visible)?)
 }
@@ -141,7 +194,7 @@ pub fn container_snapshot_paths() -> (&'static str, &'static str) {
 mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
-    use talon_core::types::{ScheduleType, TaskStatus};
+    use talon_core::types::{ContextMode, ScheduleType, TaskStatus};
 
     use super::*;
 
@@ -156,6 +209,100 @@ mod tests {
             status: TaskStatus::Active,
             next_run: None,
         }
+    }
+
+    fn scheduled(id: &str, folder: &str, jid: &str) -> ScheduledTask {
+        ScheduledTask {
+            id: id.into(),
+            group_folder: folder.into(),
+            chat_jid: jid.into(),
+            prompt: format!("prompt {id}"),
+            script: None,
+            schedule_type: ScheduleType::Interval,
+            schedule_value: "60000".into(),
+            context_mode: ContextMode::default(),
+            next_run: None,
+            last_run: None,
+            last_result: None,
+            status: TaskStatus::Active,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    fn ids(p: &Path) -> Vec<String> {
+        read_json(p)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn lane_snapshot_filters_by_chat_jid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Two analysts share the `copilot` folder; a third task is main's.
+        let tasks = vec![
+            scheduled("a1", "copilot", "http:copilot:alice"),
+            scheduled("b1", "copilot", "http:copilot:bob"),
+            scheduled("a2", "copilot", "http:copilot:alice"),
+            scheduled("m1", "main", "main@g.us"),
+        ];
+        let alice = vec!["http:copilot:alice".to_string()];
+        let p = write_lane_tasks_snapshot(tmp.path(), "copilot-u-alice", false, &alice, &tasks)
+            .unwrap();
+        assert_eq!(p, tmp.path().join("ipc/copilot-u-alice/current_tasks.json"));
+        assert_eq!(ids(&p), vec!["a1", "a2"]);
+        // TS snapshot shape (no chat JIDs of other lanes leak).
+        let v = read_json(&p);
+        assert_eq!(v[0]["groupFolder"], "copilot");
+        assert!(v[0].get("chat_jid").is_none() && v[0].get("chatJid").is_none());
+
+        // A lane with several JIDs sees all of them.
+        let both = vec!["http:copilot:bob".to_string(), "main@g.us".to_string()];
+        let p = write_lane_tasks_snapshot(tmp.path(), "multi", false, &both, &tasks).unwrap();
+        assert_eq!(ids(&p), vec!["b1", "m1"]);
+
+        // No JIDs: nothing. Main: everything, whatever its JIDs.
+        let p = write_lane_tasks_snapshot(tmp.path(), "empty", false, &[], &tasks).unwrap();
+        assert!(ids(&p).is_empty());
+        let p = write_lane_tasks_snapshot(tmp.path(), "main", true, &[], &tasks).unwrap();
+        assert_eq!(ids(&p), vec!["a1", "b1", "a2", "m1"]);
+    }
+
+    #[test]
+    fn lane_snapshot_is_atomic_and_symlink_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim.txt");
+        fs::write(&victim, "precious").unwrap();
+        let dir = tmp.path().join("ipc/lane-1");
+        fs::create_dir_all(&dir).unwrap();
+        symlink(&victim, dir.join(TASKS_SNAPSHOT)).unwrap();
+        let jids = vec!["x@g.us".to_string()];
+        let tasks = vec![scheduled("t", "team", "x@g.us")];
+        let p = write_lane_tasks_snapshot(tmp.path(), "lane-1", false, &jids, &tasks).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert!(fs::symlink_metadata(&p).unwrap().file_type().is_file());
+        assert_eq!(ids(&p), vec!["t"]);
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+        // Invalid lane keys never escape data/ipc.
+        for bad in ["../x", "global", "", "a/b"] {
+            assert!(write_lane_tasks_snapshot(tmp.path(), bad, false, &jids, &tasks).is_err());
+        }
+        // A symlinked lane directory (alias of another lane) is refused by
+        // both writers; nothing is written into the target.
+        let main_dir = tmp.path().join("ipc/main");
+        fs::create_dir_all(&main_dir).unwrap();
+        symlink(&main_dir, tmp.path().join("ipc/alias")).unwrap();
+        assert!(write_lane_tasks_snapshot(tmp.path(), "alias", true, &[], &tasks).is_err());
+        assert!(write_tasks_snapshot(tmp.path(), "alias", true, &[], None).is_err());
+        assert!(write_groups_snapshot(tmp.path(), "team", true, &[], Some("alias")).is_err());
+        assert_eq!(fs::read_dir(&main_dir).unwrap().count(), 0);
     }
 
     fn group(jid: &str) -> AvailableGroup {

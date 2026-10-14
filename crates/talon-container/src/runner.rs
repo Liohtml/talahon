@@ -13,15 +13,25 @@
 //!    frame resets the hard timeout and is delivered, in order, to the
 //!    [`OutputHandler`] (on its own task, so a slow handler never stalls
 //!    timeout handling). stderr lines go to `tracing` after redaction.
+//!    The frame path is bounded end to end (MYTH-07): parser -> run loop ->
+//!    handler use bounded queues ([`RunnerConfig::frame_queue_capacity`]),
+//!    so a slow handler stops stdout from being read and the container
+//!    blocks on its own writes instead of the host buffering without limit.
+//!    More than [`RunnerConfig::max_frames_per_run`] frames or
+//!    [`RunnerConfig::max_result_bytes_per_run`] bytes of results stop the
+//!    container and end the run with [`RunOutcome::OutputLimitExceeded`].
 //! 5. Hard timeout = `max(group timeout || CONTAINER_TIMEOUT, IDLE_TIMEOUT +
-//!    30 s)`, reset by every frame. On timeout (or [`ContainerHandle::stop`])
-//!    the container gets `<runtime> stop -t <grace>`; if it is still alive
-//!    after the grace period it is `kill`ed and the CLI process SIGKILLed.
-//! 6. Exit mapping (TS parity): timeout after output => success (idle
-//!    cleanup); timeout without output => error; exit 0 => success; exit
-//!    137 after output => success; anything else => error with the
-//!    (redacted) stderr tail. The run waits for the handler to drain, writes
-//!    a run log, audits `container.exit` and returns a [`RunResult`].
+//!    30 s)`, reset by every frame — but never beyond the absolute cap
+//!    `hard timeout × max_run_time_factor` from the start of the run. On
+//!    timeout (or [`ContainerHandle::stop`]) the container gets `<runtime>
+//!    stop -t <grace>`; if it is still alive after the grace period it is
+//!    `kill`ed and the CLI process SIGKILLed.
+//! 6. Exit mapping (TS parity): output limit exceeded => error; timeout
+//!    after output => success (idle cleanup); timeout without output =>
+//!    error; exit 0 => success; exit 137 after output => success; anything
+//!    else => error with the (redacted) stderr tail. The run waits for the
+//!    handler to drain, writes a run log, audits `container.exit` and
+//!    returns a [`RunResult`].
 
 use std::fmt;
 use std::future::Future;
@@ -53,7 +63,7 @@ use crate::process::{
     BoxedReader, ExitInfo, ProcessCommand, ProcessControl, ProcessSpawner, SpawnedProcess,
     TokioProcessSpawner,
 };
-use crate::runtime::ContainerRuntime;
+use crate::runtime::{AGENT_NETWORK, ContainerRuntime};
 
 /// Grace added to the idle timeout so the `_close` sentinel can act before
 /// the hard kill (TS: 30 s).
@@ -68,6 +78,28 @@ pub const DEFAULT_EXIT_DRAIN: Duration = Duration::from_secs(5);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Run logs kept per group.
 pub const DEFAULT_RUN_LOG_KEEP: usize = 50;
+/// Capacity of each bounded frame queue (parser -> loop -> handler).
+pub const DEFAULT_FRAME_QUEUE_CAPACITY: usize = 8;
+/// Valid output frames accepted per run.
+pub const DEFAULT_MAX_FRAMES_PER_RUN: usize = 1000;
+/// Cumulative `result` + `error` bytes accepted per run (8 MiB).
+pub const DEFAULT_MAX_RESULT_BYTES_PER_RUN: usize = 8 * 1024 * 1024;
+/// Frames may extend the hard timeout up to this multiple of it.
+pub const DEFAULT_MAX_RUN_TIME_FACTOR: u32 = 4;
+/// Env / `.env` key selecting the agent network (`default` or empty: the
+/// runtime's default bridge; unset: [`AGENT_NETWORK`]).
+pub const CONTAINER_NETWORK_ENV: &str = "TALON_CONTAINER_NETWORK";
+
+/// Interpret a [`CONTAINER_NETWORK_ENV`] value: unset => [`AGENT_NETWORK`];
+/// empty or `default` => `None` (the runtime's default bridge); anything
+/// else is used as-is (validated at launch).
+pub fn network_setting(raw: Option<&str>) -> Option<String> {
+    match raw.map(str::trim) {
+        None => Some(AGENT_NETWORK.to_string()),
+        Some(v) if v.is_empty() || v.eq_ignore_ascii_case("default") => None,
+        Some(v) => Some(v.to_string()),
+    }
+}
 
 /// Bytes of stdout / stderr retained for diagnostics.
 const TAIL_BYTES: usize = 16 * 1024;
@@ -114,6 +146,18 @@ pub struct RunnerConfig {
     pub run_log_dir: Option<PathBuf>,
     /// Run logs kept per group.
     pub run_log_keep: usize,
+    /// `--network` when the group config sets none: normally
+    /// [`AGENT_NETWORK`]; `None` = the runtime's default bridge.
+    pub default_network: Option<String>,
+    /// Capacity of each bounded frame queue (backpressure to the container).
+    pub frame_queue_capacity: usize,
+    /// Valid frames accepted per run before the container is stopped.
+    pub max_frames_per_run: usize,
+    /// Cumulative `result` + `error` bytes accepted per run before the
+    /// container is stopped.
+    pub max_result_bytes_per_run: usize,
+    /// Frames extend the hard timeout up to `hard timeout × this` (min 1).
+    pub max_run_time_factor: u32,
 }
 
 impl RunnerConfig {
@@ -136,16 +180,37 @@ impl RunnerConfig {
             chown_dirs: None,
             mount_options: MountOptions::default(),
             run_log_keep: DEFAULT_RUN_LOG_KEEP,
+            default_network: Some(AGENT_NETWORK.to_string()),
+            frame_queue_capacity: DEFAULT_FRAME_QUEUE_CAPACITY,
+            max_frames_per_run: DEFAULT_MAX_FRAMES_PER_RUN,
+            max_result_bytes_per_run: DEFAULT_MAX_RESULT_BYTES_PER_RUN,
+            max_run_time_factor: DEFAULT_MAX_RUN_TIME_FACTOR,
         }
     }
 
-    /// From the resolved host configuration.
+    /// From the resolved host configuration. The agent network comes from
+    /// [`CONTAINER_NETWORK_ENV`] (process env first, then `.env`; see
+    /// [`network_setting`]); the host config directory (mount / sender
+    /// allowlists) and `store/` are protected from additional mounts.
     pub fn from_talon_config(cfg: &TalonConfig) -> Self {
         let mut out = Self::new(cfg.container_image.clone(), MountLayout::from_config(cfg));
         out.timezone = cfg.timezone_name.clone();
         out.container_timeout = cfg.container_timeout;
         out.idle_timeout = cfg.idle_timeout;
         out.max_output_bytes = cfg.container_max_output_bytes;
+        // `EnvFile::get` cannot tell "set but empty" from "unset".
+        let raw = std::env::var(CONTAINER_NETWORK_ENV).ok().or_else(|| {
+            cfg.env
+                .file_value(CONTAINER_NETWORK_ENV)
+                .map(str::to_string)
+        });
+        out.default_network = network_setting(raw.as_deref());
+        out.mount_options.protected_paths = vec![
+            cfg.config_dir.clone(),
+            cfg.mount_allowlist_path.clone(),
+            cfg.sender_allowlist_path.clone(),
+            cfg.store_dir.clone(),
+        ];
         out
     }
 
@@ -163,6 +228,15 @@ impl RunnerConfig {
     pub fn hard_timeout(&self, cfg: &ContainerConfig) -> Duration {
         self.config_timeout(cfg)
             .max(self.idle_timeout.saturating_add(self.idle_grace))
+            .min(MAX_TIMEOUT)
+    }
+
+    /// Absolute cap on a run: frames may push the hard timeout out, but
+    /// never past `hard_timeout × max_run_time_factor` (min 1×) from the
+    /// start, capped at [`MAX_TIMEOUT`].
+    pub fn max_run_time(&self, cfg: &ContainerConfig) -> Duration {
+        self.hard_timeout(cfg)
+            .saturating_mul(self.max_run_time_factor.max(1))
             .min(MAX_TIMEOUT)
     }
 }
@@ -234,6 +308,8 @@ pub struct PreparedRun {
     pub config_timeout: Duration,
     /// Effective hard timeout.
     pub hard_timeout: Duration,
+    /// Absolute cap the hard timeout can be extended to by frames.
+    pub max_run_time: Duration,
 }
 
 /// Why a run could not start.
@@ -269,6 +345,8 @@ pub enum RunOutcome {
     SetupFailed,
     /// Spawning the runtime failed.
     SpawnFailed,
+    /// Too many frames or result bytes: the container was stopped.
+    OutputLimitExceeded,
 }
 
 /// Final result of a run (TS `ContainerOutput` + diagnostics).
@@ -563,6 +641,7 @@ impl ContainerRunner {
             default_limits: &self.config.default_limits,
             mounts: &mounts,
             host_gateway_args: &gateway,
+            default_network: self.config.default_network.as_deref(),
         })?;
         Ok(PreparedRun {
             name,
@@ -576,6 +655,7 @@ impl ContainerRunner {
             rejections: built.rejections,
             config_timeout: self.config.config_timeout(&spec.config),
             hard_timeout: self.config.hard_timeout(&spec.config),
+            max_run_time: self.config.max_run_time(&spec.config),
         })
     }
 
@@ -680,6 +760,7 @@ impl ContainerRunner {
                     "readonly": m.readonly,
                 })).collect::<Vec<_>>(),
                 "timeoutMs": prepared.hard_timeout.as_millis() as u64,
+                "maxRunTimeMs": prepared.max_run_time.as_millis() as u64,
             }),
         ));
 
@@ -709,6 +790,10 @@ impl ContainerRunner {
             resumed_session: spec.input.session_id.is_some(),
             config_timeout: prepared.config_timeout,
             hard_timeout: prepared.hard_timeout,
+            max_run_time: prepared.max_run_time,
+            frame_queue_capacity: cfg.frame_queue_capacity.max(1),
+            max_frames: cfg.max_frames_per_run,
+            max_result_bytes: cfg.max_result_bytes_per_run,
             stop_grace: cfg.stop_grace,
             kill_after: cfg.kill_after,
             exit_drain: cfg.exit_drain,
@@ -794,10 +879,13 @@ struct StreamSummary {
     tail: TailBuffer,
 }
 
+/// Read and parse stdout. `tx` is bounded: while the run loop is not
+/// accepting events, stdout is not read and the container blocks on its own
+/// writes (backpressure instead of host-side buffering).
 async fn read_stdout(
     mut stdout: BoxedReader,
     max_frame_bytes: usize,
-    tx: mpsc::UnboundedSender<ParseEvent>,
+    tx: mpsc::Sender<ParseEvent>,
 ) -> StreamSummary {
     let mut parser = crate::parser::OutputParser::new(max_frame_bytes);
     let mut summary = StreamSummary::default();
@@ -808,7 +896,10 @@ async fn read_stdout(
             Ok(n) => {
                 summary.tail.push(&buf[..n]);
                 for ev in parser.push(&buf[..n]) {
-                    let _ = tx.send(ev);
+                    if tx.send(ev).await.is_err() {
+                        // The run loop is gone; nobody wants more output.
+                        return summary;
+                    }
                 }
             }
             Err(err) => {
@@ -818,7 +909,9 @@ async fn read_stdout(
         }
     }
     for ev in parser.finish() {
-        let _ = tx.send(ev);
+        if tx.send(ev).await.is_err() {
+            break;
+        }
     }
     summary
 }
@@ -897,6 +990,10 @@ struct RunContext {
     resumed_session: bool,
     config_timeout: Duration,
     hard_timeout: Duration,
+    max_run_time: Duration,
+    frame_queue_capacity: usize,
+    max_frames: usize,
+    max_result_bytes: usize,
     stop_grace: Duration,
     kill_after: Duration,
     exit_drain: Duration,
@@ -910,6 +1007,31 @@ struct RunContext {
     started: Instant,
 }
 
+/// Which per-run output budget was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputLimit {
+    Frames,
+    ResultBytes,
+}
+
+impl OutputLimit {
+    fn as_str(self) -> &'static str {
+        match self {
+            OutputLimit::Frames => "frames",
+            OutputLimit::ResultBytes => "resultBytes",
+        }
+    }
+}
+
+/// Bytes a frame adds to the per-run result budget.
+fn payload_bytes(output: &ContainerOutput) -> usize {
+    output
+        .result
+        .as_ref()
+        .map_or(0, String::len)
+        .saturating_add(output.error.as_ref().map_or(0, String::len))
+}
+
 #[derive(Default)]
 struct LoopState {
     exit: Option<io::Result<ExitInfo>>,
@@ -917,6 +1039,10 @@ struct LoopState {
     outputs: usize,
     malformed: usize,
     oversize: usize,
+    result_bytes: usize,
+    limit: Option<OutputLimit>,
+    discarded: usize,
+    run_cap_reached: bool,
     new_session_id: Option<String>,
     usage: Option<SessionUsage>,
     last_result: Option<String>,
@@ -1008,12 +1134,15 @@ async fn run_loop<H: OutputHandler>(
         })
     });
 
-    let (ev_tx, mut ev_rx) = mpsc::unbounded_channel();
+    // Bounded queues end to end (MYTH-07): parser -> loop -> handler. The
+    // loop holds at most one frame (`pending`) while the handler queue is
+    // full and stops taking events meanwhile, so stdout stops being read.
+    let (ev_tx, mut ev_rx) = mpsc::channel::<ParseEvent>(ctx.frame_queue_capacity);
     let stdout_task = tokio::spawn(read_stdout(stdout, ctx.max_output_bytes, ev_tx));
     let mut stderr_task = tokio::spawn(read_stderr(stderr, ctx.name.clone(), ctx.redactor.clone()));
 
     // Frames are handled sequentially on their own task (TS `outputChain`).
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ContainerOutput>();
+    let (out_tx, mut out_rx) = mpsc::channel::<ContainerOutput>(ctx.frame_queue_capacity);
     let handler_task = tokio::spawn(async move {
         let mut handler = handler;
         while let Some(output) = out_rx.recv().await {
@@ -1024,7 +1153,10 @@ async fn run_loop<H: OutputHandler>(
     let (stop_tx, mut stop_rx) = mpsc::unbounded_channel::<talon_core::Result<()>>();
     let mut st = LoopState::default();
     let mut events_open = true;
-    let mut deadline = after(Instant::now(), ctx.hard_timeout);
+    let mut pending: Option<ContainerOutput> = None;
+    // Frames extend the hard timeout, but never past this absolute cap.
+    let cap_at = after(ctx.started, ctx.max_run_time);
+    let mut deadline = after(Instant::now(), ctx.hard_timeout).min(cap_at);
     let far = after(Instant::now(), MAX_TIMEOUT);
 
     loop {
@@ -1040,22 +1172,69 @@ async fn run_loop<H: OutputHandler>(
         let drain_until = st.drain_until.unwrap_or(far);
         tokio::select! {
             biased;
-            ev = ev_rx.recv(), if events_open => match ev {
+            permit = out_tx.reserve(), if pending.is_some() => match permit {
+                Ok(permit) => {
+                    if let Some(output) = pending.take() {
+                        permit.send(output);
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(group = %ctx.group_name, container = %ctx.name, "output handler is gone; dropping frame");
+                    pending = None;
+                }
+            },
+            ev = ev_rx.recv(), if events_open && pending.is_none() => match ev {
                 Some(ParseEvent::Output(output)) => {
-                    st.had_output = true;
-                    st.outputs += 1;
-                    if let Some(id) = output.new_session_id.as_ref().filter(|s| !s.is_empty()) {
-                        st.new_session_id = Some(id.clone());
+                    let bytes = payload_bytes(&output);
+                    let exceeded = if st.limit.is_some() {
+                        None
+                    } else if st.outputs >= ctx.max_frames {
+                        Some(OutputLimit::Frames)
+                    } else if st.result_bytes.saturating_add(bytes) > ctx.max_result_bytes {
+                        Some(OutputLimit::ResultBytes)
+                    } else {
+                        None
+                    };
+                    if let Some(limit) = exceeded {
+                        st.limit = Some(limit);
+                        tracing::error!(
+                            group = %ctx.group_name,
+                            container = %ctx.name,
+                            limit = limit.as_str(),
+                            frames = st.outputs,
+                            result_bytes = st.result_bytes,
+                            "Container output limit exceeded, stopping"
+                        );
+                        if st.exit.is_none() {
+                            begin_stop(&ctx, &mut st, &stop_tx);
+                        }
                     }
-                    if output.usage.is_some() {
-                        st.usage = output.usage;
+                    if st.limit.is_some() {
+                        // Over budget: drained, never delivered.
+                        st.discarded += 1;
+                    } else {
+                        st.had_output = true;
+                        st.outputs += 1;
+                        st.result_bytes = st.result_bytes.saturating_add(bytes);
+                        if let Some(id) = output.new_session_id.as_ref().filter(|s| !s.is_empty()) {
+                            st.new_session_id = Some(id.clone());
+                        }
+                        if output.usage.is_some() {
+                            st.usage = output.usage;
+                        }
+                        if output.result.is_some() {
+                            st.last_result = output.result.clone();
+                        }
+                        // Activity: extend the hard timeout (up to the cap).
+                        deadline = after(Instant::now(), ctx.hard_timeout).min(cap_at);
+                        if st.exit.is_some() {
+                            // Delivering a backlog after exit: keep draining
+                            // while it makes progress (bounded by the frame
+                            // budget; discarded frames never extend it).
+                            st.drain_until = Some(after(Instant::now(), ctx.exit_drain));
+                        }
+                        pending = Some(output);
                     }
-                    if output.result.is_some() {
-                        st.last_result = output.result.clone();
-                    }
-                    // Activity: reset the hard timeout.
-                    deadline = after(Instant::now(), ctx.hard_timeout);
-                    let _ = out_tx.send(output);
                 }
                 Some(ParseEvent::Malformed { reason, bytes }) => {
                     st.malformed += 1;
@@ -1071,12 +1250,17 @@ async fn run_loop<H: OutputHandler>(
                 st.exit = Some(res);
                 st.drain_until = Some(after(Instant::now(), ctx.exit_drain));
             }
-            _ = sleep_until(deadline), if st.exit.is_none() && !st.timed_out && !st.stop_requested => {
+            _ = sleep_until(deadline), if st.exit.is_none() && !st.timed_out && !st.stop_requested && st.limit.is_none() => {
                 st.timed_out = true;
-                tracing::error!(group = %ctx.group_name, container = %ctx.name, "Container timeout, stopping gracefully");
+                if deadline >= cap_at {
+                    st.run_cap_reached = true;
+                    tracing::error!(group = %ctx.group_name, container = %ctx.name, max_run_time_ms = ctx.max_run_time.as_millis() as u64, "Container reached its absolute run-time cap, stopping gracefully");
+                } else {
+                    tracing::error!(group = %ctx.group_name, container = %ctx.name, "Container timeout, stopping gracefully");
+                }
                 begin_stop(&ctx, &mut st, &stop_tx);
             }
-            _ = cancel.cancelled(), if st.exit.is_none() && !st.stop_requested && !st.timed_out => {
+            _ = cancel.cancelled(), if st.exit.is_none() && !st.stop_requested && !st.timed_out && st.limit.is_none() => {
                 st.stop_requested = true;
                 tracing::info!(group = %ctx.group_name, container = %ctx.name, "Container stop requested");
                 begin_stop(&ctx, &mut st, &stop_tx);
@@ -1094,14 +1278,19 @@ async fn run_loop<H: OutputHandler>(
                 tracing::error!(group = %ctx.group_name, container = %ctx.name, "Container process did not exit after SIGKILL; abandoning");
                 break;
             }
-            _ = sleep_until(drain_until), if st.exit.is_some() && events_open => {
+            _ = sleep_until(drain_until), if st.exit.is_some() && events_open && pending.is_none() => {
                 tracing::warn!(group = %ctx.group_name, container = %ctx.name, "stdout still open after exit; abandoning remaining output");
                 break;
             }
         }
     }
 
-    // Let the handler finish every delivered frame (TS waits for outputChain).
+    // Let the handler finish every accepted frame (TS waits for outputChain).
+    if let Some(output) = pending.take() {
+        if out_tx.send(output).await.is_err() {
+            tracing::error!(group = %ctx.group_name, container = %ctx.name, "output handler is gone; dropping frame");
+        }
+    }
     drop(out_tx);
     if let Err(err) = handler_task.await {
         tracing::error!(group = %ctx.group_name, container = %ctx.name, %err, "output handler failed");
@@ -1139,7 +1328,19 @@ async fn run_loop<H: OutputHandler>(
     let code = exit_info.and_then(|i| i.shell_code());
     let stderr_text = stderr_summary.tail.text();
 
-    let (status, error, outcome) = if st.timed_out {
+    let (status, error, outcome) = if let Some(limit) = st.limit {
+        let what = match limit {
+            OutputLimit::Frames => format!("more than {} frames", ctx.max_frames),
+            OutputLimit::ResultBytes => {
+                format!("more than {} bytes of results", ctx.max_result_bytes)
+            }
+        };
+        (
+            OutputStatus::Error,
+            Some(format!("Container output limit exceeded: {what}")),
+            RunOutcome::OutputLimitExceeded,
+        )
+    } else if st.timed_out {
         if st.had_output {
             tracing::info!(group = %ctx.group_name, container = %ctx.name, duration_ms = duration.as_millis() as u64, ?code, "Container timed out after output (idle cleanup)");
             (OutputStatus::Success, None, RunOutcome::TimedOut)
@@ -1231,10 +1432,14 @@ async fn run_loop<H: OutputHandler>(
             "signal": exit_info.and_then(|i| i.signal),
             "durationMs": duration.as_millis() as u64,
             "timedOut": st.timed_out,
+            "runTimeCapReached": st.run_cap_reached,
             "stopRequested": st.stop_requested,
             "outputs": st.outputs,
             "malformedFrames": st.malformed,
             "oversizeFrames": st.oversize,
+            "resultBytes": st.result_bytes,
+            "limitExceeded": st.limit.map(OutputLimit::as_str),
+            "discardedFrames": st.discarded,
             "stdoutBytes": stdout_summary.tail.total,
             "stderrBytes": stderr_summary.tail.total,
             "error": result.error.as_deref().map(|e| ctx.redactor.redact_text(e).into_owned()),
@@ -1272,8 +1477,15 @@ fn render_run_log(
         format!("Outcome: {:?}", result.outcome),
         format!("Had Streaming Output: {}", st.had_output),
         format!(
-            "Frames: {} (malformed {}, oversize {})",
-            st.outputs, st.malformed, st.oversize
+            "Frames: {} (malformed {}, oversize {}, discarded {})",
+            st.outputs, st.malformed, st.oversize, st.discarded
+        ),
+        format!(
+            "Result Bytes: {}{}",
+            st.result_bytes,
+            st.limit
+                .map(|l| format!(" (limit exceeded: {})", l.as_str()))
+                .unwrap_or_default()
         ),
         format!("Stdout Truncated: {}", stdout.tail.truncated()),
         format!("Stderr Truncated: {}", stderr.tail.truncated()),
@@ -1604,6 +1816,8 @@ mod tests {
         cfg.idle_timeout = Duration::from_secs(60);
         cfg.idle_grace = Duration::from_secs(0);
         cfg.container_timeout = Duration::from_secs(60);
+        // Keep the absolute cap (here 600 s) out of the way.
+        cfg.max_run_time_factor = 10;
         let runner = h.runner(cfg, spawner);
         let (seen, handler) = recording_handler();
         let started = runner
@@ -1633,6 +1847,260 @@ mod tests {
             .map(|o| o.result.clone().unwrap())
             .collect();
         assert_eq!(order, vec!["r0", "r1", "r2", "r3", "r4"]);
+    }
+
+    // --- MYTH-07: bounded output path ---
+
+    #[tokio::test(start_paused = true)]
+    async fn frames_extend_timeout_only_up_to_absolute_cap() {
+        let h = harness();
+        let (spawner, mut proc) = FakeSpawner::new();
+        let exit = proc.exit_sender();
+        h.exec.set_hook(move |_, args| {
+            if args.first().map(String::as_str) == Some("stop") {
+                let _ = exit.send(Some(ExitInfo::code(143)));
+            }
+        });
+        let mut cfg = h.config();
+        cfg.idle_timeout = Duration::from_secs(60);
+        cfg.idle_grace = Duration::ZERO;
+        cfg.container_timeout = Duration::from_secs(60);
+        assert_eq!(cfg.max_run_time_factor, DEFAULT_MAX_RUN_TIME_FACTOR);
+        assert_eq!(
+            cfg.max_run_time(&ContainerConfig::default()),
+            Duration::from_secs(240)
+        );
+        let runner = h.runner(cfg, spawner);
+        let (seen, handler) = recording_handler();
+        let t0 = Instant::now();
+        let started = runner
+            .start(RunSpec::new(test_group(), test_input()), handler)
+            .await
+            .unwrap();
+        // A frame every 50 s would keep a resetting timeout alive forever.
+        for i in 0..4 {
+            tokio::time::sleep(Duration::from_secs(50)).await;
+            proc.stdout
+                .write_all(&framed(&format!("r{i}"), "s"))
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await; // t = 230 s
+        assert!(h.exec.calls().is_empty(), "no stop before the cap");
+        tokio::time::sleep(Duration::from_secs(15)).await; // t = 245 s
+        assert_eq!(h.exec.subcommands(), vec!["stop"]);
+        drop(proc.stdout);
+        let result = started.wait().await;
+        assert!(t0.elapsed() < Duration::from_secs(260));
+        // Like any timeout after output: success, 4 frames delivered.
+        assert_eq!(result.outcome, RunOutcome::TimedOut);
+        assert!(result.is_success());
+        assert_eq!(seen.lock().unwrap().len(), 4);
+        let exit_ev = h
+            .audit
+            .snapshot()
+            .into_iter()
+            .find(|e| e.kind == "container.exit")
+            .unwrap();
+        assert_eq!(exit_ev.details["runTimeCapReached"], true);
+        let launch = h
+            .audit
+            .snapshot()
+            .into_iter()
+            .find(|e| e.kind == "container.launch")
+            .unwrap();
+        assert_eq!(launch.details["maxRunTimeMs"], 240_000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn frame_count_limit_stops_container_with_error() {
+        let h = harness();
+        let (spawner, mut proc) = FakeSpawner::new();
+        let exit = proc.exit_sender();
+        h.exec.set_hook(move |_, args| {
+            if args.first().map(String::as_str) == Some("stop") {
+                let _ = exit.send(Some(ExitInfo::code(143)));
+            }
+        });
+        let mut cfg = h.config();
+        cfg.max_frames_per_run = 3;
+        let runner = h.runner(cfg, spawner);
+        let (seen, handler) = recording_handler();
+        let started = runner
+            .start(RunSpec::new(test_group(), test_input()), handler)
+            .await
+            .unwrap();
+        for i in 0..6 {
+            proc.stdout
+                .write_all(&framed(&format!("r{i}"), "s"))
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(h.exec.subcommands(), vec!["stop"]);
+        drop(proc.stdout);
+        let result = started.wait().await;
+        assert_eq!(result.status, OutputStatus::Error);
+        assert_eq!(result.outcome, RunOutcome::OutputLimitExceeded);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Container output limit exceeded: more than 3 frames")
+        );
+        assert_eq!(result.outputs, 3);
+        let delivered: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|o| o.result.clone().unwrap())
+            .collect();
+        assert_eq!(delivered, vec!["r0", "r1", "r2"]);
+        let exit_ev = h
+            .audit
+            .snapshot()
+            .into_iter()
+            .find(|e| e.kind == "container.exit")
+            .unwrap();
+        assert_eq!(exit_ev.outcome, "error");
+        assert_eq!(exit_ev.details["limitExceeded"], "frames");
+        assert_eq!(exit_ev.details["discardedFrames"], 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn result_byte_budget_stops_container_with_error() {
+        let h = harness();
+        let (spawner, mut proc) = FakeSpawner::new();
+        let runner = {
+            let mut cfg = h.config();
+            cfg.max_result_bytes_per_run = 100;
+            h.runner(cfg, spawner.clone())
+        };
+        let (seen, handler) = recording_handler();
+        let started = runner
+            .start(RunSpec::new(test_group(), test_input()), handler)
+            .await
+            .unwrap();
+        // 60 + 60 > 100: the second frame breaks the budget.
+        proc.stdout
+            .write_all(&framed(&"a".repeat(60), "s"))
+            .await
+            .unwrap();
+        proc.stdout
+            .write_all(&framed(&"b".repeat(60), "s"))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // The container ignores the stop: escalation still ends the run.
+        drop(proc);
+        let result = started.wait().await;
+        assert_eq!(result.outcome, RunOutcome::OutputLimitExceeded);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Container output limit exceeded: more than 100 bytes of results")
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert_eq!(h.exec.subcommands(), vec!["stop", "kill"]);
+        assert_eq!(spawner.kill_count(), 1);
+        let exit_ev = h
+            .audit
+            .snapshot()
+            .into_iter()
+            .find(|e| e.kind == "container.exit")
+            .unwrap();
+        assert_eq!(exit_ev.details["limitExceeded"], "resultBytes");
+        assert_eq!(exit_ev.details["resultBytes"], 60);
+        assert_eq!(payload_bytes(&ContainerOutput::error("xyz")), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_handler_applies_backpressure_to_stdout() {
+        let h = harness();
+        let (spawner, proc) = FakeSpawner::new();
+        let mut cfg = h.config();
+        cfg.frame_queue_capacity = 2;
+        let runner = h.runner(cfg, spawner);
+        // The handler takes one permit per frame; none are available yet.
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let (g, s) = (gate.clone(), seen.clone());
+        let handler = move |o: ContainerOutput| {
+            let (g, s) = (g.clone(), s.clone());
+            async move {
+                g.acquire().await.unwrap().forget();
+                s.lock().unwrap().push(o.result.unwrap_or_default());
+            }
+        };
+        let started = runner
+            .start(RunSpec::new(test_group(), test_input()), handler)
+            .await
+            .unwrap();
+        // 100 frames of ~8 KiB (800 KiB) through a 64 KiB pipe.
+        let exit = proc.exit_sender();
+        let mut stdout = proc.stdout;
+        let writer = tokio::spawn(async move {
+            for i in 0..100 {
+                let body = format!("{i:03}-{}", "x".repeat(8 * 1024));
+                stdout.write_all(&framed(&body, "s")).await.unwrap();
+            }
+            stdout
+        });
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            !writer.is_finished(),
+            "the host must stop reading stdout while the handler is stuck"
+        );
+        assert!(seen.lock().unwrap().is_empty());
+        // Release the handler: everything flows, in order.
+        gate.add_permits(1000);
+        let stdout = writer.await.unwrap();
+        drop(stdout);
+        let _ = exit.send(Some(ExitInfo::code(0)));
+        let result = started.wait().await;
+        assert!(result.is_success(), "{:?}", result.error);
+        assert_eq!(result.outputs, 100);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 100);
+        assert!(
+            seen.iter()
+                .enumerate()
+                .all(|(i, r)| r.starts_with(&format!("{i:03}-")))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backlog_after_exit_is_delivered_while_it_drains() {
+        // The container wrote its last frames and exited; a slow handler
+        // must still get all of them (no abandon while making progress).
+        let h = harness();
+        let (spawner, mut proc) = FakeSpawner::new();
+        let mut cfg = h.config();
+        cfg.frame_queue_capacity = 1;
+        cfg.exit_drain = Duration::from_secs(5);
+        let runner = h.runner(cfg, spawner);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        let handler = move |o: ContainerOutput| {
+            let s = s.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                s.lock().unwrap().push(o.result.unwrap_or_default());
+            }
+        };
+        let started = runner
+            .start(RunSpec::new(test_group(), test_input()), handler)
+            .await
+            .unwrap();
+        for i in 0..6 {
+            proc.stdout
+                .write_all(&framed(&format!("r{i}"), "s"))
+                .await
+                .unwrap();
+        }
+        proc.exit(0);
+        drop(proc.stdout);
+        let result = started.wait().await;
+        assert!(result.is_success());
+        assert_eq!(result.outputs, 6);
+        assert_eq!(seen.lock().unwrap().len(), 6);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2046,6 +2514,100 @@ mod tests {
         assert_eq!(
             result.error.as_deref(),
             Some("Container exited with code 3: boom")
+        );
+    }
+
+    #[test]
+    fn network_setting_and_runner_defaults() {
+        assert_eq!(network_setting(None).as_deref(), Some(AGENT_NETWORK));
+        assert_eq!(network_setting(Some("")), None);
+        assert_eq!(network_setting(Some("  ")), None);
+        assert_eq!(network_setting(Some("default")), None);
+        assert_eq!(network_setting(Some("DEFAULT")), None);
+        assert_eq!(network_setting(Some(" lab ")).as_deref(), Some("lab"));
+
+        let h = harness();
+        let cfg = RunnerConfig::new("img", MountLayout::new(&h.root));
+        assert_eq!(cfg.default_network.as_deref(), Some("talon-agents"));
+        assert_eq!(cfg.frame_queue_capacity, DEFAULT_FRAME_QUEUE_CAPACITY);
+        assert_eq!(cfg.max_frames_per_run, 1000);
+        assert_eq!(cfg.max_result_bytes_per_run, 8 * 1024 * 1024);
+        assert_eq!(cfg.max_run_time_factor, 4);
+
+        // From the host configuration (.env values; the process env is
+        // only consulted when it sets the key, which tests never do).
+        if std::env::var_os(CONTAINER_NETWORK_ENV).is_none() {
+            let load = |content: &str| {
+                let env = talon_core::env::EnvFile::from_str_content(content);
+                RunnerConfig::from_talon_config(&TalonConfig::from_env(&h.root, env))
+            };
+            assert_eq!(load("").default_network.as_deref(), Some("talon-agents"));
+            assert_eq!(
+                load("TALON_CONTAINER_NETWORK=default").default_network,
+                None
+            );
+            assert_eq!(
+                load("TALON_CONTAINER_NETWORK=soc-net")
+                    .default_network
+                    .as_deref(),
+                Some("soc-net")
+            );
+            let cfg = load("");
+            assert!(
+                cfg.mount_options
+                    .protected_paths
+                    .contains(&h.root.join("store"))
+            );
+            assert!(
+                cfg.mount_options
+                    .protected_paths
+                    .iter()
+                    .any(|p| p.ends_with("mount-allowlist.json"))
+            );
+        }
+    }
+
+    #[test]
+    fn prepare_uses_default_network_and_group_override() {
+        let h = harness();
+        let runner = h.runner(h.config(), Arc::new(FailingSpawner));
+        let prepared = runner
+            .prepare(&RunSpec::new(test_group(), test_input()))
+            .unwrap();
+        assert_eq!(prepared.network.as_deref(), Some("talon-agents"));
+        let i = prepared.args.iter().position(|a| a == "--network").unwrap();
+        assert_eq!(prepared.args[i + 1], "talon-agents");
+        // host.docker.internal stays mapped on the custom network.
+        assert!(
+            prepared
+                .args
+                .contains(&"host.docker.internal:host-gateway".to_string())
+        );
+
+        let spec = RunSpec::new(test_group(), test_input()).with_config(ContainerConfig {
+            network: Some("lab-net".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            runner.prepare(&spec).unwrap().network.as_deref(),
+            Some("lab-net")
+        );
+
+        let mut cfg = h.config();
+        cfg.default_network = None;
+        let runner = h.runner(cfg, Arc::new(FailingSpawner));
+        let prepared = runner
+            .prepare(&RunSpec::new(test_group(), test_input()))
+            .unwrap();
+        assert!(!prepared.args.contains(&"--network".to_string()));
+
+        let mut cfg = h.config();
+        cfg.default_network = Some("host".into());
+        let runner = h.runner(cfg, Arc::new(FailingSpawner));
+        assert!(
+            runner
+                .prepare(&RunSpec::new(test_group(), test_input()))
+                .is_err()
         );
     }
 
