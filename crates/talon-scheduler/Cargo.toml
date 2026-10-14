@@ -19,6 +19,10 @@ talon-db = { workspace = true }
 tokio-util = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+# Descriptor-relative IPC input writes (openat/mkdirat/renameat with
+# O_NOFOLLOW) so a container cannot redirect host writes into another lane's
+# `input/` by swapping path components (MYTH-02). Safe API, no `unsafe`.
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
