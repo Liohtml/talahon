@@ -48,7 +48,9 @@ pub fn load_provider_env_defaults(env: &EnvFile) -> ContainerConfig {
                 temperature: env
                     .get("TALON_VLLM_TEMPERATURE")
                     .and_then(|v| v.trim().parse().ok()),
-                top_p: env.get("TALON_VLLM_TOP_P").and_then(|v| v.trim().parse().ok()),
+                top_p: env
+                    .get("TALON_VLLM_TOP_P")
+                    .and_then(|v| v.trim().parse().ok()),
                 enable_thinking: env
                     .get("TALON_VLLM_ENABLE_THINKING")
                     .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on")),

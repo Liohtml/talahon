@@ -51,10 +51,9 @@ fn has_offset_suffix(v: &str) -> bool {
 }
 
 fn parse_interval(value: &str) -> Result<u64> {
-    let ms: u64 = value
-        .trim()
-        .parse()
-        .map_err(|_| Error::invalid(format!("invalid interval {value:?}: expected milliseconds")))?;
+    let ms: u64 = value.trim().parse().map_err(|_| {
+        Error::invalid(format!("invalid interval {value:?}: expected milliseconds"))
+    })?;
     if ms < MIN_INTERVAL_MS {
         return Err(Error::invalid(format!(
             "interval {ms}ms is below the minimum of {MIN_INTERVAL_MS}ms"

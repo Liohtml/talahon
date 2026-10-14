@@ -11,9 +11,8 @@ use regex::Regex;
 
 use crate::{Error, Result};
 
-static GROUP_FOLDER_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$").expect("static regex")
-});
+static GROUP_FOLDER_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$").expect("static regex"));
 
 const RESERVED_FOLDERS: &[&str] = &["global", "errors"];
 
@@ -130,7 +129,10 @@ mod tests {
     #[test]
     fn ipc_and_session_paths() {
         let data = Path::new("/d");
-        assert_eq!(group_ipc_path(data, "g").unwrap(), PathBuf::from("/d/ipc/g"));
+        assert_eq!(
+            group_ipc_path(data, "g").unwrap(),
+            PathBuf::from("/d/ipc/g")
+        );
         assert_eq!(
             group_sessions_path(data, "g").unwrap(),
             PathBuf::from("/d/sessions/g")

@@ -209,7 +209,11 @@ pub enum IpcOutbound {
         #[serde(rename = "chatJid")]
         chat_jid: String,
         text: String,
-        #[serde(rename = "groupFolder", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "groupFolder",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         group_folder: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<String>,
@@ -284,9 +288,17 @@ pub enum IpcTask {
         name: String,
         folder: String,
         trigger: String,
-        #[serde(rename = "requiresTrigger", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "requiresTrigger",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         requires_trigger: Option<bool>,
-        #[serde(rename = "containerConfig", default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "containerConfig",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
         container_config: Option<ContainerConfig>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<String>,

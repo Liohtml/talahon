@@ -73,7 +73,9 @@ impl TalonConfig {
 
     pub fn from_env(project_root: &Path, env: EnvFile) -> Self {
         let assistant_name = env.get("ASSISTANT_NAME").unwrap_or_else(|| "Andy".into());
-        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| "/root".into());
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| "/root".into());
         let talon_cfg = home.join(".config").join("talon");
         let legacy_cfg = home.join(".config").join("nanoclaw");
         let config_dir = if !talon_cfg.exists() && legacy_cfg.exists() {
@@ -82,16 +84,15 @@ impl TalonConfig {
             talon_cfg
         };
 
-        let tz_name = [
-            env.get("TZ"),
-            Some("UTC".to_string()),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|tz| is_valid_timezone(tz))
-        .unwrap_or_else(|| "UTC".into());
+        let tz_name = [env.get("TZ"), Some("UTC".to_string())]
+            .into_iter()
+            .flatten()
+            .find(|tz| is_valid_timezone(tz))
+            .unwrap_or_else(|| "UTC".into());
 
-        let ms = |key: &str, default: u64, min: u64| Duration::from_millis(env.get_u64(key, default, min));
+        let ms = |key: &str, default: u64, min: u64| {
+            Duration::from_millis(env.get_u64(key, default, min))
+        };
 
         Self {
             default_trigger: default_trigger(&assistant_name),
@@ -103,11 +104,18 @@ impl TalonConfig {
             mount_allowlist_path: config_dir.join("mount-allowlist.json"),
             sender_allowlist_path: config_dir.join("sender-allowlist.json"),
             config_dir,
-            container_image: env.get("CONTAINER_IMAGE").unwrap_or_else(|| "talon-agent:latest".into()),
-            container_runtime: env.get("CONTAINER_RUNTIME").unwrap_or_else(|| "docker".into()),
+            container_image: env
+                .get("CONTAINER_IMAGE")
+                .unwrap_or_else(|| "talon-agent:latest".into()),
+            container_runtime: env
+                .get("CONTAINER_RUNTIME")
+                .unwrap_or_else(|| "docker".into()),
             container_timeout: ms("CONTAINER_TIMEOUT", 1_800_000, 10_000),
-            container_max_output_bytes: env.get_u64("CONTAINER_MAX_OUTPUT_SIZE", 10 * 1024 * 1024, 64 * 1024)
-                as usize,
+            container_max_output_bytes: env.get_u64(
+                "CONTAINER_MAX_OUTPUT_SIZE",
+                10 * 1024 * 1024,
+                64 * 1024,
+            ) as usize,
             idle_timeout: ms("IDLE_TIMEOUT", 1_800_000, 1_000),
             max_concurrent_containers: env.get_u64("MAX_CONCURRENT_CONTAINERS", 5, 1) as usize,
             max_messages_per_prompt: env.get_u64("MAX_MESSAGES_PER_PROMPT", 10, 1) as usize,
@@ -117,8 +125,12 @@ impl TalonConfig {
             timezone: parse_tz(&tz_name),
             timezone_name: tz_name,
             llm_gateway_port: env.get_u64("TALON_LLM_GATEWAY_PORT", 3001, 1) as u16,
-            llm_gateway_bind: env.get("TALON_LLM_GATEWAY_BIND").unwrap_or_else(|| "127.0.0.1".into()),
-            onecli_url: env.get("ONECLI_URL").unwrap_or_else(|| "http://localhost:10254".into()),
+            llm_gateway_bind: env
+                .get("TALON_LLM_GATEWAY_BIND")
+                .unwrap_or_else(|| "127.0.0.1".into()),
+            onecli_url: env
+                .get("ONECLI_URL")
+                .unwrap_or_else(|| "http://localhost:10254".into()),
             provider_defaults: load_provider_env_defaults(&env),
             assistant_name,
             env,
