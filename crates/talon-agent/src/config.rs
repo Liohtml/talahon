@@ -30,6 +30,13 @@ use talon_core::protocol::container_paths;
 
 use crate::wire::DEFAULT_MAX_INPUT_BYTES;
 
+/// Name of the lane-private reports directory under the state dir
+/// ([`AgentPaths::reports`]).
+pub const REPORTS_DIR: &str = "reports";
+/// Name of the lane-private evaluation directory under the state dir
+/// ([`AgentPaths::evals`]).
+pub const EVALS_DIR: &str = "evals";
+
 /// Where things live inside the container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentPaths {
@@ -43,8 +50,9 @@ pub struct AgentPaths {
     pub extra: PathBuf,
     /// IPC namespace root (`input/`, `messages/`, `tasks/`, snapshots).
     pub ipc: PathBuf,
-    /// Per-lane persistent agent state (`sessions/` and `conversations/`
-    /// live here).
+    /// Per-lane persistent agent state (`sessions/`, `conversations/`,
+    /// `reports/` and `evals/` live here). Host side:
+    /// `<data_dir>/sessions/<session_key>/`.
     pub state: PathBuf,
     /// The group's MCP server definitions.
     pub mcp_config: PathBuf,
@@ -95,6 +103,21 @@ impl AgentPaths {
     /// folder, which every lane on the folder shares), mode 0700.
     pub fn conversations(&self) -> PathBuf {
         self.state.join("conversations")
+    }
+
+    /// `<state>/reports` — triage reports written by `submit_triage_report`
+    /// (`<id>.json` + `<id>.md`). Lane-private (0700, never a symlink), so
+    /// no other lane sharing the group folder can forge or overwrite a
+    /// verdict. The host reads the verdict of job `<id>` from
+    /// `<data_dir>/sessions/<session_key>/reports/<id>.json`.
+    pub fn reports(&self) -> PathBuf {
+        self.state.join(REPORTS_DIR)
+    }
+
+    /// `<state>/evals` — lane-private evaluation records written by the
+    /// agent (0700; writable for the file tools and `bash`).
+    pub fn evals(&self) -> PathBuf {
+        self.state.join(EVALS_DIR)
     }
 
     /// `<group>/MEMORY.md` — the agent-writable group notes (loaded fenced
@@ -273,6 +296,11 @@ mod tests {
             PathBuf::from("/home/agent/.talon/conversations")
         );
         assert_eq!(p.memory(), PathBuf::from("/workspace/group/MEMORY.md"));
+        // Reports and evals are lane-private state (N-2): host side
+        // `<data_dir>/sessions/<session_key>/{reports,evals}`.
+        assert_eq!(p.reports(), PathBuf::from("/home/agent/.talon/reports"));
+        assert_eq!(p.evals(), PathBuf::from("/home/agent/.talon/evals"));
+        assert!(!p.reports().starts_with(&p.group));
         assert_eq!(p.mcp_config, PathBuf::from("/workspace/group/.mcp.json"));
     }
 

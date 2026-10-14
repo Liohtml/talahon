@@ -12,8 +12,17 @@
 //!    MCP tools (sockets from the supervisor, or spawned in dev mode);
 //! 7. system prompt (trusted, read-only `CLAUDE.md`), the first user
 //!    message (run notes, fenced `MEMORY.md`, prompt), then the [`Agent`]
-//!    session loop until `_close`. Compaction archives go to the lane-private
-//!    `<state>/conversations/`.
+//!    session loop until `_close`.
+//!
+//! Lane-private outputs live in the per-lane state mount (`<state>` =
+//! `/home/agent/.talon` = host `<data_dir>/sessions/<session_key>/`), never
+//! in the group folder that every lane on it shares (N-2): compaction
+//! archives in `<state>/conversations/`, triage reports in
+//! `<state>/reports/<id>.json` + `.md` (written by `submit_triage_report`,
+//! also on the guided-decoding fallback; the host reads the verdict of job
+//! `<id>` from `<data_dir>/sessions/<session_key>/reports/<id>.json`), and
+//! evaluation records in `<state>/evals/`. `reports/` and `evals/` are
+//! created 0700 at start ([`prepare_lane_dirs`]); a symlink is refused.
 //!
 //! Every error ends with one `ContainerOutput::error` frame and exit code 1.
 
@@ -35,7 +44,7 @@ use crate::ipc::IpcInbox;
 use crate::model::ModelSettings;
 use crate::prompt::{self, SUBMIT_TRIAGE_REPORT, SystemPromptInputs};
 use crate::session::SessionStore;
-use crate::tools::{FencedTool, ToolRegistry};
+use crate::tools::{DescribedTool, FencedTool, ToolRegistry};
 use crate::wire::{OutputSink, StdoutSink, parse_input, read_capped};
 use crate::{logging, mcp, script};
 
@@ -155,6 +164,7 @@ async fn execute_inner(
     let timezone = prompt::effective_timezone(input);
     let inbox = IpcInbox::new(paths.ipc_input());
     inbox.prepare();
+    prepare_lane_dirs(paths);
 
     let (store, history) = open_session(input, paths)?;
     *session_out = Some(store.clone());
@@ -231,7 +241,7 @@ async fn execute_inner(
 
     // Tools: built-in first, then intel, then MCP (which may not shadow them).
     let mut tools: Vec<Arc<dyn Tool>> = builtin_tools(&builtin_options(input, &timezone));
-    tools.extend(intel_tools());
+    tools.extend(intel_tools(&paths.reports()));
     let reserved: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
     let mcp_config = mcp::load_mcp_config(&paths.mcp_config);
     let mcp = mcp::start_mcp(mcp_config, config.mcp_socket_dir.as_deref(), reserved).await;
@@ -270,7 +280,10 @@ async fn execute_inner(
     if investigation {
         first_prompt.push_str("\n\n");
         first_prompt.push_str(&prompt::investigation_note(
-            registry.contains(SUBMIT_TRIAGE_REPORT),
+            registry
+                .contains(SUBMIT_TRIAGE_REPORT)
+                .then(|| paths.reports())
+                .as_deref(),
         ));
     }
 
@@ -362,20 +375,59 @@ fn builtin_options(input: &ContainerInput, timezone: &str) -> BuiltinOptions {
     .with_timezone_name(timezone)
 }
 
+/// Create the lane-private output directories `<state>/reports` and
+/// `<state>/evals` (0700; an existing looser directory is tightened). A
+/// symlink or non-directory is refused and logged; `submit_triage_report`
+/// then refuses to write there as well (it never follows a symlinked
+/// reports directory). Never fatal: the run goes on without them.
+pub fn prepare_lane_dirs(paths: &AgentPaths) {
+    for dir in [paths.reports(), paths.evals()] {
+        if let Err(e) = crate::session::secure_private_dir(&dir) {
+            tracing::warn!(dir = %dir.display(), error = %e, "cannot prepare a lane-private directory");
+        }
+    }
+}
+
 /// The intel tools, each fenced as untrusted output except
-/// `submit_triage_report` (which returns the model's own report).
-pub fn intel_tools() -> Vec<Arc<dyn Tool>> {
-    talon_intel::intel_tools(talon_intel::IntelToolOptions::default())
+/// `submit_triage_report` (which returns the model's own report). Reports
+/// are written to `reports_dir` (the lane-private `<state>/reports`, see
+/// [`AgentPaths::reports`]) instead of `reports/` in the shared group
+/// folder, and the tool's description says so.
+pub fn intel_tools(reports_dir: &Path) -> Vec<Arc<dyn Tool>> {
+    let options = talon_intel::IntelToolOptions {
+        reports_dir: Some(reports_dir.to_path_buf()),
+        ..talon_intel::IntelToolOptions::default()
+    };
+    talon_intel::intel_tools(options)
         .into_iter()
         .map(|t| {
-            let name = t.spec().name;
-            if name == SUBMIT_TRIAGE_REPORT {
-                t
+            let spec = t.spec();
+            if spec.name == SUBMIT_TRIAGE_REPORT {
+                let description = submit_report_description(&spec.description, reports_dir);
+                Arc::new(DescribedTool::new(t, description)) as Arc<dyn Tool>
             } else {
-                Arc::new(FencedTool::new(t, format!("intel:{name}"))) as Arc<dyn Tool>
+                Arc::new(FencedTool::new(t, format!("intel:{}", spec.name))) as Arc<dyn Tool>
             }
         })
         .collect()
+}
+
+/// Where `talon-intel` describes the default (group folder) location.
+const SHARED_REPORTS_PHRASE: &str =
+    "saved as reports/<id>.json and reports/<id>.md in the group folder";
+
+/// `submit_triage_report`'s description with the configured, lane-private
+/// reports directory instead of the group folder.
+fn submit_report_description(original: &str, reports_dir: &Path) -> String {
+    let private = format!(
+        "saved as {dir}/<id>.json and {dir}/<id>.md (this chat's private reports directory; read them back with read_file)",
+        dir = reports_dir.display()
+    );
+    if original.contains(SHARED_REPORTS_PHRASE) {
+        original.replace(SHARED_REPORTS_PHRASE, &private)
+    } else {
+        format!("{} Reports are {private}.", original.trim_end())
+    }
 }
 
 struct CompactCommand<'a> {
@@ -738,9 +790,246 @@ mod tests {
 
     #[test]
     fn intel_tools_are_fenced_except_submit() {
-        let tools = intel_tools();
+        let reports = AgentPaths::default().reports();
+        let tools = intel_tools(&reports);
         assert!(tools.len() >= 7);
-        assert!(tools.iter().any(|t| t.spec().name == SUBMIT_TRIAGE_REPORT));
+        let submit = tools
+            .iter()
+            .find(|t| t.spec().name == SUBMIT_TRIAGE_REPORT)
+            .unwrap();
+        // The description names the lane-private directory, not the group
+        // folder (N-2), and is stable (prefix caching).
+        let description = submit.spec().description;
+        assert!(
+            description.contains("/home/agent/.talon/reports/<id>.json"),
+            "{description}"
+        );
+        assert!(!description.contains("in the group folder"));
+        let again: Vec<String> = intel_tools(&reports)
+            .iter()
+            .map(|t| t.spec().description)
+            .collect();
+        assert!(again.contains(&description));
+        assert_eq!(
+            submit_report_description("Submit it.", Path::new("/r")),
+            "Submit it. Reports are saved as /r/<id>.json and /r/<id>.md (this chat's private reports directory; read them back with read_file)."
+        );
+    }
+
+    fn report_value(alert_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "alert_id": alert_id,
+            "verdict": "true_positive",
+            "confidence": 80,
+            "severity": "High",
+            "summary": "Macro document spawned PowerShell that downloaded a payload.",
+            "iocs": [{"value": "185.220.101[.]4", "type": "ip", "verdict": "malicious", "details": "Tor exit"}],
+            "mitre": [{"technique_id": "T1059.001", "name": "PowerShell", "tactic": "Execution", "rationale": "encoded command"}],
+            "timeline": [{"timestamp": "2024-05-01T12:00:00Z", "event": "WINWORD spawned powershell"}],
+            "evidence": [{"observation": "parent WINWORD.EXE", "source": "sysmon 1", "assessment": "supports_malicious"}],
+            "recommended_actions": [{"action": "Isolate the host", "priority": "immediate", "rationale": "active C2"}]
+        })
+    }
+
+    fn investigation_input() -> ContainerInput {
+        let mut i = input("investigate alert 48213 (job job-42)");
+        i.group_folder = "copilot".into();
+        i.chat_jid = "http:copilot:analyst-1".into();
+        i.ephemeral = true;
+        i
+    }
+
+    fn mode(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    fn submit_call(report_id: Option<&str>) -> Result<ChatResponse, talon_llm::LlmError> {
+        let mut args = serde_json::json!({ "report": report_value("48213") });
+        if let Some(id) = report_id {
+            args["report_id"] = serde_json::json!(id);
+        }
+        Ok(ChatResponse::from_message(
+            ChatMessage::assistant_tool_calls(
+                None,
+                vec![talon_llm::ToolCall::new(
+                    "c1",
+                    SUBMIT_TRIAGE_REPORT,
+                    args.to_string(),
+                )],
+            ),
+        ))
+    }
+
+    const ANSWER: &str =
+        "True positive: WINWORD spawned PowerShell that fetched a payload from 185.220.101.4.";
+
+    #[tokio::test]
+    async fn submitted_reports_go_to_the_lane_private_state_dir() {
+        let env = env();
+        let backend = Arc::new(ScriptedBackend::new([
+            submit_call(Some("job-42")),
+            text(ANSWER),
+            text(ANSWER),
+        ]));
+        close_soon(&env);
+        run(&env, investigation_input(), backend.clone())
+            .await
+            .unwrap();
+        let paths = &env.config.paths;
+        let reports = paths.reports();
+        assert_eq!(reports, paths.state.join("reports"));
+        // Contract for the host (G7): `<state>/reports/<job id>.json` + `.md`.
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(reports.join("job-42.json")).unwrap()).unwrap();
+        assert_eq!(saved["verdict"], "true_positive");
+        assert!(reports.join("job-42.md").is_file());
+        assert_eq!(mode(&reports), 0o700);
+        // Never in the group folder every lane on `copilot` shares.
+        assert!(!paths.group.join("reports").exists());
+        // The model was told where the report went.
+        let requests = backend.requests();
+        let user = requests[0].messages[1].text();
+        assert!(
+            user.contains(&format!("`{}/<id>.json`", reports.display())),
+            "{user}"
+        );
+        let tool_result = requests[1]
+            .messages
+            .iter()
+            .find(|m| m.role == talon_llm::Role::Tool)
+            .unwrap()
+            .text();
+        assert!(
+            tool_result.contains(&reports.join("job-42.json").display().to_string()),
+            "{tool_result}"
+        );
+        assert_eq!(env.sink.frames()[0].result.as_deref(), Some(ANSWER));
+    }
+
+    #[tokio::test]
+    async fn guided_fallback_report_goes_to_the_lane_private_state_dir() {
+        let env = env();
+        // No submit call (and no tool call, so no self-check): the answer,
+        // then the guided-decoding report.
+        let backend = Arc::new(ScriptedBackend::new([
+            text(ANSWER),
+            text(&report_value("48213").to_string()),
+        ]));
+        close_soon(&env);
+        run(&env, investigation_input(), backend.clone())
+            .await
+            .unwrap();
+        let requests = backend.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].response_format.is_some());
+        let reports = env.config.paths.reports();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(reports.join("48213.json")).unwrap()).unwrap();
+        assert_eq!(saved["alert_id"], "48213");
+        assert!(reports.join("48213.md").is_file());
+        assert_eq!(mode(&reports), 0o700);
+        assert!(!env.config.paths.group.join("reports").exists());
+    }
+
+    #[tokio::test]
+    async fn symlinked_reports_dir_is_refused() {
+        let env = env();
+        let paths = &env.config.paths;
+        // A planted link into the shared group folder must not redirect the
+        // verdict there.
+        let shared = paths.group.join("reports");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&paths.state).unwrap();
+        std::os::unix::fs::symlink(&shared, paths.reports()).unwrap();
+        let backend = Arc::new(ScriptedBackend::new([
+            submit_call(Some("job-42")),
+            text(ANSWER),
+            text(ANSWER),
+            text(&report_value("48213").to_string()),
+        ]));
+        close_soon(&env);
+        run(&env, investigation_input(), backend.clone())
+            .await
+            .unwrap();
+        assert!(std::fs::read_dir(&shared).unwrap().next().is_none());
+        assert!(
+            std::fs::symlink_metadata(paths.reports())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let tool_result = backend.requests()[1]
+            .messages
+            .iter()
+            .find(|m| m.role == talon_llm::Role::Tool)
+            .unwrap()
+            .text()
+            .to_string();
+        assert!(
+            tool_result.contains("not a regular directory"),
+            "{tool_result}"
+        );
+        // The evals directory is prepared independently.
+        assert_eq!(mode(&paths.evals()), 0o700);
+    }
+
+    #[tokio::test]
+    async fn evals_dir_is_private_and_writable_reports_read_only() {
+        let env = env();
+        let paths = &env.config.paths;
+        std::fs::create_dir_all(&paths.state).unwrap();
+        // A pre-existing, looser evals directory is tightened.
+        std::fs::create_dir(paths.evals()).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(paths.evals(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        prepare_lane_dirs(paths);
+        assert_eq!(mode(&paths.evals()), 0o700);
+        assert_eq!(mode(&paths.reports()), 0o700);
+        std::fs::write(paths.reports().join("job-1.json"), "{}").unwrap();
+
+        let ctx = tool_context(&investigation_input(), paths, CancellationToken::new());
+        let tools = builtin_tools(&BuiltinOptions::default());
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t.spec().name == name)
+                .cloned()
+                .unwrap()
+        };
+        let eval_file = paths.evals().join("48213-job-1.json");
+        let out = tool("write_file")
+            .call(
+                serde_json::json!({"path": eval_file, "content": "{\"score\": 1}"}),
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(&eval_file).unwrap(),
+            "{\"score\": 1}"
+        );
+        let out = tool("read_file")
+            .call(serde_json::json!({"path": eval_file}), &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        // Reports: readable, but only submit_triage_report writes them.
+        let report = paths.reports().join("job-1.json");
+        let out = tool("read_file")
+            .call(serde_json::json!({"path": report}), &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        let out = tool("write_file")
+            .call(
+                serde_json::json!({"path": report, "content": "forged"}),
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error);
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "{}");
     }
 
     #[tokio::test]

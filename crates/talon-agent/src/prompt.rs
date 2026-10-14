@@ -258,13 +258,21 @@ fn workspace_section(inputs: &SystemPromptInputs) -> String {
     let p = &inputs.paths;
     let mut s = String::from("## Workspace\n");
     s.push_str(&format!(
-        "- `{}`: your working directory for this group (writable); `reports/` holds triage reports. Its `{INSTRUCTIONS_FILE}` holds the group instructions above and is read-only. Keep notes that should persist across runs in `{MEMORY_FILE}` there (at most {} KiB are loaded): it is shown to you at the start of every run as untrusted notes and is shared by every chat of this group, so never store secrets, credentials or one user's private data in it.\n",
+        "- `{}`: your working directory for this group (writable). Its `{INSTRUCTIONS_FILE}` holds the group instructions above and is read-only. Keep notes that should persist across runs in `{MEMORY_FILE}` there (at most {} KiB are loaded): it is shown to you at the start of every run as untrusted notes and is shared by every chat of this group, so never store secrets, credentials or one user's private data in it.\n",
         p.group.display(),
         MAX_MEMORY_BYTES / 1024
     ));
     s.push_str(&format!(
         "- `{}`: archived past conversations of this chat (private to it; read-only for the file tools).\n",
         p.conversations().display()
+    ));
+    s.push_str(&format!(
+        "- `{}`: triage reports of this chat (`<id>.json` + `<id>.md`, private to it). Only `{SUBMIT_TRIAGE_REPORT}` writes them; read them with `read_file`.\n",
+        p.reports().display()
+    ));
+    s.push_str(&format!(
+        "- `{}`: evaluation records of this chat (private to it; writable).\n",
+        p.evals().display()
     ));
     if p.global.is_dir() {
         s.push_str(&format!(
@@ -354,14 +362,16 @@ pub fn is_investigation(input: &ContainerInput) -> bool {
     input.group_folder.starts_with("copilot") && (input.is_scheduled_task || input.ephemeral)
 }
 
-/// Turn note for investigations.
-pub fn investigation_note(has_submit_tool: bool) -> String {
+/// Turn note for investigations. `reports_dir` is where
+/// `submit_triage_report` saves reports (`None`: the tool is unavailable).
+pub fn investigation_note(reports_dir: Option<&Path>) -> String {
     let mut s = String::from(
         "[Investigation mode] This is an automated SOC investigation. Gather evidence with tools before concluding. Every claim in your final answer must be backed by tool evidence; label anything unverified as unverified.",
     );
-    if has_submit_tool {
+    if let Some(dir) = reports_dir {
         s.push_str(&format!(
-            " When the investigation is complete, call `{SUBMIT_TRIAGE_REPORT}` exactly once with your structured verdict, then write your final answer."
+            " When the investigation is complete, call `{SUBMIT_TRIAGE_REPORT}` exactly once with your structured verdict, then write your final answer. It saves the report as `{dir}/<id>.json` and `{dir}/<id>.md` (private to this chat; not in the group folder).",
+            dir = dir.display()
         ));
     }
     s
@@ -392,19 +402,22 @@ pub fn loop_nudge(tool: &str, count: u32) -> String {
     )
 }
 
-/// Paths the file tools may write (group, extra mounts, `/tmp`).
+/// Paths the file tools may write (group, extra mounts, `/tmp`, and this
+/// lane's private `<state>/evals`).
 pub fn writable_roots(paths: &AgentPaths) -> Vec<PathBuf> {
     vec![
         paths.group.clone(),
         paths.extra.clone(),
         PathBuf::from("/tmp"),
+        paths.evals(),
     ]
 }
 
 /// Paths the file tools may only read (global memory, this lane's private
-/// conversation archives, and the project for main).
+/// conversation archives and triage reports, and the project for main).
+/// Reports are written by `submit_triage_report` only.
 pub fn read_only_roots(paths: &AgentPaths, is_main: bool) -> Vec<PathBuf> {
-    let mut v = vec![paths.global.clone(), paths.conversations()];
+    let mut v = vec![paths.global.clone(), paths.conversations(), paths.reports()];
     if is_main {
         v.push(paths.project.clone());
     }
@@ -459,6 +472,17 @@ mod tests {
             paths.conversations().display()
         )));
         assert!(!a.contains("`conversations/` holds"));
+        // Reports and evals are lane-private state, not the shared group
+        // folder (N-2).
+        assert!(a.contains(&format!(
+            "`{}`: triage reports of this chat (`<id>.json` + `<id>.md`, private to it). Only `submit_triage_report` writes them",
+            paths.reports().display()
+        )));
+        assert!(a.contains(&format!(
+            "`{}`: evaluation records of this chat (private to it; writable)",
+            paths.evals().display()
+        )));
+        assert!(!a.contains("`reports/` holds"));
     }
 
     #[test]
@@ -603,8 +627,11 @@ mod tests {
         assert!(is_investigation(&input));
         input.group_folder = "main".into();
         assert!(!is_investigation(&input));
-        assert!(investigation_note(true).contains(SUBMIT_TRIAGE_REPORT));
-        assert!(!investigation_note(false).contains(SUBMIT_TRIAGE_REPORT));
+        let reports = AgentPaths::default().reports();
+        let note = investigation_note(Some(&reports));
+        assert!(note.contains(SUBMIT_TRIAGE_REPORT));
+        assert!(note.contains("`/home/agent/.talon/reports/<id>.json`"));
+        assert!(!investigation_note(None).contains(SUBMIT_TRIAGE_REPORT));
         input.timezone = Some("Europe/Berlin".into());
         assert_eq!(effective_timezone(&input), "Europe/Berlin");
     }
@@ -625,15 +652,26 @@ mod tests {
         let p = AgentPaths::default();
         assert_eq!(
             read_only_roots(&p, false),
-            vec![p.global.clone(), p.conversations()]
+            vec![p.global.clone(), p.conversations(), p.reports()]
         );
-        assert_eq!(read_only_roots(&p, true).len(), 3);
+        assert_eq!(read_only_roots(&p, true).len(), 4);
         assert!(writable_roots(&p).contains(&PathBuf::from("/tmp")));
-        // Archives are lane-private state, never in a writable root.
+        // Archives and reports are lane-private state, never in a writable
+        // root; evals are writable lane-private state.
+        for private in [p.conversations(), p.reports()] {
+            assert!(!writable_roots(&p).iter().any(|r| private.starts_with(r)));
+        }
+        assert!(writable_roots(&p).contains(&p.evals()));
         assert!(
-            !writable_roots(&p)
+            !read_only_roots(&p, true)
                 .iter()
-                .any(|r| p.conversations().starts_with(r))
+                .any(|r| p.evals().starts_with(r))
         );
+        // The sessions (transcripts) stay out of reach of the file tools.
+        let all: Vec<PathBuf> = writable_roots(&p)
+            .into_iter()
+            .chain(read_only_roots(&p, true))
+            .collect();
+        assert!(!all.iter().any(|r| p.sessions_dir().starts_with(r)));
     }
 }

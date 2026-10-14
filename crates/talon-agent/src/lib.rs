@@ -32,7 +32,8 @@
 //!   archives under `<state>/conversations/`
 //! - [`script`]   — scheduled-task pre-flight scripts
 //! - [`agent`]    — the turn / session loop
-//! - [`run`]      — `talon-agent run`
+//! - [`run`]      — `talon-agent run` (lane-private triage reports under
+//!   `<state>/reports/`, eval records under `<state>/evals/`)
 //! - [`supervise`]— `talon-agent supervise`
 //! - [`mountinfo`]— read-only mount check for privileged MCP commands
 //! - [`error`]    — [`AgentError`]

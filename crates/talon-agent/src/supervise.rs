@@ -12,7 +12,9 @@
 //!    `check_privileged_launch` under [`ALLOWED_MCP_ROOTS`] **and** the
 //!    canonical command and its directory must be on a read-only mount of
 //!    this container (`/proc/self/mountinfo`, see [`crate::mountinfo`] and
-//!    [`CommandPolicy`]) — else the server is refused; it runs as that
+//!    [`CommandPolicy`]) and outside [`DENIED_MCP_DIRS`] (read-only here,
+//!    but agent-writable through other mounts) — else the server is
+//!    refused; it runs as that
 //!    account with the minimal environment,
 //!    `HOME=/run/talon/home/<server>` (0700, owned by the account),
 //!    `PYTHONSAFEPATH=1`, `PYTHONDONTWRITEBYTECODE=1`, in its own process
@@ -75,6 +77,17 @@ pub const ALLOWED_MCP_ROOTS: [&str; 6] = [
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
+];
+/// Directories inside [`ALLOWED_MCP_ROOTS`] a privileged MCP command (or
+/// its directory) may never be in (N-10). Main's `/workspace/project` view
+/// is read-only, but these parts of it are the host's `groups/`, `data/`
+/// and `store/`, which agents write through other mounts (the group
+/// folder, the IPC namespace, the session state, ...): read-only is not
+/// immutable there.
+pub const DENIED_MCP_DIRS: [&str; 3] = [
+    "/workspace/project/groups",
+    "/workspace/project/data",
+    "/workspace/project/store",
 ];
 /// Non-secret variables passed from the container environment to the agent.
 pub const PASSTHROUGH_ENV: &[&str] = &[
@@ -290,18 +303,35 @@ pub struct LaunchPlan {
 pub struct CommandPolicy {
     /// The command must resolve under one of these ([`ALLOWED_MCP_ROOTS`]).
     pub roots: Vec<PathBuf>,
+    /// The canonical command and its directory must not be under any of
+    /// these ([`DENIED_MCP_DIRS`]), even on a read-only mount.
+    pub denied: Vec<PathBuf>,
     /// The container's mount table: the canonical command and its
     /// directory must be on read-only mounts.
     pub mounts: MountTable,
 }
 
 impl CommandPolicy {
-    /// [`ALLOWED_MCP_ROOTS`] with `mounts`.
+    /// [`ALLOWED_MCP_ROOTS`] minus [`DENIED_MCP_DIRS`], with `mounts`.
     pub fn container(mounts: MountTable) -> Self {
         Self {
             roots: ALLOWED_MCP_ROOTS.iter().map(PathBuf::from).collect(),
+            denied: DENIED_MCP_DIRS.iter().map(PathBuf::from).collect(),
             mounts,
         }
+    }
+
+    /// The denied directory `path` (absolute, canonical) lies in, if any.
+    /// Each entry is compared as configured and canonicalized (when it
+    /// exists), component-wise (`/workspace/project/groupsX` is not under
+    /// `/workspace/project/groups`).
+    fn denied_dir_of(&self, path: &Path) -> Option<&Path> {
+        self.denied
+            .iter()
+            .find(|d| {
+                path.starts_with(d) || std::fs::canonicalize(d).is_ok_and(|c| path.starts_with(c))
+            })
+            .map(PathBuf::as_path)
     }
 
     /// Validate `cfg` for a privileged launch and return the canonical
@@ -314,6 +344,13 @@ impl CommandPolicy {
             .parent()
             .ok_or_else(|| "command has no parent directory".to_string())?;
         for path in [command.as_path(), dir] {
+            if let Some(denied) = self.denied_dir_of(path) {
+                return Err(format!(
+                    "server '{name}': {} is under {}, which agents can write through other mounts",
+                    path.display(),
+                    denied.display()
+                ));
+            }
             if !self.mounts.is_read_only(path) {
                 return Err(format!(
                     "server '{name}': {} is not on a read-only mount",
@@ -945,6 +982,7 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
         let script = script_in(dir.path());
         let policy = CommandPolicy {
             roots: vec![dir.path().join("bin")],
+            denied: vec![],
             mounts: table_with_ro(dir.path()),
         };
         let sock = Path::new("/run/talon/mcp");
@@ -1015,6 +1053,7 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
                 PASSWD,
                 &CommandPolicy {
                     roots: vec![other.path().to_path_buf()],
+                    denied: vec![],
                     mounts: table_with_ro(dir.path()),
                 },
                 sock,
@@ -1056,6 +1095,7 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
                 PASSWD,
                 &CommandPolicy {
                     roots: roots.clone(),
+                    denied: vec![],
                     mounts,
                 },
                 sock,
@@ -1088,6 +1128,115 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
         assert!(plan(dir_rw).is_err());
         // No usable mount table: everything is refused (fail closed).
         assert!(plan(MountTable::default()).is_err());
+    }
+
+    #[test]
+    fn commands_in_agent_writable_project_dirs_are_refused() {
+        // Main's project view: read-only as a whole, but `groups/`, `data/`
+        // and `store/` are agent-writable through other mounts (N-10).
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let write_script = |rel: &str| {
+            let path = project.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#!/bin/sh\nexec cat\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let good = write_script("mysql/mysql-mcp.sh");
+        let lookalike = write_script("groupsX/server.sh");
+        let planted = [
+            write_script("groups/main/evil.sh"),
+            write_script("data/ipc/main/evil.sh"),
+            write_script("store/evil.sh"),
+        ];
+        let denied: Vec<PathBuf> = ["groups", "data", "store"]
+            .iter()
+            .map(|d| project.join(d))
+            .collect();
+        let policy = CommandPolicy {
+            roots: vec![project.clone()],
+            denied: denied.clone(),
+            mounts: table_with_ro(&project),
+        };
+        let sock = Path::new("/run/talon/mcp");
+        let home = Path::new("/run/talon/home");
+        let plan = |policy: &CommandPolicy, command: &Path| {
+            let mut cfg = ServerConfig::new(command.display().to_string(), Vec::<String>::new());
+            cfg.run_as = Some("mcp-siem".into());
+            plan_server("srv", &cfg, PASSWD, policy, sock, home, agent())
+        };
+
+        assert!(plan(&policy, &good).is_ok());
+        // Component-wise: `groupsX` is not `groups`.
+        assert!(plan(&policy, &lookalike).is_ok());
+        for script in &planted {
+            let err = plan(&policy, script).unwrap_err();
+            assert!(
+                err.contains("which agents can write through other mounts"),
+                "{err}"
+            );
+        }
+        // A link in an allowed directory into a denied one is resolved and
+        // refused.
+        let link = project.join("mysql").join("link.sh");
+        std::os::unix::fs::symlink(&planted[0], &link).unwrap();
+        assert!(plan(&policy, &link).is_err());
+        // Denied entries are compared canonicalized too (an alias path for
+        // the project still matches).
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        let aliased = CommandPolicy {
+            roots: vec![project.clone()],
+            denied: vec![alias.join("groups")],
+            mounts: table_with_ro(&project),
+        };
+        assert!(plan(&aliased, &planted[0]).is_err());
+        assert!(plan(&aliased, &good).is_ok());
+        // Without the denylist, only the read-only check would apply and
+        // the planted script would pass: the denylist is what refuses it.
+        let open = CommandPolicy {
+            denied: vec![],
+            ..policy.clone()
+        };
+        assert!(plan(&open, &planted[0]).is_ok());
+    }
+
+    #[test]
+    fn container_policy_denies_agent_writable_project_dirs() {
+        let policy = CommandPolicy::container(MountTable::default());
+        assert_eq!(
+            policy.denied,
+            DENIED_MCP_DIRS
+                .iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        );
+        for path in [
+            "/workspace/project/groups/main/tool.sh",
+            "/workspace/project/groups",
+            "/workspace/project/data/sessions/x/evil.py",
+            "/workspace/project/store/messages.db",
+        ] {
+            assert!(policy.denied_dir_of(Path::new(path)).is_some(), "{path}");
+        }
+        for path in [
+            "/workspace/project/mysql/mysql-mcp.sh",
+            "/workspace/project/groupsX/tool.sh",
+            "/workspace/project/container/skills/x.sh",
+            "/workspace/extra/siem/siem-mcp.sh",
+            "/usr/bin/python3",
+        ] {
+            assert!(policy.denied_dir_of(Path::new(path)).is_none(), "{path}");
+        }
+        // Every denied directory lies inside an allowed root (otherwise the
+        // entry would be pointless).
+        assert!(
+            policy
+                .denied
+                .iter()
+                .all(|d| policy.roots.iter().any(|r| d.starts_with(r)))
+        );
     }
 
     #[test]

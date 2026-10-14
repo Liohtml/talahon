@@ -17,7 +17,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -319,15 +319,7 @@ pub fn write_archive(
     title: Option<&str>,
     content: &str,
 ) -> std::io::Result<PathBuf> {
-    crate::session::ensure_private_dir(dir)?;
-    // Tighten a directory left with looser modes (best effort: the
-    // directory is this lane's own).
-    let loose = std::fs::symlink_metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
-    if loose {
-        if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
-            tracing::debug!(dir = %dir.display(), error = %e, "cannot tighten the archive directory");
-        }
-    }
+    crate::session::secure_private_dir(dir)?;
     let name = title
         .map(sanitize_filename)
         .filter(|n| !n.is_empty())
@@ -366,6 +358,8 @@ pub fn now_in(tz: chrono_tz::Tz) -> DateTime<chrono_tz::Tz> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
     use talon_llm::ToolCall;
 

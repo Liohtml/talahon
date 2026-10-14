@@ -254,6 +254,13 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
     // The agent ran as nobody.
     let session = root.join("state/sessions").join(format!("{id}.jsonl"));
     assert_eq!(std::fs::metadata(&session).unwrap().uid(), NOBODY);
+    // ... and prepared its lane-private reports/evals directories (N-2).
+    for sub in ["state/reports", "state/evals"] {
+        let meta = std::fs::symlink_metadata(root.join(sub)).unwrap();
+        assert!(meta.is_dir(), "{sub}");
+        assert_eq!(meta.mode() & 0o777, 0o700, "{sub}");
+        assert_eq!(meta.uid(), NOBODY, "{sub}");
+    }
 
     // The MCP server ran as mcp-echo with the hardened environment and
     // its result reached the model fenced.
