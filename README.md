@@ -150,27 +150,25 @@ talon setup vllm        # checks that the models are served
 
 ### 4. Create the mount allowlist
 
-Controls which host directories may be mounted into agent containers. It lives outside the project root (`~/.config/talon/`, legacy `~/.config/nanoclaw/` is still read) so agents cannot modify it. Without it, no additional mounts are allowed.
+Controls which host directories may be mounted into agent containers. It lives outside the project root (`~/.config/talon/`, legacy `~/.config/nanoclaw/` is still read) so agents cannot modify it. Without it, no additional mounts are allowed. **List each directory explicitly — never allowlist the project root or a parent of it**: Talon refuses mounts that contain the project root, `store/`, `data/`, `groups/` or `.env`, and shadows secret files inside every allowed mount.
 
 ```bash
 mkdir -p ~/.config/talon && chmod 700 ~/.config/talon
-TALON_DIR=$(pwd)
-cat > ~/.config/talon/mount-allowlist.json <<EOF
+T=$(pwd)
+ro() { printf '    { "path": "%s/%s", "allowReadWrite": false },\n' "$T" "$1"; }
 {
-  "allowedRoots": [
-    { "path": "${TALON_DIR}/mempalace-data", "allowReadWrite": true,
-      "description": "MemPalace data — writable so investigations persist memories" },
-    { "path": "${TALON_DIR}", "allowReadWrite": false,
-      "description": "Talon project root (MCP wrappers, field definitions)" }
-  ],
-  "blockedPatterns": [],
-  "nonMainReadOnly": true
-}
-EOF
+  echo '{ "allowedRoots": ['
+  for d in siem mysql copilot-mcp wazuh-mcp velociraptor-mcp shuffle-mcp cve-mcp mempalace; do ro "$d"; done
+  printf '    { "path": "%s/mempalace-data", "allowReadWrite": true,\n      "description": "MemPalace data, owned by mcp-palace inside containers" }\n' "$T"
+  echo '  ],'
+  echo '  "blockedPatterns": [],'
+  echo '  "nonMainReadOnly": false'
+  echo '}'
+} > ~/.config/talon/mount-allowlist.json
 chmod 600 ~/.config/talon/mount-allowlist.json
 ```
 
-Credential files (`.env`, `*.pem`, `.ssh`, …) are always blocked, MCP directories are always mounted read-only, and `.env` files inside MCP directories are shadowed and staged for their `mcp-*` user only.
+MCP directories are always mounted read-only, whatever the allowlist says, and their `.env`/credential files are shadowed and staged for their `mcp-*` user only. `nonMainReadOnly` is `false` only so that `mempalace-data` can stay writable: inside the container it is handed to the `mcp-palace` user (mode 0700), so the agent itself can neither read nor modify it. Because of that ownership change, back up `mempalace-data/` with `sudo`.
 
 ### 5. Configure the MCP servers
 
