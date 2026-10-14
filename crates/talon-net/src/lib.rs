@@ -6,7 +6,9 @@
 //! IPC, SQLite and container spawns. [`serve`] replaces it for every Talon
 //! listener (CoPilot HTTP API, LLM gateway, Emacs bridge) with:
 //!
-//! - an HTTP/1 header-read timeout and HTTP/2 keep-alive pings,
+//! - HTTP/1.1 only, with a header-read timeout that also bounds idle
+//!   keep-alive connections (HTTP/2 prior-knowledge connections could be held
+//!   open without ever sending a request),
 //! - a global connection cap and a per-peer-IP connection cap (excess
 //!   connections are closed immediately, before any parsing),
 //! - `ConnectInfo<SocketAddr>` in request extensions, so handlers can keep
@@ -22,8 +24,8 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::ConnectInfo;
 use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use hyper_util::server::conn::auto::Builder;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
@@ -40,7 +42,7 @@ pub struct ServerLimits {
     pub max_connections_per_ip: usize,
     /// Time a client has to send complete HTTP/1 request headers.
     pub header_read_timeout: Duration,
-    /// Interval of HTTP/2 keep-alive pings (dead peers are dropped).
+    /// Unused since HTTP/2 is disabled (kept for API compatibility).
     pub http2_keep_alive_interval: Duration,
     /// How long in-flight connections may drain after shutdown starts.
     pub shutdown_grace: Duration,
@@ -113,17 +115,17 @@ pub async fn serve(
     // server).
     let mut connections = tokio::task::JoinSet::new();
 
-    let mut builder = Builder::new(TokioExecutor::new());
+    // HTTP/1.1 only (hyper's plain HTTP/1 server, which never switches to
+    // HTTP/2 on a prior-knowledge preface). HTTP/2 connections have no
+    // header-read timeout: a client that sends the preface and answers PINGs
+    // but never opens a stream would hold a connection slot forever. Every
+    // Talon client (CoPilot, the agent's gateway client, Emacs) speaks
+    // HTTP/1.1; SSE works over it.
+    let mut builder = http1::Builder::new();
     builder
-        .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(limits.header_read_timeout)
         .keep_alive(true);
-    builder
-        .http2()
-        .timer(TokioTimer::new())
-        .keep_alive_interval(limits.http2_keep_alive_interval)
-        .keep_alive_timeout(limits.header_read_timeout);
     let builder = Arc::new(builder);
 
     loop {
@@ -162,9 +164,7 @@ pub async fn serve(
                 req
             });
         let hyper_svc = TowerToHyperService::new(svc);
-        let conn = builder
-            .serve_connection_with_upgrades(TokioIo::new(stream), hyper_svc)
-            .into_owned();
+        let conn = builder.serve_connection(TokioIo::new(stream), hyper_svc);
         let conn = graceful.watch(conn);
         // Reap finished connections so the set stays small.
         while connections.try_join_next().is_some() {}
@@ -255,6 +255,52 @@ mod tests {
             read.is_ok(),
             "server must close a connection with incomplete headers"
         );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn http2_prior_knowledge_is_not_served() {
+        let (addr, token) = start(ServerLimits {
+            header_read_timeout: Duration::from_millis(300),
+            ..ServerLimits::default()
+        })
+        .await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        // HTTP/2 connection preface followed by an empty SETTINGS frame.
+        s.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf)).await;
+        assert!(
+            !buf.starts_with(&[0, 0]),
+            "server must not answer with HTTP/2 frames"
+        );
+        assert!(
+            read.is_ok(),
+            "an h2 preface must not keep the connection open"
+        );
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn idle_keep_alive_connections_are_closed() {
+        let (addr, token) = start(ServerLimits {
+            header_read_timeout: Duration::from_millis(300),
+            ..ServerLimits::default()
+        })
+        .await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = s.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+        // Stay idle on the kept-alive connection: the server must close it.
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut rest)).await;
+        assert!(read.is_ok(), "idle keep-alive connection must be closed");
         token.cancel();
     }
 

@@ -9,8 +9,8 @@ license.workspace = true
 [dependencies]
 axum = { workspace = true }
 http = { workspace = true }
-hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "service", "tokio"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "server-graceful", "service", "tokio", "http1"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tower = { workspace = true }
