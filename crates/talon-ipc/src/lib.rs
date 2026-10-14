@@ -43,6 +43,18 @@
 //! - **`register_group`** (main only) can never create, modify or
 //!   impersonate the main group, and never applies a requested
 //!   `containerConfig` (mounts, env, network are operator-only).
+//! - **Task quotas** (N-3): a non-main namespace may own at most
+//!   [`IpcWatcherConfig::max_tasks_per_lane`] active + paused tasks,
+//!   schedule prompts up to [`IpcWatcherConfig::max_prompt_bytes`] (main:
+//!   [`IpcWatcherConfig::main_max_prompt_bytes`]) and recurring schedules
+//!   no more frequent than [`IpcWatcherConfig::min_schedule_interval`]
+//!   (`interval` values and consecutive `cron` occurrences). Violations are
+//!   denied with `details.stage = "quota"` and audited. Executed task
+//!   operations are rate-limited per namespace
+//!   ([`IpcWatcherConfig::max_task_ops_per_window`], main
+//!   [`IpcWatcherConfig::main_max_task_ops_per_window`]); excess requests
+//!   are denied without executing and summarized in one
+//!   `ipc.task.throttled` row per window.
 //! - **Audit hygiene**: audit rows are rate-limited per namespace
 //!   ([`IpcWatcherConfig::audit_max_per_window`], with an
 //!   `ipc.audit.suppressed` summary row), and file names / JIDs / reasons
@@ -57,6 +69,7 @@ mod fsio;
 mod host;
 mod json;
 mod process;
+mod quota;
 mod ratelimit;
 mod store;
 mod watcher;
@@ -69,9 +82,12 @@ mod testutil;
 pub use authz::{BaselineAuthorizer, FnAuthorizer, IpcAuthorizer, MessageAuthzFn, TaskAuthzFn};
 pub use config::{
     DEFAULT_AUDIT_MAX_PER_WINDOW, DEFAULT_AUDIT_WINDOW, DEFAULT_HOST_CALL_TIMEOUT,
-    DEFAULT_MAX_DIR_ENTRIES, DEFAULT_MAX_ERROR_CONTENT_BYTES, DEFAULT_MAX_ERROR_FILES,
-    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_JSON_DEPTH, DEFAULT_MAX_MESSAGES_PER_SCAN,
-    DEFAULT_MAX_TASKS_PER_SCAN, DEFAULT_POLL_INTERVAL, ERRORS_DIR_NAME, IpcWatcherConfig,
+    DEFAULT_MAIN_MAX_PROMPT_BYTES, DEFAULT_MAIN_MAX_TASK_OPS_PER_WINDOW, DEFAULT_MAX_DIR_ENTRIES,
+    DEFAULT_MAX_ERROR_CONTENT_BYTES, DEFAULT_MAX_ERROR_FILES, DEFAULT_MAX_FILE_BYTES,
+    DEFAULT_MAX_JSON_DEPTH, DEFAULT_MAX_MESSAGES_PER_SCAN, DEFAULT_MAX_PROMPT_BYTES,
+    DEFAULT_MAX_TASK_OPS_PER_WINDOW, DEFAULT_MAX_TASKS_PER_LANE, DEFAULT_MAX_TASKS_PER_SCAN,
+    DEFAULT_MIN_SCHEDULE_INTERVAL, DEFAULT_POLL_INTERVAL, DEFAULT_TASK_OP_WINDOW, ERRORS_DIR_NAME,
+    IpcWatcherConfig,
 };
 pub use host::{IpcHost, SourceIdentity};
 pub use json::{

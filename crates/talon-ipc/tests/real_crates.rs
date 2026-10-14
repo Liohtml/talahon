@@ -113,11 +113,16 @@ struct Env {
 }
 
 fn env() -> Env {
+    env_with(|_| {})
+}
+
+fn env_with(tune: impl FnOnce(&mut IpcWatcherConfig)) -> Env {
     let db = Db::open_in_memory().expect("in-memory db");
     let host = Arc::new(DbHost::new(db.clone()));
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = IpcWatcherConfig::new(dir.path(), chrono_tz::UTC);
     cfg.poll_interval = Duration::from_millis(20);
+    tune(&mut cfg);
     // default authorizer == talon_security::ipc_authz
     let watcher = IpcWatcher::new(
         cfg,
@@ -458,7 +463,11 @@ fn lane_id(ipc_key: &str) -> SourceIdentity {
 
 /// Env with the CoPilot lanes (in-memory, like the HTTP channel keeps them).
 fn copilot_env() -> Env {
-    let e = env();
+    copilot_env_with(|_| {})
+}
+
+fn copilot_env_with(tune: impl FnOnce(&mut IpcWatcherConfig)) -> Env {
+    let e = env_with(tune);
     {
         let mut g = e.host.groups.lock().unwrap();
         g.insert(
@@ -602,4 +611,153 @@ async fn register_group_container_config_is_stripped_with_real_db() {
     assert_eq!(g.container_config, None);
     let audit = e.db.recent_audit(10, Some("ipc.register_group")).unwrap();
     assert_eq!(audit[0].details["containerConfigIgnored"], true);
+}
+
+/// N-3 with the real database: owner-based task quota, prompt cap, minimum
+/// frequency, the executed-operation rate limit with its summary row (in
+/// the hash-chained audit log), and the per-lane snapshot query.
+#[tokio::test]
+async fn lane_task_quotas_with_real_db() {
+    let e = copilot_env_with(|c| {
+        c.max_tasks_per_lane = 3;
+        c.max_task_ops_per_window = 5;
+        c.task_op_window = Duration::from_secs(3600);
+    });
+    let alice = lane_id("copilot-u-alice");
+    let bob = lane_id("copilot-u-bob");
+    let sched = |target: &str, id: &str, ty: ScheduleType, value: &str, prompt: String| {
+        IpcTask::ScheduleTask {
+            task_id: Some(id.into()),
+            prompt,
+            script: None,
+            schedule_type: ty,
+            schedule_value: value.into(),
+            context_mode: None,
+            target_jid: target.into(),
+            created_by: None,
+            timestamp: None,
+        }
+    };
+    const ALICE: &str = "http:copilot:u:alice";
+    // the reviewer's payload: every-minute cron, 250 KiB prompt
+    let o = e
+        .watcher
+        .process_task(
+            &alice,
+            sched(
+                ALICE,
+                "flood",
+                ScheduleType::Cron,
+                "* * * * *",
+                "A".repeat(250 * 1024),
+            ),
+        )
+        .await;
+    assert!(
+        matches!(o, IpcOutcome::Denied(ref r) if r.contains("prompt")),
+        "{o:?}"
+    );
+    let o = e
+        .watcher
+        .process_task(
+            &alice,
+            sched(ALICE, "flood", ScheduleType::Cron, "* * * * *", "p".into()),
+        )
+        .await;
+    assert!(
+        matches!(o, IpcOutcome::Denied(ref r) if r.contains("minimum")),
+        "{o:?}"
+    );
+    for i in 0..3 {
+        let id = format!("alice-{i}");
+        let o = e
+            .watcher
+            .process_task(
+                &alice,
+                sched(ALICE, &id, ScheduleType::Cron, "*/15 * * * *", "p".into()),
+            )
+            .await;
+        assert!(o.is_applied(), "{o:?}");
+    }
+    assert_eq!(e.db.count_tasks_owned_by("copilot-u-alice").unwrap(), 3);
+    let o = e
+        .watcher
+        .process_task(
+            &alice,
+            sched(
+                ALICE,
+                "alice-3",
+                ScheduleType::Once,
+                "2026-06-01T00:00:00",
+                "p".into(),
+            ),
+        )
+        .await;
+    assert!(
+        matches!(o, IpcOutcome::Denied(ref r) if r.contains("limit 3")),
+        "{o:?}"
+    );
+    assert!(e.db.get_task_by_id("alice-3").unwrap().is_none());
+
+    // bob's lane is independent; the snapshot query separates the lanes
+    let o = e
+        .watcher
+        .process_task(
+            &bob,
+            sched(
+                "http:copilot:u:bob",
+                "bob-0",
+                ScheduleType::Interval,
+                "900000",
+                "p".into(),
+            ),
+        )
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+    let alice_tasks = e.db.get_tasks_for_jids(&[ALICE.to_string()]).unwrap();
+    assert_eq!(alice_tasks.len(), 3);
+    assert!(alice_tasks.iter().all(|t| t.chat_jid == ALICE));
+    assert_eq!(
+        e.db.get_tasks_for_jids(&["http:copilot:u:bob".to_string()])
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // executed operations: 3 creates so far; 2 more pass, then throttled
+    for (i, expect) in [(0, true), (1, true), (2, false), (0, false)] {
+        let o = e
+            .watcher
+            .process_task(
+                &alice,
+                IpcTask::PauseTask {
+                    task_id: format!("alice-{i}"),
+                    timestamp: None,
+                },
+            )
+            .await;
+        assert_eq!(o.is_applied(), expect, "{i}: {o:?}");
+    }
+    assert_eq!(
+        e.db.get_task_by_id("alice-2").unwrap().unwrap().status,
+        TaskStatus::Active
+    );
+    // shutting the watcher down writes the pending summary row
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    e.watcher.run(token).await;
+    let rows = e.db.recent_audit(200, Some("ipc.")).unwrap();
+    let throttled: Vec<_> = rows
+        .iter()
+        .filter(|r| r.kind == "ipc.task.throttled")
+        .collect();
+    assert_eq!(throttled.len(), 1, "{throttled:?}");
+    assert_eq!(throttled[0].details["ipcKey"], "copilot-u-alice");
+    assert_eq!(throttled[0].details["throttled_since_last"], 2);
+    let quota_denials = rows
+        .iter()
+        .filter(|r| r.kind == "ipc.task.denied" && r.details["stage"] == "quota")
+        .count();
+    assert_eq!(quota_denials, 3);
+    assert_eq!(e.db.verify_audit_chain().unwrap(), None);
 }

@@ -32,6 +32,24 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 pub const DEFAULT_AUDIT_MAX_PER_WINDOW: usize = 60;
 /// Default audit rate-limit window.
 pub const DEFAULT_AUDIT_WINDOW: Duration = Duration::from_secs(60);
+/// Default number of active + paused tasks one non-main IPC namespace may
+/// own (N-3).
+pub const DEFAULT_MAX_TASKS_PER_LANE: usize = 25;
+/// Default cap on a task prompt from a non-main namespace (16 KiB).
+pub const DEFAULT_MAX_PROMPT_BYTES: usize = 16 * 1024;
+/// Default cap on a task prompt from the main group (64 KiB).
+pub const DEFAULT_MAIN_MAX_PROMPT_BYTES: usize = 64 * 1024;
+/// Default minimum spacing between two runs of a recurring task scheduled
+/// by a non-main namespace (5 minutes).
+pub const DEFAULT_MIN_SCHEDULE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Default number of executed task operations one non-main namespace may
+/// perform per [`DEFAULT_TASK_OP_WINDOW`].
+pub const DEFAULT_MAX_TASK_OPS_PER_WINDOW: usize = 30;
+/// Default number of executed task operations the main group may perform
+/// per [`DEFAULT_TASK_OP_WINDOW`].
+pub const DEFAULT_MAIN_MAX_TASK_OPS_PER_WINDOW: usize = 120;
+/// Default task-operation rate-limit window.
+pub const DEFAULT_TASK_OP_WINDOW: Duration = Duration::from_secs(60);
 
 /// Configuration for [`crate::IpcWatcher`].
 ///
@@ -79,6 +97,39 @@ pub struct IpcWatcherConfig {
     pub audit_max_per_window: usize,
     /// Length of the audit rate-limit window.
     pub audit_window: Duration,
+    /// Per-lane task quota (N-3): a **non-main** namespace may own at most
+    /// this many active + paused tasks (counted through the task owner
+    /// records, see [`crate::TaskStore::count_tasks_owned_by`]). Scheduling
+    /// a new task — or resuming a completed one — beyond it is denied.
+    /// Main is exempt. `0` disables the quota.
+    pub max_tasks_per_lane: usize,
+    /// Largest task prompt (UTF-8 bytes) a **non-main** namespace may
+    /// schedule or set via `update_task`. `0` disables the cap.
+    pub max_prompt_bytes: usize,
+    /// Largest task prompt (UTF-8 bytes) the main group may schedule or set.
+    /// `0` disables the cap.
+    pub main_max_prompt_bytes: usize,
+    /// Minimum spacing between consecutive runs of a recurring task
+    /// scheduled (or rescheduled / resumed) by a **non-main** namespace:
+    /// `interval` schedules below it, and `cron` expressions with two
+    /// consecutive occurrences closer than it, are denied. `once` is always
+    /// fine. Main is exempt (it is still bound by
+    /// [`talon_core::schedule::MIN_INTERVAL_MS`]). Zero disables the check.
+    pub min_schedule_interval: Duration,
+    /// Per-namespace budget of *executed* task operations (schedule, pause,
+    /// resume, cancel, update, `refresh_groups`, `register_group`) per
+    /// [`task_op_window`](Self::task_op_window) for **non-main**
+    /// namespaces. Authorized, valid requests beyond it are denied without
+    /// being executed; they are not audited one by one but reported as one
+    /// `ipc.task.throttled` summary row per namespace and window. Every
+    /// executed operation is still audited. `0` disables the limit.
+    pub max_task_ops_per_window: usize,
+    /// Like [`max_task_ops_per_window`](Self::max_task_ops_per_window), for
+    /// the main group. `0` disables the limit.
+    pub main_max_task_ops_per_window: usize,
+    /// Length of the task-operation rate-limit window. Zero disables the
+    /// limit.
+    pub task_op_window: Duration,
 }
 
 impl IpcWatcherConfig {
@@ -99,6 +150,13 @@ impl IpcWatcherConfig {
             audit_allowed_messages: true,
             audit_max_per_window: DEFAULT_AUDIT_MAX_PER_WINDOW,
             audit_window: DEFAULT_AUDIT_WINDOW,
+            max_tasks_per_lane: DEFAULT_MAX_TASKS_PER_LANE,
+            max_prompt_bytes: DEFAULT_MAX_PROMPT_BYTES,
+            main_max_prompt_bytes: DEFAULT_MAIN_MAX_PROMPT_BYTES,
+            min_schedule_interval: DEFAULT_MIN_SCHEDULE_INTERVAL,
+            max_task_ops_per_window: DEFAULT_MAX_TASK_OPS_PER_WINDOW,
+            main_max_task_ops_per_window: DEFAULT_MAIN_MAX_TASK_OPS_PER_WINDOW,
+            task_op_window: DEFAULT_TASK_OP_WINDOW,
         }
     }
 
@@ -114,6 +172,28 @@ impl IpcWatcherConfig {
     /// The quarantine directory, `<ipc_dir>/errors`.
     pub fn errors_dir(&self) -> PathBuf {
         self.ipc_dir.join(ERRORS_DIR_NAME)
+    }
+
+    /// Prompt cap for a main (`true`) or non-main namespace; `None` when
+    /// disabled.
+    pub fn prompt_limit(&self, is_main: bool) -> Option<usize> {
+        let limit = if is_main {
+            self.main_max_prompt_bytes
+        } else {
+            self.max_prompt_bytes
+        };
+        (limit > 0).then_some(limit)
+    }
+
+    /// Executed-task-operation budget per window for a main (`true`) or
+    /// non-main namespace; `None` when disabled.
+    pub fn task_op_limit(&self, is_main: bool) -> Option<usize> {
+        let limit = if is_main {
+            self.main_max_task_ops_per_window
+        } else {
+            self.max_task_ops_per_window
+        };
+        (limit > 0 && !self.task_op_window.is_zero()).then_some(limit)
     }
 }
 
@@ -136,6 +216,39 @@ mod tests {
         assert!(c.max_messages_per_scan > 0 && c.max_tasks_per_scan > 0);
         assert_eq!(c.audit_max_per_window, 60);
         assert_eq!(c.audit_window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn task_quota_defaults() {
+        let c = IpcWatcherConfig::new(Path::new("/srv/talon/data"), chrono_tz::UTC);
+        assert_eq!(c.max_tasks_per_lane, 25);
+        assert_eq!(c.max_prompt_bytes, 16 * 1024);
+        assert_eq!(c.main_max_prompt_bytes, 64 * 1024);
+        assert_eq!(c.min_schedule_interval, Duration::from_secs(300));
+        assert_eq!(c.max_task_ops_per_window, 30);
+        assert_eq!(c.main_max_task_ops_per_window, 120);
+        assert_eq!(c.task_op_window, Duration::from_secs(60));
+        assert_eq!(c.prompt_limit(false), Some(16 * 1024));
+        assert_eq!(c.prompt_limit(true), Some(64 * 1024));
+        assert_eq!(c.task_op_limit(false), Some(30));
+        assert_eq!(c.task_op_limit(true), Some(120));
+        // the host's constructor gets the same defaults
+        let tc = TalonConfig::from_env(Path::new("/opt/talon"), EnvFile::from_str_content(""));
+        let h = IpcWatcherConfig::from_talon_config(&tc);
+        assert_eq!(h.max_tasks_per_lane, 25);
+        assert_eq!(h.task_op_limit(false), Some(30));
+    }
+
+    #[test]
+    fn zero_disables_limits() {
+        let mut c = IpcWatcherConfig::new(Path::new("/d"), chrono_tz::UTC);
+        c.max_prompt_bytes = 0;
+        c.main_max_task_ops_per_window = 0;
+        assert_eq!(c.prompt_limit(false), None);
+        assert_eq!(c.task_op_limit(true), None);
+        assert_eq!(c.task_op_limit(false), Some(30));
+        c.task_op_window = Duration::ZERO;
+        assert_eq!(c.task_op_limit(false), None);
     }
 
     #[test]

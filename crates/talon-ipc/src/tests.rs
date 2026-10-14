@@ -799,7 +799,8 @@ async fn update_task_rules() {
     ));
     assert_eq!(h.store.get("t-main").unwrap().prompt, "p");
 
-    // own task: schedule change recomputes next_run, empty script clears
+    // own task: a schedule below the lane's minimum frequency is a quota
+    // violation (N-3) and changes nothing
     let mut u = update("t-other");
     if let IpcTask::UpdateTask {
         schedule_type,
@@ -810,6 +811,30 @@ async fn update_task_rules() {
     {
         *schedule_type = Some(ScheduleType::Interval);
         *schedule_value = Some("60000".into());
+        *script = Some(String::new());
+    }
+    let o = h.watcher.process_task(&other_id(), u).await;
+    assert!(
+        matches!(o, IpcOutcome::Denied(ref r) if r.contains("minimum")),
+        "{o:?}"
+    );
+    assert_eq!(
+        h.store.get("t-other").unwrap().schedule_type,
+        ScheduleType::Once
+    );
+    assert!(h.store.get("t-other").unwrap().script.is_some());
+
+    // own task: schedule change recomputes next_run, empty script clears
+    let mut u = update("t-other");
+    if let IpcTask::UpdateTask {
+        schedule_type,
+        schedule_value,
+        script,
+        ..
+    } = &mut u
+    {
+        *schedule_type = Some(ScheduleType::Interval);
+        *schedule_value = Some("600000".into());
         *script = Some(String::new());
     }
     assert!(h.watcher.process_task(&other_id(), u).await.is_applied());
@@ -912,7 +937,7 @@ async fn scan_processes_messages_and_tasks_in_name_order() {
     write(
         &t,
         "1700000000001-aaaaaa.json",
-        r#"{"type":"schedule_task","taskId":"task-1","prompt":"p","schedule_type":"interval","schedule_value":"60000","context_mode":"group","targetJid":"other@g.us","createdBy":"whatsapp_main"}"#,
+        r#"{"type":"schedule_task","taskId":"task-1","prompt":"p","schedule_type":"interval","schedule_value":"600000","context_mode":"group","targetJid":"other@g.us","createdBy":"whatsapp_main"}"#,
     );
 
     let stats = h.watcher.scan_once().await;
@@ -1823,4 +1848,647 @@ async fn control_characters_never_reach_the_audit_log() {
     // the quarantine record carries the sanitized name too
     let recs = error_records(&h);
     assert!(!recs[0]["file"].as_str().unwrap().contains('\n'));
+}
+
+// ---------------------------------------------------------------------------
+// N-3: per-lane task quotas, prompt cap, schedule frequency, op rate limit
+// ---------------------------------------------------------------------------
+
+fn sched_with_prompt(target: &str, ty: ScheduleType, value: &str, prompt: String) -> IpcTask {
+    let mut t = sched(target, ty, value);
+    if let IpcTask::ScheduleTask { prompt: p, .. } = &mut t {
+        *p = prompt;
+    }
+    t
+}
+
+fn alice_once(id: &str) -> IpcTask {
+    with_task_id(once(ALICE_JID), id)
+}
+
+/// Details of the most recent `ipc.task.denied` row.
+fn last_denial(h: &Harness) -> serde_json::Value {
+    h.audit
+        .snapshot()
+        .into_iter()
+        .rev()
+        .find(|e| e.kind == "ipc.task.denied")
+        .expect("a denial row")
+        .details
+}
+
+fn assert_quota_denied(h: &Harness, o: &IpcOutcome, quota: &str) {
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    let d = last_denial(h);
+    assert_eq!(d["stage"], "quota", "{d}");
+    assert_eq!(d["quota"], quota, "{d}");
+}
+
+fn set_status(h: &Harness, id: &str, status: TaskStatus) {
+    h.store.tasks.lock().unwrap().get_mut(id).unwrap().status = status;
+}
+
+#[tokio::test]
+async fn non_main_lane_task_quota_counts_active_and_paused_tasks() {
+    let h = copilot_harness_with(|c| c.max_tasks_per_lane = 3);
+    for i in 0..3 {
+        let o = h
+            .watcher
+            .process_task(&alice(), alice_once(&format!("alice-{i}")))
+            .await;
+        assert!(o.is_applied(), "{o:?}");
+    }
+    // paused tasks still count
+    assert!(
+        h.watcher
+            .process_task(&alice(), pause("alice-0"))
+            .await
+            .is_applied()
+    );
+    let o = h
+        .watcher
+        .process_task(&alice(), alice_once("alice-3"))
+        .await;
+    assert_quota_denied(&h, &o, "tasks_per_lane");
+    assert!(
+        matches!(o, IpcOutcome::Denied(ref r) if r.contains("limit 3")),
+        "{o:?}"
+    );
+    assert_eq!(last_denial(&h)["ownedTasks"], 3);
+    assert!(h.store.get("alice-3").is_none());
+
+    // bob shares the folder but has his own quota
+    let o = h
+        .watcher
+        .process_task(&bob(), with_task_id(once(BOB_JID), "bob-0"))
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+
+    // cancelling frees a slot
+    assert!(
+        h.watcher
+            .process_task(&alice(), cancel("alice-1"))
+            .await
+            .is_applied()
+    );
+    assert!(
+        h.watcher
+            .process_task(&alice(), alice_once("alice-3"))
+            .await
+            .is_applied()
+    );
+
+    // completed tasks do not count, but resuming one needs a free slot
+    set_status(&h, "alice-2", TaskStatus::Completed);
+    assert!(
+        h.watcher
+            .process_task(&alice(), alice_once("alice-4"))
+            .await
+            .is_applied()
+    );
+    let o = h.watcher.process_task(&alice(), resume("alice-2")).await;
+    assert_quota_denied(&h, &o, "tasks_per_lane");
+    assert_eq!(
+        h.store.get("alice-2").unwrap().status,
+        TaskStatus::Completed
+    );
+    // resuming a paused task does not add one
+    assert!(
+        h.watcher
+            .process_task(&alice(), resume("alice-0"))
+            .await
+            .is_applied()
+    );
+    assert!(
+        h.watcher
+            .process_task(&alice(), cancel("alice-4"))
+            .await
+            .is_applied()
+    );
+    assert!(
+        h.watcher
+            .process_task(&alice(), resume("alice-2"))
+            .await
+            .is_applied()
+    );
+    let live = h
+        .store
+        .all()
+        .into_iter()
+        .filter(|t| h.store.owner(&t.id).as_deref() == Some("copilot-u-alice"))
+        .filter(|t| t.status != TaskStatus::Completed)
+        .count();
+    assert_eq!(live, 3);
+}
+
+#[tokio::test]
+async fn main_is_exempt_from_task_quota_and_frequency() {
+    let h = copilot_harness_with(|c| c.max_tasks_per_lane = 1);
+    for i in 0..4 {
+        let t = with_task_id(
+            sched(ALICE_JID, ScheduleType::Cron, "* * * * *"),
+            &format!("main-{i}"),
+        );
+        let o = h.watcher.process_task(&main_id(), t).await;
+        assert!(o.is_applied(), "{o:?}");
+    }
+    let o = h
+        .watcher
+        .process_task(&main_id(), sched(BOB_JID, ScheduleType::Interval, "10000"))
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+    // tasks main scheduled into alice's lane are main's, not alice's quota
+    assert!(
+        h.watcher
+            .process_task(&alice(), alice_once("alice-0"))
+            .await
+            .is_applied()
+    );
+    let o = h
+        .watcher
+        .process_task(&alice(), alice_once("alice-1"))
+        .await;
+    assert_quota_denied(&h, &o, "tasks_per_lane");
+    // main may resume a too-frequent paused task of a lane
+    set_status(&h, "main-0", TaskStatus::Paused);
+    assert!(
+        h.watcher
+            .process_task(&main_id(), resume("main-0"))
+            .await
+            .is_applied()
+    );
+}
+
+#[tokio::test]
+async fn task_quota_can_be_disabled() {
+    let h = copilot_harness_with(|c| c.max_tasks_per_lane = 0);
+    for i in 0..30 {
+        let o = h
+            .watcher
+            .process_task(&alice(), alice_once(&format!("alice-{i}")))
+            .await;
+        assert!(o.is_applied(), "{i}: {o:?}");
+    }
+}
+
+#[tokio::test]
+async fn prompt_size_is_capped_per_lane() {
+    let h = copilot_harness();
+    let kib = |n: usize| "x".repeat(n * 1024);
+    let o = h
+        .watcher
+        .process_task(
+            &alice(),
+            sched_with_prompt(
+                ALICE_JID,
+                ScheduleType::Once,
+                "2026-06-01T00:00:00",
+                kib(16),
+            ),
+        )
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+    for prompt in [kib(16) + "y", "日".repeat(6000), kib(250)] {
+        let o = h
+            .watcher
+            .process_task(
+                &alice(),
+                sched_with_prompt(ALICE_JID, ScheduleType::Once, "2026-06-01T00:00:00", prompt),
+            )
+            .await;
+        assert_quota_denied(&h, &o, "prompt_bytes");
+    }
+    assert!(last_denial(&h)["promptBytes"].as_u64().unwrap() > 200 * 1024);
+    assert_eq!(h.store.all().len(), 1);
+    // update_task is capped as well
+    let id = h.store.all()[0].id.clone();
+    let o = h
+        .watcher
+        .process_task(&alice(), with_prompt(update(&id), &kib(17)))
+        .await;
+    assert_quota_denied(&h, &o, "prompt_bytes");
+    assert_eq!(h.store.get(&id).unwrap().prompt.len(), 16 * 1024);
+    // the prompt text never reaches the audit log
+    assert!(
+        h.audit
+            .snapshot()
+            .iter()
+            .all(|e| !e.details.to_string().contains("xxxxxxxx"))
+    );
+
+    // main has a larger cap
+    for (size, ok) in [(20, true), (64, true), (65, false)] {
+        let o = h
+            .watcher
+            .process_task(
+                &main_id(),
+                sched_with_prompt(
+                    BOB_JID,
+                    ScheduleType::Once,
+                    "2026-06-01T00:00:00",
+                    kib(size),
+                ),
+            )
+            .await;
+        if ok {
+            assert!(o.is_applied(), "{size} KiB: {o:?}");
+        } else {
+            assert_quota_denied(&h, &o, "prompt_bytes");
+        }
+    }
+    let o = h
+        .watcher
+        .process_task(&main_id(), with_prompt(update(&id), &kib(64)))
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+}
+
+#[tokio::test]
+async fn prompt_caps_are_configurable() {
+    let h = copilot_harness_with(|c| {
+        c.max_prompt_bytes = 10;
+        c.main_max_prompt_bytes = 0; // disabled
+    });
+    let o = h
+        .watcher
+        .process_task(
+            &alice(),
+            sched_with_prompt(
+                ALICE_JID,
+                ScheduleType::Once,
+                "2026-06-01T00:00:00",
+                "x".repeat(11),
+            ),
+        )
+        .await;
+    assert_quota_denied(&h, &o, "prompt_bytes");
+    let o = h
+        .watcher
+        .process_task(
+            &main_id(),
+            sched_with_prompt(
+                BOB_JID,
+                ScheduleType::Once,
+                "2026-06-01T00:00:00",
+                "x".repeat(200 * 1024),
+            ),
+        )
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+}
+
+#[tokio::test]
+async fn recurring_lane_schedules_respect_the_minimum_frequency() {
+    let h = copilot_harness();
+    for (ty, v) in [
+        (ScheduleType::Cron, "* * * * *"),
+        (ScheduleType::Cron, "*/2 * * * *"),
+        (ScheduleType::Cron, "*/10 * * * * *"),
+        (ScheduleType::Cron, "0,3 * * * *"),
+        (ScheduleType::Interval, "60000"),
+        (ScheduleType::Interval, "299999"),
+    ] {
+        let o = h
+            .watcher
+            .process_task(&alice(), sched(ALICE_JID, ty, v))
+            .await;
+        assert_quota_denied(&h, &o, "schedule_frequency");
+    }
+    assert!(h.store.all().is_empty());
+    for (ty, v) in [
+        (ScheduleType::Cron, "*/5 * * * *"),
+        (ScheduleType::Cron, "0 9 * * 1-5"),
+        (ScheduleType::Interval, "300000"),
+        (ScheduleType::Once, "2026-06-01T00:00:00"),
+    ] {
+        let o = h
+            .watcher
+            .process_task(&alice(), sched(ALICE_JID, ty, v))
+            .await;
+        assert!(o.is_applied(), "{ty:?} {v}: {o:?}");
+    }
+    assert_eq!(h.store.all().len(), 4);
+
+    // rescheduling to a frequent cron is denied and changes nothing
+    let id = h
+        .store
+        .all()
+        .into_iter()
+        .find(|t| t.schedule_value == "*/5 * * * *")
+        .unwrap()
+        .id;
+    let mut u = update(&id);
+    if let IpcTask::UpdateTask { schedule_value, .. } = &mut u {
+        *schedule_value = Some("* * * * *".into());
+    }
+    let o = h.watcher.process_task(&alice(), u).await;
+    assert_quota_denied(&h, &o, "schedule_frequency");
+    assert_eq!(h.store.get(&id).unwrap().schedule_value, "*/5 * * * *");
+    // switching an interval task to a short interval as well
+    let id = h
+        .store
+        .all()
+        .into_iter()
+        .find(|t| t.schedule_type == ScheduleType::Interval)
+        .unwrap()
+        .id;
+    let mut u = update(&id);
+    if let IpcTask::UpdateTask { schedule_value, .. } = &mut u {
+        *schedule_value = Some("10000".into());
+    }
+    let o = h.watcher.process_task(&alice(), u).await;
+    assert_quota_denied(&h, &o, "schedule_frequency");
+
+    // a paused too-frequent task (created before the limit existed) cannot
+    // be resumed by its lane; pausing / cancelling it stays possible
+    let mut legacy = task("legacy", "copilot", ALICE_JID, TaskStatus::Paused);
+    legacy.schedule_type = ScheduleType::Cron;
+    legacy.schedule_value = "* * * * *".into();
+    h.store.insert_owned(legacy, "copilot-u-alice");
+    let o = h.watcher.process_task(&alice(), resume("legacy")).await;
+    assert_quota_denied(&h, &o, "schedule_frequency");
+    assert_eq!(h.store.get("legacy").unwrap().status, TaskStatus::Paused);
+    assert!(
+        h.watcher
+            .process_task(&alice(), cancel("legacy"))
+            .await
+            .is_applied()
+    );
+}
+
+#[tokio::test]
+async fn minimum_frequency_is_configurable() {
+    let h = copilot_harness_with(|c| c.min_schedule_interval = Duration::from_secs(3600));
+    let o = h
+        .watcher
+        .process_task(
+            &alice(),
+            sched(ALICE_JID, ScheduleType::Cron, "*/30 * * * *"),
+        )
+        .await;
+    assert_quota_denied(&h, &o, "schedule_frequency");
+    let h = copilot_harness_with(|c| c.min_schedule_interval = Duration::ZERO);
+    let o = h
+        .watcher
+        .process_task(&alice(), sched(ALICE_JID, ScheduleType::Cron, "* * * * *"))
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+}
+
+#[tokio::test]
+async fn executed_task_ops_are_rate_limited_with_one_summary_row() {
+    let h = copilot_harness_with(|c| {
+        c.max_task_ops_per_window = 3;
+        c.task_op_window = Duration::from_millis(1500);
+    });
+    // denied / rejected requests do not use the budget
+    let o = h.watcher.process_task(&alice(), once(BOB_JID)).await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    let o = h
+        .watcher
+        .process_task(&alice(), sched(ALICE_JID, ScheduleType::Cron, "bogus"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Rejected(_)), "{o:?}");
+    for i in 0..3 {
+        let o = h
+            .watcher
+            .process_task(&alice(), alice_once(&format!("alice-{i}")))
+            .await;
+        assert!(o.is_applied(), "{o:?}");
+    }
+    // over budget: denied and NOT executed
+    for i in 3..10 {
+        let o = h
+            .watcher
+            .process_task(&alice(), alice_once(&format!("alice-{i}")))
+            .await;
+        assert!(
+            matches!(o, IpcOutcome::Denied(ref r) if r.contains("rate limit")),
+            "{o:?}"
+        );
+    }
+    let o = h.watcher.process_task(&alice(), pause("alice-0")).await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert_eq!(h.store.all().len(), 3);
+    assert_eq!(h.store.get("alice-0").unwrap().status, TaskStatus::Active);
+    assert_eq!(h.host.tasks_changed.load(Ordering::SeqCst), 3);
+    // every executed operation is audited; throttled ones are not, one by one
+    assert_eq!(count_kind(&h, "ipc.task.allowed", "copilot-u-alice"), 3);
+    assert_eq!(count_kind(&h, "ipc.task.denied", "copilot-u-alice"), 2);
+    assert_eq!(count_kind(&h, "ipc.task.throttled", "copilot-u-alice"), 0);
+
+    // other namespaces have their own budgets
+    let o = h.watcher.process_task(&bob(), once(BOB_JID)).await;
+    assert!(o.is_applied(), "{o:?}");
+    let o = h.watcher.process_task(&main_id(), pause("alice-0")).await;
+    assert!(o.is_applied(), "{o:?}");
+
+    // once the window has passed, the next scan writes one summary row
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    h.watcher.scan_once().await;
+    let summaries: Vec<_> = h
+        .audit
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.kind == "ipc.task.throttled")
+        .collect();
+    assert_eq!(summaries.len(), 1, "{summaries:?}");
+    let s = &summaries[0];
+    assert_eq!(s.actor, "copilot");
+    assert_eq!(s.outcome, "denied");
+    assert_eq!(s.details["ipcKey"], "copilot-u-alice");
+    assert_eq!(s.details["isMain"], false);
+    assert_eq!(s.details["throttled_since_last"], 8);
+    assert_eq!(s.details["byType"]["schedule_task"], 7);
+    assert_eq!(s.details["byType"]["pause_task"], 1);
+    assert_eq!(s.details["limit"], 3);
+
+    // the new window has a fresh budget and no duplicate summary
+    let o = h.watcher.process_task(&alice(), resume("alice-0")).await;
+    assert!(o.is_applied(), "{o:?}");
+    h.watcher.scan_once().await;
+    assert_eq!(
+        h.audit
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == "ipc.task.throttled")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn main_has_a_higher_task_op_budget_and_limits_can_be_disabled() {
+    let h = copilot_harness_with(|c| {
+        c.max_task_ops_per_window = 2;
+        c.main_max_task_ops_per_window = 4;
+        c.task_op_window = Duration::from_secs(3600);
+    });
+    for i in 0..6 {
+        let o = h
+            .watcher
+            .process_task(&main_id(), with_task_id(once(BOB_JID), &format!("m-{i}")))
+            .await;
+        assert_eq!(o.is_applied(), i < 4, "{i}: {o:?}");
+    }
+    for i in 0..3 {
+        let o = h
+            .watcher
+            .process_task(&alice(), alice_once(&format!("a-{i}")))
+            .await;
+        assert_eq!(o.is_applied(), i < 2, "{i}: {o:?}");
+    }
+    // main's no-op update and refresh are operations too
+    let o = h.watcher.process_task(&main_id(), update("m-0")).await;
+    assert!(
+        matches!(o, IpcOutcome::Denied(ref r) if r.contains("rate limit")),
+        "{o:?}"
+    );
+    let o = h
+        .watcher
+        .process_task(&main_id(), IpcTask::RefreshGroups { timestamp: None })
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert_eq!(h.host.syncs.load(Ordering::SeqCst), 0);
+
+    let h = copilot_harness_with(|c| {
+        c.main_max_task_ops_per_window = 0;
+        c.task_op_window = Duration::from_secs(3600);
+    });
+    for i in 0..150 {
+        let o = h
+            .watcher
+            .process_task(&main_id(), with_task_id(once(BOB_JID), &format!("m-{i}")))
+            .await;
+        assert!(o.is_applied(), "{i}: {o:?}");
+    }
+}
+
+#[tokio::test]
+async fn executed_ops_are_audited_even_over_the_audit_budget() {
+    let h = copilot_harness_with(|c| {
+        c.audit_max_per_window = 2;
+        c.audit_window = Duration::from_secs(3600);
+        c.max_task_ops_per_window = 5;
+        c.task_op_window = Duration::from_secs(3600);
+    });
+    // use up the audit budget with denials
+    for _ in 0..3 {
+        h.watcher.process_task(&alice(), once(BOB_JID)).await;
+    }
+    assert_eq!(count_kind(&h, "ipc.task.denied", "copilot-u-alice"), 2);
+    for i in 0..4 {
+        assert!(
+            h.watcher
+                .process_task(&alice(), alice_once(&format!("alice-{i}")))
+                .await
+                .is_applied()
+        );
+    }
+    assert_eq!(count_kind(&h, "ipc.task.allowed", "copilot-u-alice"), 4);
+    // a quota denial is an ordinary (rate-limited) audit row
+    let o = h
+        .watcher
+        .process_task(&alice(), sched(ALICE_JID, ScheduleType::Cron, "* * * * *"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert_eq!(count_kind(&h, "ipc.task.denied", "copilot-u-alice"), 2);
+    // an operation that failed after it started executing is audited too
+    h.store.fail_owner.store(true, Ordering::SeqCst);
+    let o = h
+        .watcher
+        .process_task(&alice(), alice_once("alice-x"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Failed(_)), "{o:?}");
+    assert_eq!(count_kind(&h, "ipc.task.failed", "copilot-u-alice"), 1);
+    h.store.fail_owner.store(false, Ordering::SeqCst);
+    // the budget (5) is now used up: further operations are not executed
+    let o = h
+        .watcher
+        .process_task(&alice(), alice_once("alice-y"))
+        .await;
+    assert!(
+        matches!(o, IpcOutcome::Denied(ref r) if r.contains("rate limit")),
+        "{o:?}"
+    );
+    assert!(h.store.get("alice-y").is_none());
+}
+
+#[tokio::test]
+async fn pending_throttle_summary_is_written_on_shutdown() {
+    let h = copilot_harness_with(|c| {
+        c.max_task_ops_per_window = 1;
+        c.task_op_window = Duration::from_secs(3600);
+    });
+    let t = ns_dir(&h, "copilot-u-alice", "tasks");
+    for i in 0..3 {
+        write(
+            &t,
+            &format!("{i}.json"),
+            &format!(
+                r#"{{"type":"schedule_task","taskId":"alice-{i}","prompt":"p","schedule_type":"once","schedule_value":"2026-06-01T00:00:00","targetJid":"{ALICE_JID}"}}"#
+            ),
+        );
+    }
+    let watcher = Arc::new(h.watcher);
+    let token = CancellationToken::new();
+    let (w, t2) = (Arc::clone(&watcher), token.clone());
+    let run = tokio::spawn(async move { w.run(t2).await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while count(&t) > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(count(&t), 0);
+    assert_eq!(h.store.all().len(), 1);
+    assert!(
+        h.audit
+            .snapshot()
+            .iter()
+            .all(|e| e.kind != "ipc.task.throttled")
+    );
+    token.cancel();
+    run.await.unwrap();
+    let s: Vec<_> = h
+        .audit
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.kind == "ipc.task.throttled")
+        .collect();
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].details["throttled_since_last"], 2);
+}
+
+/// The N-3 proof of concept: one lane drops 320 every-minute cron tasks
+/// with 250 KiB prompts (and the same with small prompts and with
+/// acceptable schedules).
+#[tokio::test]
+async fn mass_task_creation_from_one_lane_is_contained() {
+    let h = copilot_harness();
+    let big = "A".repeat(250 * 1024);
+    for _ in 0..320 {
+        let t = sched_with_prompt(ALICE_JID, ScheduleType::Cron, "* * * * *", big.clone());
+        assert!(!h.watcher.process_task(&alice(), t).await.is_applied());
+    }
+    for _ in 0..320 {
+        let t = sched(ALICE_JID, ScheduleType::Cron, "* * * * *");
+        assert!(!h.watcher.process_task(&alice(), t).await.is_applied());
+    }
+    assert!(h.store.all().is_empty());
+    let mut applied = 0;
+    for _ in 0..320 {
+        let t = sched(ALICE_JID, ScheduleType::Cron, "*/5 * * * *");
+        if h.watcher.process_task(&alice(), t).await.is_applied() {
+            applied += 1;
+        }
+    }
+    assert_eq!(applied, 25);
+    assert_eq!(h.store.all().len(), 25);
+    // audit rows stay bounded: the executed operations plus the budget
+    let rows = h
+        .audit
+        .snapshot()
+        .iter()
+        .filter(|e| e.details["ipcKey"] == "copilot-u-alice")
+        .count();
+    assert!(rows <= 25 + 60, "{rows}");
 }

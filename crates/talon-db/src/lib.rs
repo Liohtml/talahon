@@ -19,7 +19,9 @@
 //!   `prev_hash` and `hash = sha256_hex(prev_hash || canonical_json(event))`,
 //!   with [`Db::verify_audit_chain`]), `investigations`, `ioc_sightings`,
 //!   `task_owners` (who created a scheduled task over IPC, see
-//!   [`Db::set_task_owner`] / [`Db::get_task_owner`]).
+//!   [`Db::set_task_owner`] / [`Db::get_task_owner`]; per-lane quotas use
+//!   [`Db::count_tasks_owned_by`], per-lane task snapshots
+//!   [`Db::get_tasks_for_jids`]).
 //! - Every query is parameterized; no SQL is ever built from user input.
 //!
 //! Module map (all of them add methods to [`Db`]):

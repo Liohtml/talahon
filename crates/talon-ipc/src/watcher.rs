@@ -23,7 +23,7 @@ use crate::fsio::{
 use crate::host::{IpcHost, SourceIdentity};
 use crate::json::{parse_outbound, parse_task, truncate_reason};
 use crate::process::IpcOutcome;
-use crate::ratelimit::AuditLimiter;
+use crate::ratelimit::{AuditLimiter, TaskOpLimiter};
 use crate::store::TaskStore;
 
 /// Counters for one scan (observability and tests).
@@ -208,6 +208,7 @@ pub struct IpcWatcher {
     pub(crate) audit: SharedAuditSink,
     pub(crate) authorizer: Arc<dyn IpcAuthorizer>,
     pub(crate) audit_limiter: AuditLimiter,
+    pub(crate) task_op_limiter: TaskOpLimiter,
     running: AtomicBool,
     scan: tokio::sync::Mutex<ScanState>,
     seq: AtomicU64,
@@ -241,6 +242,7 @@ impl IpcWatcher {
         audit: SharedAuditSink,
     ) -> Self {
         let audit_limiter = AuditLimiter::new(config.audit_max_per_window, config.audit_window);
+        let task_op_limiter = TaskOpLimiter::new(config.task_op_window);
         Self {
             config,
             store: Arc::new(db),
@@ -248,6 +250,7 @@ impl IpcWatcher {
             audit,
             authorizer: Arc::new(FnAuthorizer::security_policy()),
             audit_limiter,
+            task_op_limiter,
             running: AtomicBool::new(false),
             scan: tokio::sync::Mutex::new(ScanState::default()),
             seq: AtomicU64::new(0),
@@ -289,6 +292,9 @@ impl IpcWatcher {
                 _ = tokio::time::sleep(self.config.poll_interval) => {}
             }
         }
+        // Write pending rate-limit summaries so no suppressed / throttled
+        // count is lost on shutdown.
+        self.flush_audit_summaries(true);
         tracing::info!("IPC watcher stopped");
     }
 
@@ -299,9 +305,9 @@ impl IpcWatcher {
 
     async fn scan_inner(&self, cancel: Option<&CancellationToken>) -> ScanStats {
         let mut state = self.scan.lock().await;
-        // Report audit rows suppressed in windows that have ended since the
-        // last scan (MYTH-11).
-        self.flush_audit_summaries();
+        // Report audit rows suppressed (MYTH-11) and task operations
+        // throttled (N-3) in windows that have ended since the last scan.
+        self.flush_audit_summaries(false);
         let groups = self.host.registered_groups();
         let ns = resolve_namespaces(&groups);
         let mut ctx = ScanCtx {

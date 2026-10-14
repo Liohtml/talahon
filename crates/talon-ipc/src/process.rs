@@ -11,15 +11,32 @@
 //!
 //! (*) when [`IpcWatcherConfig::audit_allowed_messages`](crate::IpcWatcherConfig)
 //! is set. Outcomes are `allowed`, `denied` or `error`; denials carry
-//! `details.stage = "authorization" | "validation"`. Message text and task
-//! prompts are never written to the audit log (only their lengths).
-//! Rows are subject to the per-namespace audit rate limit (see
-//! `ratelimit`); applied task operations are always written. Targets and
-//! reasons are passed through `sanitize_for_log` first.
+//! `details.stage = "authorization" | "validation" | "quota"` (quota
+//! denials also name the `quota`: `prompt_bytes`, `schedule_frequency` or
+//! `tasks_per_lane`). Message text and task prompts are never written to
+//! the audit log (only their lengths). Rows are subject to the
+//! per-namespace audit rate limit (see `ratelimit`); task operations that
+//! were *executed* (applied, or failed after execution started) are always
+//! written. Targets and reasons are passed through `sanitize_for_log`
+//! first.
 //!
 //! Task ownership (MYTH-03): every task created over IPC gets an owner
 //! record — the source namespace's IPC key — and pause/resume/cancel/update
 //! are authorized against that owner, not the task's folder.
+//!
+//! Task quotas (N-3), checked after authorization and validation:
+//! - prompt size (`schedule_task`, `update_task`): every namespace, with a
+//!   larger cap for main;
+//! - schedule frequency (`schedule_task`, `update_task` changing the
+//!   schedule, `resume_task`): non-main only;
+//! - tasks owned per namespace (`schedule_task`, `resume_task` of a
+//!   completed task): non-main only.
+//!
+//! Finally every operation passes the execution gate: one unit of the
+//! namespace's task-operation budget is taken right before state changes.
+//! Over budget, the request is denied without executing and counted into
+//! the namespace's `ipc.task.throttled` summary row instead of being
+//! audited on its own.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -29,7 +46,7 @@ use talon_core::audit::event;
 use talon_core::protocol::{IpcOutbound, IpcTask};
 use talon_core::schedule::first_run;
 use talon_core::time::{now_iso, to_iso};
-use talon_core::types::{RegisteredGroup, ScheduledTask, TaskStatus, TaskUpdate};
+use talon_core::types::{RegisteredGroup, ScheduleType, ScheduledTask, TaskStatus, TaskUpdate};
 use talon_security::ipc_authz::{IpcDecision, TaskOwner};
 
 use crate::authz::{decide_message, decide_task};
@@ -37,6 +54,8 @@ use crate::host::SourceIdentity;
 use crate::json::{
     sanitize_for_log, task_type_name, truncate_reason, validate_outbound_shape, validate_task_shape,
 };
+use crate::quota::{check_prompt_bytes, check_schedule_frequency};
+use crate::ratelimit::OpPermit;
 use crate::watcher::IpcWatcher;
 
 /// Result of handling one IPC request.
@@ -64,7 +83,7 @@ struct Kinds {
     allowed: &'static str,
     denied: &'static str,
     failed: &'static str,
-    /// Applied requests of this family change state and are always
+    /// Executed requests of this family change state and are always
     /// audited, regardless of the rate limit.
     applied_is_priority: bool,
 }
@@ -90,6 +109,36 @@ const REGISTER_KINDS: Kinds = Kinds {
 
 /// An existing task and its recorded owner.
 type OwnedTask = (ScheduledTask, Option<String>);
+
+/// Execution gate of one task request (N-3): holds the task-operation
+/// permit taken right before the request changes state.
+#[derive(Debug, Default)]
+struct OpGate {
+    permit: Option<OpPermit>,
+    /// The request was refused by the task-operation rate limit.
+    throttled: bool,
+}
+
+/// Per-request state threaded through the task handlers.
+#[derive(Debug)]
+struct Req {
+    /// Audit details.
+    details: Map<String, Value>,
+    /// Execution gate.
+    gate: OpGate,
+}
+
+/// A per-lane quota violation (N-3): denied and audited with
+/// `stage = "quota"` and the quota's name.
+fn quota_denied(
+    details: &mut Map<String, Value>,
+    quota: &'static str,
+    reason: String,
+) -> IpcOutcome {
+    details.insert("stage".into(), json!("quota"));
+    details.insert("quota".into(), json!(quota));
+    IpcOutcome::Denied(reason)
+}
 
 #[derive(Debug, Clone, Copy)]
 enum StatusOp {
@@ -120,6 +169,8 @@ fn generate_task_id() -> String {
 }
 
 impl IpcWatcher {
+    /// Audit one request. `executed`: the request passed the execution
+    /// gate (it changed, or tried to change, state).
     fn record(
         &self,
         kinds: &Kinds,
@@ -127,13 +178,17 @@ impl IpcWatcher {
         target: Option<&str>,
         outcome: &IpcOutcome,
         mut details: Map<String, Value>,
+        executed: bool,
     ) {
         details.insert("ipcKey".into(), json!(source.ipc_key));
         details.insert("isMain".into(), json!(source.is_main));
         let (kind, result) = match outcome {
             IpcOutcome::Applied => (kinds.allowed, "allowed"),
             IpcOutcome::Denied(r) => {
-                details.insert("stage".into(), json!("authorization"));
+                // Quota denials set their own stage.
+                details
+                    .entry("stage")
+                    .or_insert_with(|| json!("authorization"));
                 details.insert("reason".into(), json!(truncate_reason(r)));
                 (kinds.denied, "denied")
             }
@@ -155,7 +210,11 @@ impl IpcWatcher {
         // JIDs may carry bidi / control characters: neutralize before they
         // reach the audit log or a log line.
         let target = target.map(sanitize_for_log);
-        let priority = kinds.applied_is_priority && outcome.is_applied();
+        // Every executed state change is audited, even over the audit
+        // budget; the task-operation rate limit bounds how many there are.
+        let priority = kinds.applied_is_priority
+            && executed
+            && matches!(outcome, IpcOutcome::Applied | IpcOutcome::Failed(_));
         let ev = event(
             kind,
             &source.folder,
@@ -242,7 +301,7 @@ impl IpcWatcher {
 
         if let Err(reason) = validate_outbound_shape(&msg) {
             let outcome = IpcOutcome::Rejected(reason);
-            self.record(&MESSAGE_KINDS, source, target, &outcome, details);
+            self.record(&MESSAGE_KINDS, source, target, &outcome, details, false);
             return outcome;
         }
 
@@ -255,7 +314,7 @@ impl IpcWatcher {
         );
         if let IpcDecision::Deny(reason) = decision {
             let outcome = IpcOutcome::Denied(reason);
-            self.record(&MESSAGE_KINDS, source, target, &outcome, details);
+            self.record(&MESSAGE_KINDS, source, target, &outcome, details, false);
             return outcome;
         }
 
@@ -267,7 +326,7 @@ impl IpcWatcher {
             Err(e) => IpcOutcome::Failed(e),
         };
         if !outcome.is_applied() || self.config.audit_allowed_messages {
-            self.record(&MESSAGE_KINDS, source, target, &outcome, details);
+            self.record(&MESSAGE_KINDS, source, target, &outcome, details, false);
         } else {
             tracing::info!(source = %source.folder, chat_jid = %sanitize_for_log(chat_jid), "IPC message sent");
         }
@@ -288,66 +347,156 @@ impl IpcWatcher {
 
         if let Err(reason) = validate_task_shape(&task) {
             let outcome = IpcOutcome::Rejected(reason);
-            self.record(kinds, source, None, &outcome, details);
+            self.record(kinds, source, None, &outcome, details, false);
             return outcome;
         }
 
         let groups = self.host.registered_groups();
+        let mut req = Req {
+            details,
+            gate: OpGate::default(),
+        };
         let (target, outcome) = match &task {
             IpcTask::ScheduleTask { target_jid, .. } => (
                 Some(target_jid.clone()),
-                self.schedule_task(source, &task, &groups, &mut details),
+                self.schedule_task(source, &task, &groups, &mut req),
             ),
             IpcTask::PauseTask { task_id, .. } => (
                 Some(task_id.clone()),
-                self.status_op(
-                    source,
-                    &task,
-                    task_id,
-                    StatusOp::Pause,
-                    &groups,
-                    &mut details,
-                ),
+                self.status_op(source, &task, task_id, StatusOp::Pause, &groups, &mut req),
             ),
             IpcTask::ResumeTask { task_id, .. } => (
                 Some(task_id.clone()),
-                self.status_op(
-                    source,
-                    &task,
-                    task_id,
-                    StatusOp::Resume,
-                    &groups,
-                    &mut details,
-                ),
+                self.status_op(source, &task, task_id, StatusOp::Resume, &groups, &mut req),
             ),
             IpcTask::CancelTask { task_id, .. } => (
                 Some(task_id.clone()),
-                self.status_op(
-                    source,
-                    &task,
-                    task_id,
-                    StatusOp::Cancel,
-                    &groups,
-                    &mut details,
-                ),
+                self.status_op(source, &task, task_id, StatusOp::Cancel, &groups, &mut req),
             ),
             IpcTask::UpdateTask { task_id, .. } => (
                 Some(task_id.clone()),
-                self.update_task(source, &task, &groups, &mut details),
+                self.update_task(source, &task, &groups, &mut req),
             ),
             IpcTask::RefreshGroups { .. } => (
                 None,
-                self.refresh_groups(source, &task, &groups, &mut details)
-                    .await,
+                self.refresh_groups(source, &task, &groups, &mut req).await,
             ),
             IpcTask::RegisterGroup { jid, .. } => (
                 Some(jid.clone()),
-                self.register_group(source, &task, &groups, &mut details)
-                    .await,
+                self.register_group(source, &task, &groups, &mut req).await,
             ),
         };
-        self.record(kinds, source, target.as_deref(), &outcome, details);
+        let Req { details, gate } = req;
+        if gate.throttled {
+            // Not executed. Counted into the namespace's
+            // `ipc.task.throttled` summary row instead of a row per request.
+            tracing::debug!(
+                source = %source.folder, ipc_key = %source.ipc_key, kind = ty,
+                target = ?target.as_deref().map(sanitize_for_log),
+                "IPC task operation throttled"
+            );
+            return outcome;
+        }
+        let mut executed = false;
+        if let Some(permit) = gate.permit {
+            if matches!(outcome, IpcOutcome::Denied(_) | IpcOutcome::Rejected(_)) {
+                // Refused after the gate: the budget unit was not used.
+                self.release_task_op(permit);
+            } else {
+                executed = true;
+            }
+        }
+        self.record(
+            kinds,
+            source,
+            target.as_deref(),
+            &outcome,
+            details,
+            executed,
+        );
         outcome
+    }
+
+    /// The execution gate (N-3): take one unit of `source`'s task-operation
+    /// budget right before `task` changes state. Over budget, the request
+    /// is refused (and marked as throttled).
+    fn pass_gate(
+        &self,
+        source: &SourceIdentity,
+        task: &IpcTask,
+        gate: &mut OpGate,
+    ) -> Result<(), IpcOutcome> {
+        match self.acquire_task_op(source, task_type_name(task)) {
+            Ok(permit) => {
+                gate.permit = Some(permit);
+                Ok(())
+            }
+            Err(outcome) => {
+                gate.throttled = true;
+                Err(outcome)
+            }
+        }
+    }
+
+    /// Prompt size quota (every namespace; main has a larger cap).
+    fn check_prompt(
+        &self,
+        source: &SourceIdentity,
+        prompt: &str,
+        details: &mut Map<String, Value>,
+    ) -> Result<(), IpcOutcome> {
+        check_prompt_bytes(prompt, self.config.prompt_limit(source.is_main)).map_err(|r| {
+            details.insert("promptBytes".into(), json!(prompt.len()));
+            quota_denied(details, "prompt_bytes", r)
+        })
+    }
+
+    /// Schedule frequency quota (non-main only).
+    fn check_frequency(
+        &self,
+        source: &SourceIdentity,
+        schedule_type: ScheduleType,
+        value: &str,
+        details: &mut Map<String, Value>,
+    ) -> Result<(), IpcOutcome> {
+        if source.is_main {
+            return Ok(());
+        }
+        check_schedule_frequency(
+            schedule_type,
+            value,
+            self.config.timezone,
+            chrono::Utc::now(),
+            self.config.min_schedule_interval,
+        )
+        .map_err(|r| quota_denied(details, "schedule_frequency", r))
+    }
+
+    /// Owned-task quota (non-main only): one more active task must fit.
+    fn check_task_quota(
+        &self,
+        source: &SourceIdentity,
+        details: &mut Map<String, Value>,
+    ) -> Result<(), IpcOutcome> {
+        let max = self.config.max_tasks_per_lane;
+        if source.is_main || max == 0 {
+            return Ok(());
+        }
+        let owned = self
+            .store
+            .count_tasks_owned_by(&source.ipc_key)
+            .map_err(|e| IpcOutcome::Failed(format!("task quota lookup failed: {e}")))?;
+        details.insert("ownedTasks".into(), json!(owned));
+        if owned >= u64::try_from(max).unwrap_or(u64::MAX) {
+            return Err(quota_denied(
+                details,
+                "tasks_per_lane",
+                format!(
+                    "this lane already owns {owned} active or paused tasks (limit {max}); cancel one first"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn schedule_task(
@@ -355,8 +504,9 @@ impl IpcWatcher {
         source: &SourceIdentity,
         task: &IpcTask,
         groups: &HashMap<String, RegisteredGroup>,
-        details: &mut Map<String, Value>,
+        req: &mut Req,
     ) -> IpcOutcome {
+        let Req { details, gate } = req;
         let IpcTask::ScheduleTask {
             task_id,
             prompt,
@@ -407,6 +557,18 @@ impl IpcWatcher {
             Ok(n) => n,
             Err(e) => return IpcOutcome::Rejected(format!("invalid schedule: {e}")),
         };
+        // Per-lane quotas (N-3); the cron sampling of the frequency check is
+        // the most expensive, so it runs last.
+        if let Err(o) = self
+            .check_prompt(source, prompt, details)
+            .and_then(|()| self.check_task_quota(source, details))
+            .and_then(|()| self.check_frequency(source, *schedule_type, schedule_value, details))
+        {
+            return o;
+        }
+        if let Err(o) = self.pass_gate(source, task, gate) {
+            return o;
+        }
         let id = task_id.clone().unwrap_or_else(generate_task_id);
         let context_mode = context_mode.unwrap_or_default();
         let record = ScheduledTask {
@@ -489,10 +651,35 @@ impl IpcWatcher {
         task_id: &str,
         op: StatusOp,
         groups: &HashMap<String, RegisteredGroup>,
-        details: &mut Map<String, Value>,
+        req: &mut Req,
     ) -> IpcOutcome {
-        if let Err(outcome) = self.authorize_existing(source, task, task_id, groups, details) {
-            return outcome;
+        let Req { details, gate } = req;
+        let current = match self.authorize_existing(source, task, task_id, groups, details) {
+            Ok(t) => t,
+            Err(outcome) => return outcome,
+        };
+        // Re-activating a task is held to the same quotas as creating one
+        // (N-3): its schedule must respect the lane's minimum frequency, and
+        // a completed task needs a free slot (completed tasks do not count).
+        if matches!(op, StatusOp::Resume) && current.status != TaskStatus::Active {
+            let slot = if current.status == TaskStatus::Completed {
+                self.check_task_quota(source, details)
+            } else {
+                Ok(())
+            };
+            if let Err(o) = slot.and_then(|()| {
+                self.check_frequency(
+                    source,
+                    current.schedule_type,
+                    &current.schedule_value,
+                    details,
+                )
+            }) {
+                return o;
+            }
+        }
+        if let Err(o) = self.pass_gate(source, task, gate) {
+            return o;
         }
         let result = match op {
             StatusOp::Pause => self.store.update_task(
@@ -523,8 +710,9 @@ impl IpcWatcher {
         source: &SourceIdentity,
         task: &IpcTask,
         groups: &HashMap<String, RegisteredGroup>,
-        details: &mut Map<String, Value>,
+        req: &mut Req,
     ) -> IpcOutcome {
+        let Req { details, gate } = req;
         let IpcTask::UpdateTask {
             task_id,
             prompt,
@@ -545,6 +733,9 @@ impl IpcWatcher {
         if let Some(p) = prompt {
             if p.trim().is_empty() {
                 return IpcOutcome::Rejected("prompt must not be empty".into());
+            }
+            if let Err(o) = self.check_prompt(source, p, details) {
+                return o;
             }
             update.prompt = Some(p.clone());
         }
@@ -567,6 +758,9 @@ impl IpcWatcher {
                 }
                 Err(e) => return IpcOutcome::Rejected(format!("invalid schedule: {e}")),
             }
+            if let Err(o) = self.check_frequency(source, ty, value, details) {
+                return o;
+            }
         }
         let mut fields = Vec::new();
         if update.prompt.is_some() {
@@ -582,6 +776,11 @@ impl IpcWatcher {
             fields.push("schedule_value");
         }
         details.insert("fields".into(), json!(fields));
+        // A no-op update is still an applied (and always audited) request,
+        // so it takes a budget unit too.
+        if let Err(o) = self.pass_gate(source, task, gate) {
+            return o;
+        }
         if update.is_empty() {
             details.insert("noop".into(), json!(true));
             return IpcOutcome::Applied;
@@ -598,8 +797,9 @@ impl IpcWatcher {
         source: &SourceIdentity,
         task: &IpcTask,
         groups: &HashMap<String, RegisteredGroup>,
-        details: &mut Map<String, Value>,
+        req: &mut Req,
     ) -> IpcOutcome {
+        let Req { details, gate } = req;
         if let IpcDecision::Deny(r) = decide_task(
             self.authorizer.as_ref(),
             source.as_ipc_identity(),
@@ -608,6 +808,9 @@ impl IpcWatcher {
             None,
         ) {
             return IpcOutcome::Denied(r);
+        }
+        if let Err(o) = self.pass_gate(source, task, gate) {
+            return o;
         }
         if let Err(e) = self
             .host_call("sync_groups", self.host.sync_groups(true))
@@ -636,8 +839,9 @@ impl IpcWatcher {
         source: &SourceIdentity,
         task: &IpcTask,
         groups: &HashMap<String, RegisteredGroup>,
-        details: &mut Map<String, Value>,
+        req: &mut Req,
     ) -> IpcOutcome {
+        let Req { details, gate } = req;
         let IpcTask::RegisterGroup {
             jid,
             name,
@@ -714,6 +918,9 @@ impl IpcWatcher {
             ephemeral_session: existing.is_some_and(|g| g.ephemeral_session),
             trusted_session_commands: existing.is_some_and(|g| g.trusted_session_commands),
         };
+        if let Err(o) = self.pass_gate(source, task, gate) {
+            return o;
+        }
         match self
             .host_call("register_group", self.host.register_group(jid, group))
             .await

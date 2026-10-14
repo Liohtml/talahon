@@ -212,6 +212,21 @@ impl TaskStore for MemoryTaskStore {
         }
         Ok(self.owner(id))
     }
+    fn count_tasks_owned_by(&self, owner: &str) -> Result<u64> {
+        self.check()?;
+        let tasks = self.tasks.lock().unwrap();
+        let owners = self.owners.lock().unwrap();
+        let n = owners
+            .iter()
+            .filter(|(id, o)| {
+                o.as_str() == owner
+                    && tasks
+                        .get(id.as_str())
+                        .is_some_and(|t| t.status != TaskStatus::Completed)
+            })
+            .count();
+        Ok(n as u64)
+    }
 }
 
 #[derive(Debug, Default)]

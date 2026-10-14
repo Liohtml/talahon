@@ -168,6 +168,52 @@ impl Db {
         })
     }
 
+    /// Tasks whose `chat_jid` is one of `jids`, newest first. Corrupt rows
+    /// are skipped; an empty list returns no tasks (without touching the
+    /// database).
+    ///
+    /// Used for per-lane `current_tasks.json` snapshots so a container start
+    /// loads only its own lane's tasks instead of the whole table (N-3). The
+    /// JID list is bound as one JSON array parameter (`json_each`), so the
+    /// statement text is constant and nothing is spliced into the SQL.
+    pub fn get_tasks_for_jids(&self, jids: &[String]) -> Result<Vec<ScheduledTask>> {
+        if jids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let jids_json = serde_json::to_string(jids)?;
+        self.with_conn(|conn| {
+            let sql = format!(
+                "SELECT {TASK_COLUMNS} FROM scheduled_tasks \
+                 WHERE chat_jid IN (SELECT value FROM json_each(?1)) \
+                 ORDER BY created_at DESC, id"
+            );
+            let mut stmt = conn.prepare_cached(&sql).db()?;
+            let rows = stmt.query_map([&jids_json], task_from_row).db()?;
+            collect_tasks(rows)
+        })
+    }
+
+    /// Number of tasks recorded as owned by `owner` (an IPC key, see
+    /// [`Db::set_task_owner`]) that are not `completed` — i.e. active and
+    /// paused tasks (a NULL status counts as active, like everywhere else).
+    /// Orphaned owner records are ignored; host-owned tasks (no record) are
+    /// never counted. Used for per-lane task quotas (N-3).
+    pub fn count_tasks_owned_by(&self, owner: &str) -> Result<u64> {
+        self.with_conn(|conn| {
+            let n: i64 = conn
+                .prepare_cached(
+                    "SELECT COUNT(*) FROM task_owners o
+                     JOIN scheduled_tasks t ON t.id = o.task_id
+                     WHERE o.owner = ?1 AND COALESCE(t.status, 'active') != 'completed'",
+                )
+                .db()?
+                .query_row([owner], |row| row.get(0))
+                .db()?;
+            // COUNT(*) is never negative.
+            Ok(u64::try_from(n).unwrap_or(0))
+        })
+    }
+
     /// All tasks, newest first. Corrupt rows are skipped.
     pub fn get_all_tasks(&self) -> Result<Vec<ScheduledTask>> {
         self.with_conn(|conn| {
@@ -850,6 +896,155 @@ mod tests {
                 db.get_task_owner("t").unwrap().as_deref(),
                 Some("copilot-u-bob")
             );
+        }
+    }
+
+    // --- per-lane queries (N-3) ---
+
+    #[test]
+    fn get_tasks_for_jids_filters_by_jid_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, jid, created) in [
+            ("a1", "http:copilot:u:alice", "2024-01-01T00:00:00.000Z"),
+            ("a2", "http:copilot:u:alice", "2024-03-01T00:00:00.000Z"),
+            ("b1", "http:copilot:u:bob", "2024-02-01T00:00:00.000Z"),
+            ("w1", "webhook:copilot", "2024-04-01T00:00:00.000Z"),
+        ] {
+            db.create_task(&ScheduledTask {
+                chat_jid: jid.into(),
+                group_folder: "copilot".into(),
+                created_at: created.into(),
+                ..task(id)
+            })
+            .unwrap();
+        }
+        let ids = |jids: &[&str]| -> Vec<String> {
+            let jids: Vec<String> = jids.iter().map(|j| (*j).to_string()).collect();
+            db.get_tasks_for_jids(&jids)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        assert_eq!(ids(&["http:copilot:u:alice"]), vec!["a2", "a1"]);
+        assert_eq!(
+            ids(&["http:copilot:u:alice", "http:copilot:u:bob"]),
+            vec!["a2", "b1", "a1"]
+        );
+        // duplicates in the list do not duplicate rows
+        assert_eq!(
+            ids(&["http:copilot:u:bob", "http:copilot:u:bob"]),
+            vec!["b1"]
+        );
+        assert!(ids(&[]).is_empty());
+        assert!(ids(&["unknown@g.us"]).is_empty());
+        // values are bound, never spliced: quotes / SQL / JSON-ish text are
+        // just non-matching JIDs
+        assert!(ids(&["' OR 1=1 --", "\"]", "%", "*"]).is_empty());
+        // full rows come back
+        let t = &db
+            .get_tasks_for_jids(&["webhook:copilot".to_string()])
+            .unwrap()[0];
+        assert_eq!(t.chat_jid, "webhook:copilot");
+        assert_eq!(t.prompt, "do something");
+    }
+
+    #[test]
+    fn get_tasks_for_jids_skips_corrupt_rows() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("good")).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type,
+                   schedule_value, next_run, status, created_at)
+                 VALUES ('bad', 'main', 'group@g.us', 'p', 'weekly', 'x', NULL, 'active', '2024')",
+                [],
+            )
+            .db()
+        })
+        .unwrap();
+        let got = db.get_tasks_for_jids(&["group@g.us".to_string()]).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "good");
+    }
+
+    #[test]
+    fn count_tasks_owned_by_counts_active_and_paused_only() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, status, owner) in [
+            ("a-active", TaskStatus::Active, Some("copilot-u-alice")),
+            ("a-paused", TaskStatus::Paused, Some("copilot-u-alice")),
+            ("a-done", TaskStatus::Completed, Some("copilot-u-alice")),
+            ("b-active", TaskStatus::Active, Some("copilot-u-bob")),
+            ("host", TaskStatus::Active, None),
+        ] {
+            db.create_task(&ScheduledTask { status, ..task(id) })
+                .unwrap();
+            if let Some(o) = owner {
+                db.set_task_owner(id, o).unwrap();
+            }
+        }
+        assert_eq!(db.count_tasks_owned_by("copilot-u-alice").unwrap(), 2);
+        assert_eq!(db.count_tasks_owned_by("copilot-u-bob").unwrap(), 1);
+        assert_eq!(db.count_tasks_owned_by("host").unwrap(), 0);
+        assert_eq!(db.count_tasks_owned_by("nobody").unwrap(), 0);
+        assert_eq!(db.count_tasks_owned_by("").unwrap(), 0);
+
+        // completing / deleting a task frees its slot; resuming takes it back
+        db.update_task_after_run("a-active", None, "done").unwrap();
+        assert_eq!(db.count_tasks_owned_by("copilot-u-alice").unwrap(), 1);
+        db.delete_task("a-paused").unwrap();
+        assert_eq!(db.count_tasks_owned_by("copilot-u-alice").unwrap(), 0);
+        db.update_task(
+            "a-done",
+            &TaskUpdate {
+                status: Some(TaskStatus::Active),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(db.count_tasks_owned_by("copilot-u-alice").unwrap(), 1);
+    }
+
+    #[test]
+    fn count_tasks_owned_by_treats_null_status_as_active_and_ignores_orphans() {
+        let db = Db::open_in_memory().unwrap();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type,
+                   schedule_value, status, created_at)
+                 VALUES ('legacy', 'main', 'j', 'p', 'cron', '0 9 * * *', NULL, '2024');
+                 INSERT INTO task_owners (task_id, owner, created_at)
+                 VALUES ('legacy', 'lane-1', '2024');
+                 PRAGMA foreign_keys = OFF;
+                 INSERT INTO task_owners (task_id, owner, created_at)
+                 VALUES ('gone', 'lane-1', '2024');
+                 PRAGMA foreign_keys = ON;",
+            )
+            .db()
+        })
+        .unwrap();
+        assert_eq!(db.count_tasks_owned_by("lane-1").unwrap(), 1);
+    }
+
+    #[test]
+    fn per_lane_indexes_exist() {
+        let db = Db::open_in_memory().unwrap();
+        let names: Vec<String> = db
+            .with_conn(|c| {
+                let mut stmt = c
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name")
+                    .db()?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .db()?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .db()?;
+                Ok(rows)
+            })
+            .unwrap();
+        for idx in ["idx_scheduled_tasks_chat_jid", "idx_task_owners_owner"] {
+            assert!(names.iter().any(|n| n == idx), "missing {idx}: {names:?}");
         }
     }
 

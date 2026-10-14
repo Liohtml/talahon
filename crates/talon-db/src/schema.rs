@@ -10,7 +10,9 @@
 //!
 //! Additions of the Rust release (all invisible to the TypeScript code):
 //! - `messages.thread_id`, `registered_groups.lane_config` (nullable)
-//! - `idx_messages_chat_ts` (per-chat message queries)
+//! - `idx_messages_chat_ts` (per-chat message queries),
+//!   `idx_scheduled_tasks_chat_jid` (per-lane task snapshots),
+//!   `idx_task_owners_owner` (per-lane task quotas)
 //! - tables `audit_log` (+ append-only triggers), `investigations`,
 //!   `ioc_sightings`, `task_owners`
 
@@ -93,6 +95,8 @@ const TS_BASE_SCHEMA: &str = r#"
 /// Tables and indexes introduced by the Rust release.
 const RUST_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, timestamp);
+    -- Per-lane task snapshots (`Db::get_tasks_for_jids`).
+    CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_chat_jid ON scheduled_tasks(chat_jid);
 
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,6 +161,8 @@ const RUST_SCHEMA: &str = r#"
       owner TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    -- Per-lane task quotas (`Db::count_tasks_owned_by`).
+    CREATE INDEX IF NOT EXISTS idx_task_owners_owner ON task_owners(owner);
 "#;
 
 /// A column added after a table's original `CREATE TABLE`.
