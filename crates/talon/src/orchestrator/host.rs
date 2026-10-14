@@ -58,13 +58,13 @@ impl Orchestrator {
     }
 
     /// Rewrite `current_tasks.json` for every IPC namespace (one write
-    /// each), filtered to the namespace's own lanes (MYTH-03).
+    /// each), filtered to the namespace's own lanes (MYTH-03); non-main
+    /// namespaces load only their own tasks (N-3).
     pub fn refresh_task_snapshots(&self) {
-        let tasks = self.all_tasks();
         let groups = self.groups_snapshot();
         let keys: BTreeSet<String> = groups.values().map(|g| g.ipc_key().to_string()).collect();
         for key in keys {
-            self.write_lane_tasks_snapshot_for(&key, &groups, None, &tasks);
+            self.write_lane_tasks_snapshot_for(&key, &groups, None);
         }
     }
 }

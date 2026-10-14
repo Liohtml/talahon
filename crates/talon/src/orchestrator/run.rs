@@ -10,15 +10,18 @@
 //! 3. Snapshots: `current_tasks.json` / `available_groups.json` in the
 //!    lane's IPC namespace. Tasks are filtered per lane (MYTH-03): a
 //!    non-main namespace only sees tasks whose chat JID belongs to one of
-//!    its own lanes, never those of other lanes sharing the group folder.
+//!    its own lanes, never those of other lanes sharing the group folder,
+//!    and only those are loaded from the database (N-3).
 //! 4. A per-run gateway token (TTL = the run's maximum lifetime + margin)
 //!    goes into `ContainerInput.llm` — stdin only — and is revoked when the
-//!    run ends.
+//!    run ends. Its label is the lane's IPC key (per-lane prefix-cache salt
+//!    and usage accounting in the gateway; N-6).
 //! 5. Output frames stream to the caller's handler in order over a
 //!    bounded channel (backpressure); every frame passes the run's
 //!    [`OutputGuard`] first (result text capped per frame, run aborted —
 //!    container stopped, rest dropped — when it exceeds its per-run caps;
-//!    MYTH-07). Session ids are persisted as they arrive.
+//!    MYTH-07). Session ids are persisted as they arrive, and only when
+//!    they are valid (at most 128 bytes of `[A-Za-z0-9_-]`; N-5).
 //! 6. Errors that say the stored session is gone clear it so the queue's
 //!    retry starts fresh.
 
@@ -38,7 +41,9 @@ use tokio::time::Instant;
 
 use super::Orchestrator;
 use crate::agent::{AgentOutcome, StartHook};
-use crate::output_limits::{Admission, OUTPUT_CHANNEL_CAPACITY, OutputGuard, cap_text};
+use crate::output_limits::{
+    Admission, OUTPUT_CHANNEL_CAPACITY, OutputGuard, cap_text, sanitize_session_id,
+};
 
 /// How long an aborted run's container gets to stop before the run is left
 /// to the runner's own timeout handling.
@@ -117,9 +122,15 @@ impl Orchestrator {
         }
     }
 
-    /// All scheduled tasks (snapshot source).
-    pub(crate) fn all_tasks(&self) -> Vec<ScheduledTask> {
-        match self.db.get_all_tasks() {
+    /// The tasks a namespace's snapshot shows, loaded with the narrowest
+    /// query (see [`snapshot_task_query`]). A database error yields an
+    /// empty list (logged).
+    pub(crate) fn snapshot_tasks(&self, query: &TaskQuery) -> Vec<ScheduledTask> {
+        let loaded = match query {
+            TaskQuery::All => self.db.get_all_tasks(),
+            TaskQuery::ForJids(jids) => self.db.get_tasks_for_jids(jids),
+        };
+        match loaded {
             Ok(tasks) => tasks,
             Err(e) => {
                 tracing::warn!(error = %e, "cannot list tasks for snapshot");
@@ -128,15 +139,16 @@ impl Orchestrator {
         }
     }
 
-    /// Write `current_tasks.json` into IPC namespace `ipc_key`, showing a
-    /// non-main namespace only the tasks of its own lanes (`extra_jid`:
-    /// the running lane, in case it is not registered).
+    /// Write `current_tasks.json` into IPC namespace `ipc_key`. A main
+    /// namespace sees every task; any other only the tasks of its own lanes
+    /// (`extra_jid`: the running lane, in case it is not registered), and
+    /// only those are loaded from the database (N-3: a container start of
+    /// a non-main lane never loads the whole task table).
     pub(crate) fn write_lane_tasks_snapshot_for(
         &self,
         ipc_key: &str,
         groups: &HashMap<String, RegisteredGroup>,
         extra_jid: Option<&str>,
-        tasks: &[ScheduledTask],
     ) {
         // Main-ness comes from the registry only, never from `extra_jid`.
         let (mut jids, is_main) = lane_namespace(groups, ipc_key);
@@ -145,12 +157,13 @@ impl Orchestrator {
                 jids.push(jid.to_string());
             }
         }
+        let tasks = self.snapshot_tasks(&snapshot_task_query(is_main, &jids));
         if let Err(e) = talon_container::write_lane_tasks_snapshot(
             &self.config.data_dir,
             ipc_key,
             is_main,
             &jids,
-            tasks,
+            &tasks,
         ) {
             tracing::warn!(ipc_key, error = %e, "failed to write tasks snapshot");
         }
@@ -161,7 +174,7 @@ impl Orchestrator {
         let groups = self.groups_snapshot();
         let extra = (groups.get(chat_jid).map(RegisteredGroup::ipc_key) != Some(group.ipc_key()))
             .then_some(chat_jid);
-        self.write_lane_tasks_snapshot_for(group.ipc_key(), &groups, extra, &self.all_tasks());
+        self.write_lane_tasks_snapshot_for(group.ipc_key(), &groups, extra);
         let available = self.available_groups();
         if let Err(e) = talon_container::write_groups_snapshot(
             &self.config.data_dir,
@@ -286,7 +299,10 @@ impl Orchestrator {
             .hard_timeout(&merged)
             .saturating_add(self.config.idle_timeout)
             .saturating_add(self.settings.token_ttl_margin);
-        let (token, endpoint) = llm.issue(&group.folder, ttl, &vllm);
+        // Label = the lane's IPC key, not the folder: the gateway derives
+        // the per-label prefix-cache salt and usage stats from it, so lanes
+        // sharing a folder (CoPilot analysts) get separate caches (N-6).
+        let (token, endpoint) = llm.issue(group.ipc_key(), ttl, &vllm);
         let input = ContainerInput {
             prompt: prompt.to_string(),
             session_id: session_id.clone(),
@@ -362,7 +378,9 @@ impl Orchestrator {
             result.status = OutputStatus::Error;
             result.error = Some(reason);
         }
-        // The runner's own copies are as untrusted as the frames.
+        // The runner's own copies are as untrusted as the frames: the
+        // session id is validated again before it is persisted (N-5).
+        result.new_session_id = sanitize_session_id(result.new_session_id.take());
         result.error = result
             .error
             .as_deref()
@@ -418,6 +436,28 @@ impl Orchestrator {
                 RunOutcome::SetupFailed | RunOutcome::SpawnFailed
             ),
         }
+    }
+}
+
+/// Which tasks a `current_tasks.json` snapshot loads from the database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskQuery {
+    /// Every task (main namespaces only).
+    All,
+    /// Only the tasks whose chat JID is one of these (a non-main
+    /// namespace's own lanes; empty = none, no database access).
+    ForJids(Vec<String>),
+}
+
+/// The snapshot query of a namespace with lanes `jids`: [`TaskQuery::All`]
+/// for main, otherwise a query filtered to `jids` (N-3) — never the whole
+/// table, so a lane with many tasks of its own cannot make every other
+/// lane's container start load them.
+pub fn snapshot_task_query(is_main: bool, jids: &[String]) -> TaskQuery {
+    if is_main {
+        TaskQuery::All
+    } else {
+        TaskQuery::ForJids(jids.to_vec())
     }
 }
 
@@ -529,6 +569,20 @@ mod tests {
         let (jids, is_main) = lane_namespace(&groups, "main");
         assert_eq!(jids.len(), 2);
         assert!(!is_main);
+    }
+
+    #[test]
+    fn non_main_snapshots_query_only_their_own_lanes() {
+        let jids = vec!["http:copilot:u:alice".to_string()];
+        assert_eq!(snapshot_task_query(true, &jids), TaskQuery::All);
+        assert_eq!(
+            snapshot_task_query(false, &jids),
+            TaskQuery::ForJids(jids.clone())
+        );
+        assert_eq!(
+            snapshot_task_query(false, &[]),
+            TaskQuery::ForJids(Vec::new())
+        );
     }
 
     #[test]

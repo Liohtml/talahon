@@ -11,8 +11,9 @@
 //!   agent emits exactly one result frame per turn, so this is also the
 //!   per-turn cap of a well-behaved agent. Long results still reach
 //!   CoPilot in full through the agent's own MCP write-back; only the copy
-//!   delivered to the chat channel is shortened. Error texts and session
-//!   ids are capped too.
+//!   delivered to the chat channel is shortened. Error texts are capped
+//!   too, and session ids must pass [`is_valid_session_id`] (at most
+//!   [`MAX_SESSION_ID_BYTES`] of `[A-Za-z0-9_-]`; N-5) or are dropped.
 //! - **per run** (one container, including piped follow-ups): at most
 //!   [`OutputLimits::max_run_frames`] frames and
 //!   [`OutputLimits::max_run_result_bytes`] of (already truncated) result
@@ -35,9 +36,10 @@ pub const DEFAULT_MAX_RUN_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_MAX_RUN_FRAMES: usize = 1024;
 /// Default per-frame error text cap (bytes).
 pub const DEFAULT_MAX_ERROR_BYTES: usize = 8 * 1024;
-/// Session ids longer than this are ignored (they are persisted and sent
-/// back to the container on the next run).
-pub const MAX_SESSION_ID_BYTES: usize = 256;
+/// Session ids longer than this are ignored (they are persisted in the
+/// database, kept in memory, logged and sent back to the container on the
+/// next run). The agent's own ids are 36-byte UUIDs.
+pub const MAX_SESSION_ID_BYTES: usize = 128;
 /// How far back from the cut point a whitespace boundary is searched, so
 /// a truncation does not split a token (a partial secret would no longer
 /// match the redactor).
@@ -65,6 +67,34 @@ impl Default for OutputLimits {
             max_run_frames: DEFAULT_MAX_RUN_FRAMES,
             max_error_bytes: DEFAULT_MAX_ERROR_BYTES,
         }
+    }
+}
+
+/// Whether `id` is acceptable as a session id reported by an agent:
+/// 1..=[`MAX_SESSION_ID_BYTES`] bytes of `[A-Za-z0-9_-]` (N-5). Anything
+/// else — oversized, path-like, control characters — is never persisted.
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_SESSION_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A session id reported by the agent, or `None` when it is absent, empty
+/// or invalid (see [`is_valid_session_id`]; invalid ids are logged —
+/// length only, never the id itself — and ignored).
+pub fn sanitize_session_id(id: Option<String>) -> Option<String> {
+    let id = id.filter(|id| !id.is_empty())?;
+    if is_valid_session_id(&id) {
+        Some(id)
+    } else {
+        tracing::warn!(
+            bytes = id.len(),
+            limit = MAX_SESSION_ID_BYTES,
+            "agent reported an invalid session id (oversized or not [A-Za-z0-9_-]); ignored"
+        );
+        None
     }
 }
 
@@ -183,14 +213,7 @@ impl OutputGuard {
         if let Some(error) = output.error.take() {
             output.error = Some(cap_text(&error, self.limits.max_error_bytes));
         }
-        if output
-            .new_session_id
-            .as_ref()
-            .is_some_and(|id| id.len() > MAX_SESSION_ID_BYTES)
-        {
-            tracing::warn!("agent reported an oversized session id; ignored");
-            output.new_session_id = None;
-        }
+        output.new_session_id = sanitize_session_id(output.new_session_id.take());
         Admission::Deliver(output)
     }
 }
@@ -272,6 +295,66 @@ mod tests {
         assert_eq!(ok.result.as_deref(), Some("hi"));
         assert_eq!(ok.new_session_id.as_deref(), Some("sess-1"));
         assert_eq!(guard.frames(), 3);
+    }
+
+    #[test]
+    fn session_ids_are_validated() {
+        assert!(is_valid_session_id("3f2b8c1e-9a4d-4e6f-8b7a-0c1d2e3f4a5b"));
+        assert!(is_valid_session_id("sess_1-A"));
+        assert!(is_valid_session_id(&"a".repeat(MAX_SESSION_ID_BYTES)));
+        assert!(!is_valid_session_id(&"a".repeat(MAX_SESSION_ID_BYTES + 1)));
+        assert!(!is_valid_session_id(""));
+        for bad in [
+            "../../etc/passwd",
+            "a/b",
+            "a.b",
+            "a b",
+            "line\nbreak",
+            "tab\t",
+            "ümlaut",
+            "id;rm",
+            "\u{1b}[31m",
+        ] {
+            assert!(!is_valid_session_id(bad), "{bad:?} must be rejected");
+        }
+        assert_eq!(sanitize_session_id(None), None);
+        assert_eq!(sanitize_session_id(Some(String::new())), None);
+        assert_eq!(sanitize_session_id(Some("x/y".into())), None);
+        assert_eq!(
+            sanitize_session_id(Some("x".repeat(MAX_SESSION_ID_BYTES + 1))),
+            None
+        );
+        assert_eq!(
+            sanitize_session_id(Some("sess-1".into())).as_deref(),
+            Some("sess-1")
+        );
+    }
+
+    #[test]
+    fn guard_drops_invalid_session_ids() {
+        let mut guard = OutputGuard::new(limits(1000, 1_000_000, 10));
+        for bad in [
+            "s".repeat(MAX_SESSION_ID_BYTES + 1),
+            "../sessions/x".to_string(),
+            "id with spaces".to_string(),
+            "evil\nlog line".to_string(),
+        ] {
+            let Admission::Deliver(out) =
+                guard.admit(ContainerOutput::success(Some("ok".into()), Some(bad)))
+            else {
+                panic!("must deliver");
+            };
+            assert_eq!(out.new_session_id, None);
+            // The rest of the frame is still delivered.
+            assert_eq!(out.result.as_deref(), Some("ok"));
+        }
+        let max = "s".repeat(MAX_SESSION_ID_BYTES);
+        let Admission::Deliver(out) =
+            guard.admit(ContainerOutput::success(None, Some(max.clone())))
+        else {
+            panic!("must deliver");
+        };
+        assert_eq!(out.new_session_id, Some(max));
     }
 
     #[test]

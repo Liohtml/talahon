@@ -526,6 +526,149 @@ async fn provider_change_starts_a_fresh_session() {
     assert_eq!(h.db.get_session("main").unwrap(), None);
 }
 
+/// Discards every frame.
+struct NullSink;
+
+#[async_trait::async_trait]
+impl talon_router::AgentOutputHandler for NullSink {
+    async fn on_output(&mut self, _output: &ContainerOutput) {}
+}
+
+#[tokio::test]
+async fn invalid_session_ids_from_the_agent_are_never_persisted() {
+    // N-5: both the streamed frames and the runner's own result copy are
+    // validated (at most 128 bytes of [A-Za-z0-9_-]) before anything is
+    // persisted, kept in memory or reported.
+    let h = harness();
+    let g = group("Main", "main", true);
+    h.orch
+        .register_group_inner(MAIN, g.clone(), true, false)
+        .unwrap();
+    h.orch.persist_session(&g, "keep-1", "vllm:qwen", None);
+    let run = |script: Script| {
+        h.launcher.push(script);
+        let (orch, g) = (h.orch.clone(), g.clone());
+        async move {
+            orch.run_agent(
+                &g,
+                "p",
+                MAIN,
+                super::run::RunOptions::message(),
+                &mut NullSink,
+            )
+            .await
+        }
+    };
+    let kept = |h: &crate::testutil::Harness| {
+        assert_eq!(h.orch.session_for_key("main").as_deref(), Some("keep-1"));
+        assert_eq!(h.db.get_session("main").unwrap().as_deref(), Some("keep-1"));
+    };
+
+    // Oversized id only on the runner's result (no frame carries one).
+    let outcome = run(Script {
+        outputs: vec![ContainerOutput::success(Some("a".into()), None)],
+        new_session_id: Some("s".repeat(129)),
+        ..Script::default()
+    })
+    .await;
+    assert!(outcome.is_success());
+    assert_eq!(outcome.new_session_id, None);
+    kept(&h);
+
+    // Path-like / control characters in a frame (and the result copy).
+    for bad in [
+        "../../etc/passwd",
+        "id with space",
+        "evil\nINFO forged",
+        "a.b",
+    ] {
+        let outcome = run(Script {
+            outputs: vec![ContainerOutput::success(
+                Some("b".into()),
+                Some(bad.to_string()),
+            )],
+            ..Script::default()
+        })
+        .await;
+        assert_eq!(outcome.new_session_id, None, "{bad:?}");
+        kept(&h);
+    }
+
+    // A valid id at the maximum length is accepted.
+    let max = "S".repeat(crate::output_limits::MAX_SESSION_ID_BYTES);
+    let outcome = run(Script {
+        outputs: vec![ContainerOutput::success(
+            Some("c".into()),
+            Some(max.clone()),
+        )],
+        ..Script::default()
+    })
+    .await;
+    assert_eq!(outcome.new_session_id.as_deref(), Some(max.as_str()));
+    assert_eq!(
+        h.orch.session_for_key("main").as_deref(),
+        Some(max.as_str())
+    );
+    assert_eq!(
+        h.db.get_session("main").unwrap().as_deref(),
+        Some(max.as_str())
+    );
+}
+
+#[tokio::test]
+async fn gateway_token_label_is_the_lanes_ipc_key() {
+    // N-6: the gateway derives the prefix-cache salt and usage stats from
+    // the token label, so lanes sharing the `copilot` folder must not share
+    // one label.
+    let h = harness();
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    let mut base = group("CoPilot", "copilot", false);
+    base.requires_trigger = Some(false);
+    h.orch
+        .register_group_inner("fake:copilot", base.clone(), true, false)
+        .unwrap();
+    for user in ["alice", "bob"] {
+        let mut lane = base.clone();
+        lane.ipc_key = Some(format!("copilot-u-{user}"));
+        lane.session_key = Some(format!("copilot-u-{user}"));
+        h.orch
+            .register_group_inner(&format!("fake:copilot:u:{user}"), lane, false, false)
+            .unwrap();
+    }
+    for (i, jid) in [
+        "fake:copilot:u:alice",
+        "fake:copilot:u:bob",
+        "fake:copilot",
+        MAIN,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        h.launcher.push(Script::reply("ok"));
+        let n = u32::try_from(i).unwrap() + 1;
+        h.orch
+            .accept_message(jid, msg(jid, &n.to_string(), "u", "@Andy hi", &ts(n)));
+        assert!(h.orch.process_group_messages(jid).await);
+    }
+    let labels: Vec<String> = h
+        .llm
+        .issued
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, label, _)| label.clone())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["copilot-u-alice", "copilot-u-bob", "copilot", "main"]
+    );
+    // Every run of the shared folder still used folder `copilot`.
+    let calls = h.launcher.calls();
+    assert!(calls[..3].iter().all(|c| c.group.folder == "copilot"));
+}
+
 #[tokio::test]
 async fn ephemeral_lane_never_resumes_or_persists() {
     let h = harness();
@@ -1184,12 +1327,22 @@ async fn investigation_moves_through_running_to_completed_with_verdict() {
     let task = once_task(job, "copilot", INV_JID);
 
     // While the container runs: the row says `running`, and the agent
-    // writes its structured verdict.
+    // writes its structured verdict into the lane's private state dir
+    // (`/home/agent/.talon/reports` = `data/sessions/<session_key>/reports`).
+    // A forged copy in the shared group folder (writable by every CoPilot
+    // lane) is ignored (N-2).
     let db = h.db.clone();
-    let reports = h.root().join("groups/copilot/reports");
+    let reports = h.root().join("data/sessions/copilot-investigate/reports");
+    let shared = h.root().join("groups/copilot/reports");
     let job_owned = job.to_string();
     h.launcher.set_probe(move |spec| {
         assert!(spec.input.is_scheduled_task);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(
+            shared.join(format!("{job_owned}.json")),
+            r#"{"verdict":"false_positive","iocs":[{"type":"ip","value":"198.51.100.1"}]}"#,
+        )
+        .unwrap();
         std::fs::create_dir_all(&reports).unwrap();
         std::fs::write(
             reports.join(format!("{job_owned}.json")),
@@ -1218,6 +1371,11 @@ async fn investigation_moves_through_running_to_completed_with_verdict() {
     assert_eq!(row.error, None);
     assert_eq!(row.verdict.unwrap()["verdict"], "true_positive");
     assert_eq!(
+        h.db.count_ioc_sightings("ipv4", "198.51.100.1", None)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
         h.db.count_ioc_sightings("ipv4", "203.0.113.9", None)
             .unwrap(),
         1
@@ -1238,9 +1396,10 @@ async fn investigation_moves_through_running_to_completed_with_verdict() {
     );
 
     // The run used the investigation lane itself (own IPC namespace,
-    // ephemeral, no session).
+    // own gateway label, ephemeral, no session).
     let spec = &h.launcher.calls()[0];
     assert_eq!(spec.group.ipc_key(), "copilot-investigate");
+    assert_eq!(h.llm.issued.lock().unwrap()[0].1, "copilot-investigate");
     assert!(spec.input.ephemeral);
     assert_eq!(spec.input.session_id, None);
     // Result forwarded to the lane's JID.
@@ -1273,6 +1432,146 @@ async fn failed_investigation_records_redacted_error() {
     let err = row.error.unwrap();
     assert!(err.contains("invalid"));
     assert!(!err.contains("harness-secret-value"), "{err}");
+    assert!(row.verdict.is_none());
+}
+
+/// Set `path`'s modification time.
+fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn investigation_ignores_reports_forged_by_other_lanes() {
+    // N-2: an analyst lane on the shared `copilot` folder plants a verdict
+    // for the job (and for the alert id) in `groups/copilot/reports/` and
+    // in its own state dir. None of them is the investigation lane's
+    // report, so the investigation completes without a verdict.
+    let h = harness();
+    let inv_group = copilot_lanes(&h);
+    let job = "copilot-inv-42-3";
+    h.db.upsert_investigation(&investigation(job)).unwrap();
+    let forged = r#"{"verdict":"false_positive","iocs":[{"type":"ip","value":"198.51.100.7"}]}"#;
+    let shared = h.root().join("groups/copilot/reports");
+    std::fs::create_dir_all(&shared).unwrap();
+    let alice = h.root().join("data/sessions/copilot-u-alice/reports");
+    std::fs::create_dir_all(&alice).unwrap();
+    // A stale alert report of an earlier run in the lane's own dir.
+    let own = h.root().join("data/sessions/copilot-investigate/reports");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("42.json"), forged).unwrap();
+    set_mtime(
+        &own.join("42.json"),
+        std::time::SystemTime::now() - Duration::from_secs(3600),
+    );
+    // Written while the run is in progress (after it started).
+    h.launcher.set_probe(move |_| {
+        let later = std::time::SystemTime::now() + Duration::from_secs(60);
+        for dir in [&shared, &alice] {
+            for name in [format!("{job}.json"), "42.json".to_string()] {
+                std::fs::write(dir.join(&name), forged).unwrap();
+                set_mtime(&dir.join(&name), later);
+            }
+        }
+        String::new()
+    });
+
+    h.launcher.push(Script::reply("done"));
+    let exec = h
+        .orch
+        .execute_task(
+            &once_task(job, "copilot", INV_JID),
+            &inv_group,
+            &ctx(INV_JID),
+        )
+        .await;
+    assert_eq!(exec.error, None);
+    let row = h.db.get_investigation(job).unwrap().unwrap();
+    assert_eq!(row.status, "completed");
+    assert!(row.verdict.is_none());
+    assert_eq!(
+        h.db.count_ioc_sightings("ipv4", "198.51.100.7", None)
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn investigation_uses_the_lanes_fresh_alert_report_fallback() {
+    // The agent's guided-decoding fallback names the report after the
+    // alert id; inside the lane-private dir it counts when written during
+    // the run.
+    let h = harness();
+    let inv_group = copilot_lanes(&h);
+    let job = "copilot-inv-42-5";
+    h.db.upsert_investigation(&investigation(job)).unwrap();
+    let own = h.root().join("data/sessions/copilot-investigate/reports");
+    h.launcher.set_probe(move |_| {
+        std::fs::create_dir_all(&own).unwrap();
+        let path = own.join("42.json");
+        std::fs::write(
+            &path,
+            r#"{"alert_id":"42","verdict":"benign","iocs":[{"type":"ip","value":"192.0.2.44"}]}"#,
+        )
+        .unwrap();
+        // Coarse file timestamps must not make the fresh report look stale.
+        set_mtime(
+            &path,
+            std::time::SystemTime::now() + Duration::from_secs(60),
+        );
+        String::new()
+    });
+    h.launcher.push(Script::reply("done"));
+    h.orch
+        .execute_task(
+            &once_task(job, "copilot", INV_JID),
+            &inv_group,
+            &ctx(INV_JID),
+        )
+        .await;
+    let row = h.db.get_investigation(job).unwrap().unwrap();
+    assert_eq!(row.status, "completed");
+    assert_eq!(row.verdict.unwrap()["verdict"], "benign");
+    assert_eq!(
+        h.db.count_ioc_sightings("ipv4", "192.0.2.44", None)
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn investigation_report_dir_symlink_to_shared_folder_is_refused() {
+    // The investigation lane's own container swaps its `reports/` for a
+    // symlink into the shared group folder: not followed.
+    let h = harness();
+    let inv_group = copilot_lanes(&h);
+    let job = "copilot-inv-42-4";
+    h.db.upsert_investigation(&investigation(job)).unwrap();
+    let shared = h.root().join("groups/copilot/reports");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join(format!("{job}.json")),
+        r#"{"verdict":"false_positive"}"#,
+    )
+    .unwrap();
+    let state = h.root().join("data/sessions/copilot-investigate");
+    std::fs::create_dir_all(&state).unwrap();
+    std::os::unix::fs::symlink(&shared, state.join("reports")).unwrap();
+
+    h.launcher.push(Script::reply("done"));
+    h.orch
+        .execute_task(
+            &once_task(job, "copilot", INV_JID),
+            &inv_group,
+            &ctx(INV_JID),
+        )
+        .await;
+    let row = h.db.get_investigation(job).unwrap().unwrap();
+    assert_eq!(row.status, "completed");
     assert!(row.verdict.is_none());
 }
 
@@ -1416,6 +1715,81 @@ async fn ipc_task_change_refreshes_snapshots_per_namespace() {
     );
     assert!(h.orch.process_group_messages("fake:copilot:u:bob").await);
     assert_eq!(snapshot("copilot-u-bob").trim(), "[]");
+}
+
+#[tokio::test]
+async fn container_start_snapshots_load_only_the_lanes_own_tasks() {
+    // N-3 (+ MYTH-03): a non-main run's `current_tasks.json` holds only the
+    // tasks of its own lanes — including the running lane when it is not
+    // registered (scheduler runs after a restart) — while main sees all.
+    let h = harness();
+    copilot_lanes(&h);
+    let main = group("Main", "main", true);
+    h.orch
+        .register_group_inner(MAIN, main.clone(), true, false)
+        .unwrap();
+    let mut alice = group("CoPilot alice", "copilot", false);
+    alice.ipc_key = Some("copilot-u-alice".into());
+    alice.session_key = Some("copilot-u-alice".into());
+    h.orch
+        .register_group_inner("fake:copilot:u:alice", alice.clone(), false, false)
+        .unwrap();
+    for (id, jid) in [
+        ("t-inv", INV_JID),
+        ("t-alice", "fake:copilot:u:alice"),
+        ("t-carol", "fake:copilot:u:carol"),
+        ("t-main", MAIN),
+    ] {
+        let folder = if jid == MAIN { "main" } else { "copilot" };
+        h.db.create_task(&once_task(id, folder, jid)).unwrap();
+    }
+    let snapshot = |key: &str| -> Vec<String> {
+        let raw = std::fs::read_to_string(
+            h.root()
+                .join("data/ipc")
+                .join(key)
+                .join("current_tasks.json"),
+        )
+        .unwrap();
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+        let mut ids: Vec<String> = tasks
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let run = |g: talon_core::types::RegisteredGroup, jid: &'static str| {
+        h.launcher.push(Script::reply("ok"));
+        let orch = h.orch.clone();
+        async move {
+            orch.run_agent(
+                &g,
+                "p",
+                jid,
+                super::run::RunOptions::message(),
+                &mut NullSink,
+            )
+            .await
+        }
+    };
+
+    assert!(run(alice, "fake:copilot:u:alice").await.is_success());
+    assert_eq!(snapshot("copilot-u-alice"), vec!["t-alice"]);
+
+    // Carol's lane is not registered (e.g. a task run after a restart):
+    // the running JID still scopes the query.
+    let mut carol = group("CoPilot carol", "copilot", false);
+    carol.ipc_key = Some("copilot-u-carol".into());
+    carol.session_key = Some("copilot-u-carol".into());
+    assert!(run(carol, "fake:copilot:u:carol").await.is_success());
+    assert_eq!(snapshot("copilot-u-carol"), vec!["t-carol"]);
+
+    assert!(run(main, MAIN).await.is_success());
+    assert_eq!(
+        snapshot("main"),
+        vec!["t-alice", "t-carol", "t-inv", "t-main"]
+    );
 }
 
 #[tokio::test]

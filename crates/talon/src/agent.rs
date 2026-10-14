@@ -42,9 +42,11 @@ pub trait ContainerLauncher: Send + Sync {
 
 /// Per-run model credentials.
 pub trait LlmAccess: Send + Sync {
-    /// Issue a credential for one run (`label` = group folder, used for
-    /// usage accounting) and the endpoint description for
-    /// `ContainerInput.llm`. Returns `(token, endpoint)`.
+    /// Issue a credential for one run (`label` = the lane's IPC key, used
+    /// for usage accounting and the gateway's per-label prefix-cache salt,
+    /// so lanes sharing a group folder never share a cache) and the
+    /// endpoint description for `ContainerInput.llm`. Returns
+    /// `(token, endpoint)`.
     fn issue(&self, label: &str, ttl: Duration, vllm: &VllmConfig) -> (String, LlmEndpoint);
 
     /// Revoke a credential when its run is over.

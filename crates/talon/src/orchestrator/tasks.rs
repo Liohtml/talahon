@@ -9,7 +9,8 @@
 //! after its result, and — when the task is an investigation job (task id
 //! == investigation id) — moves the `investigations` row through
 //! `running` -> `completed` / `failed`, attaches the agent's structured
-//! verdict and records its IOC sightings.
+//! verdict (read from the investigation lane's private state directory,
+//! never the shared group folder) and records its IOC sightings.
 
 use std::time::SystemTime;
 
@@ -98,8 +99,12 @@ impl Orchestrator {
     }
 
     /// Record the end of an investigation run: status, error, verdict and
-    /// IOC sightings. The agent-written report is read on the blocking
-    /// pool without following symlinks (MYTH-10).
+    /// IOC sightings. The agent-written report is read from the private
+    /// agent state directory of the lane that ran the investigation
+    /// (`data/sessions/<session_key>/reports/<job_id>.json`, else the
+    /// alert's report written after `run_started`; never the shared group
+    /// folder, N-2), on the blocking pool and without following symlinks
+    /// (MYTH-10).
     pub(crate) async fn investigation_finished(
         &self,
         mut inv: Investigation,
@@ -108,8 +113,8 @@ impl Orchestrator {
         run_started: SystemTime,
     ) {
         let verdict = load_verdict_async(
-            self.config.groups_dir.clone(),
-            group.folder.clone(),
+            self.config.data_dir.clone(),
+            group.session_key().to_string(),
             inv.id.clone(),
             inv.alert_id.clone(),
             run_started,
