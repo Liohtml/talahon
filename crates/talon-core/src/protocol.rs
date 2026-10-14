@@ -223,6 +223,7 @@ pub enum IpcOutbound {
 /// tasks and may never register groups.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // short-lived parse result; boxing would churn every consumer
 pub enum IpcTask {
     ScheduleTask {
         #[serde(rename = "taskId", default, skip_serializing_if = "Option::is_none")]
