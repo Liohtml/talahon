@@ -1,3 +1,5 @@
+> **Legacy (Talon 1.x / NanoClaw, TypeScript).** This document describes the pre-2.0 Node.js implementation. Talon 2.0 is a Rust rewrite with vLLM as the model provider — see [RUST_ARCHITECTURE.md](RUST_ARCHITECTURE.md), [PROVIDER_SELECTION.md](PROVIDER_SELECTION.md) and the [README](../README.md).
+
 # Running NanoClaw in Docker Sandboxes (Manual Setup)
 
 This guide walks through setting up NanoClaw inside a [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) from scratch — no install script, no pre-built fork. You'll clone the upstream repo, apply the necessary patches, and have agents running in full hypervisor-level isolation.

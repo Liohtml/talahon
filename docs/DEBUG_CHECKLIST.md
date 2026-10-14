@@ -1,3 +1,5 @@
+> **Legacy (Talon 1.x / NanoClaw, TypeScript).** This document describes the pre-2.0 Node.js implementation. Talon 2.0 is a Rust rewrite with vLLM as the model provider — see [RUST_ARCHITECTURE.md](RUST_ARCHITECTURE.md), [PROVIDER_SELECTION.md](PROVIDER_SELECTION.md) and the [README](../README.md).
+
 # NanoClaw Debug Checklist
 
 ## Known Issues (2026-02-08)

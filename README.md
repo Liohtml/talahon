@@ -15,7 +15,7 @@ Talon
 
 <h4 align="center">
 
-Talon is an automated AI SOC analyst built by <a href="https://www.socfortress.co">SOCfortress</a> for the <a href="https://github.com/socfortress/CoPilot">CoPilot</a> stack. It runs as a background service alongside CoPilot — pulling raw events from your Wazuh/OpenSearch SIEM, enriching them with threat intelligence, correlating across your environment, and writing structured investigation reports with severity assessments and recommended actions directly back into CoPilot.
+Talon is an automated AI SOC analyst built by <a href="https://www.socfortress.co">SOCfortress</a> for the <a href="https://github.com/socfortress/CoPilot">CoPilot</a> stack. It runs as a background service alongside CoPilot — pulling raw events from your Wazuh/OpenSearch SIEM, enriching them with threat intelligence, correlating across your environment, and writing structured investigation reports with severity assessments and recommended actions directly back into CoPilot.<br><br><strong>Talon 2.0</strong> is a ground-up rewrite in <strong>Rust</strong>, runs entirely on your own <strong>vLLM</strong> model server, and is hardened end to end.
 
 📚 <strong>Docs:</strong> <a href="https://docs.socfortress.co">docs.socfortress.co</a>
 
@@ -27,106 +27,86 @@ Talon is an automated AI SOC analyst built by <a href="https://www.socfortress.c
 
 ## What It Does
 
-- **Automated Tier 1 investigations** — every OPEN alert is investigated end-to-end: SIEM raw event → IOC extraction → VirusTotal / Shodan / AbuseIPDB → MITRE ATT&CK correlation → structured report
-- **Two trigger paths** — real-time via `POST /investigate` (CoPilot calls this when an alert is created) and a 15-minute scheduled sweep as a safety net
-- **Writes back to CoPilot** — job status, full report, and enriched IOCs are persisted in CoPilot's database via its REST API; no direct database writes
-- **Privacy-aware by default** — an anonymizing MCP proxy intercepts raw SIEM events and replaces PII (usernames, hostnames, internal IPs) with session tokens before they reach the cloud model; a built-in `deanonymize` tool restores real values in the final report
-- **Optional local LLM analysis** — if [Ollama](https://ollama.com) is running, the agent routes raw event interpretation through a local model instead of the cloud; no config needed if Ollama is on the same host
-- **Alert-type prompt templates** — per-alert-type investigation guides (Sysmon Event 1, 3, 7, 11, 22) are loaded automatically based on the alert's `rule.groups` field; add new templates without touching code
+- **Automated Tier 1/2 investigations** — every alert is investigated end-to-end: SIEM raw event → offline IOC/MITRE/command-line analysis → threat intel (CVE MCP: VirusTotal, Shodan, AbuseIPDB, GreyNoise, NVD/EPSS/KEV, …) → environment correlation → **structured verdict** (true/false positive, severity, confidence, evidence, recommended actions)
+- **Self-hosted model** — the agent loop is native Rust talking to **vLLM** (OpenAI-compatible API, tool calling, guided JSON decoding). No cloud LLM, no Node.js, no SDK: SIEM data never leaves your infrastructure
+- **Two trigger paths** — real-time `POST /investigate` from CoPilot and a scheduled sweep as a safety net, with duplicate-trigger deduplication
+- **Writes back to CoPilot** — job status, report and enriched IOCs via CoPilot's REST API (MCP tools); verdicts and IOC sightings are also kept locally for correlation across alerts
+- **Built-in SOC intelligence** — deterministic, offline engine: low-false-positive IOC extraction (16 types, defang-aware), 265-entry MITRE ATT&CK mapping (Sysmon/Windows event IDs, Wazuh rule groups, command-line evidence), LOLBin/obfuscation analysis with PowerShell decoding, explainable 0–100 triage scoring, alert correlation
+- **Privacy by design** — the anonymizing MCP proxy (now in Rust) tokenizes usernames, hosts, internal IPs/domains, SIDs, MACs and profile paths before results reach the model; `deanonymize` restores them for the final report
+- **Security-first architecture** — prompt-injection fencing for all untrusted data, privilege-separated containers, per-run LLM tokens, SSRF-safe egress, secret redaction, hash-chained audit log (see [Security](#security))
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                 CoPilot (FastAPI)                    │
-│                                                      │
-│  Alert created → POST /investigate ──────────────┐   │
-│  GET /status, GET /jobs/:alertId ← Talon HTTP API │   │
-│                                                   │   │
-│  Write-back API (MCP tools):                      │   │
-│    POST /api/ai_analyst/jobs          ←───────────┘   │
-│    POST /api/ai_analyst/reports                       │
-│    POST /api/ai_analyst/iocs                          │
-│  MySQL: ai_analyst_job / report / ioc                 │
-└───────────────────────┬───────────────────────────────┘
-                        │ read-only MCP        ▲ REST write-back
-                        ▼                      │
-┌─────────────────────────────────────────────────────┐
-│                   Talon (Node.js)                    │
-│                                                      │
-│  HTTP channel (port 3100)                            │
-│    POST /investigate  ← CoPilot triggers this        │
-│    POST /message      ← ad-hoc analyst prompts       │
-│    GET  /status       ← queue + job overview         │
-│    GET  /jobs/:id     ← per-alert report status      │
-│    GET  /health                                      │
-│                                                      │
-│  Scheduled task (every 15 min)                       │
-│    Queries MySQL for OPEN alerts with no job row     │
-│    Runs full investigation per alert                 │
-│                                                      │
-│  SOC agent container                                 │
-│    groups/copilot/CLAUDE.md  ← investigation flow    │
-│    groups/copilot/prompts/   ← per-alert templates   │
-└─────────────────────────────────────────────────────┘
-         │ MCP tools (read-only)
-         ▼
-┌────────────────────────────────────────────────────────────┐
-│  opensearch-mcp     — raw SIEM queries                     │
-│  opensearch_anon    — anonymizing proxy (PII → tokens)     │
-│  mysql-mcp          — CoPilot DB (alerts, assets, agents)  │
-│  copilot-mcp        — CoPilot REST API write-back          │
-│  wazuh-mcp          — Wazuh manager API (agents, rules, SCA) │
-│  velociraptor-mcp   — Velociraptor DFIR (artifacts, VQL, collections) │
-│  shuffle-mcp        — Shuffle SOAR catalog (3,000+ apps, agent runs) │
-│  cve-mcp            — CVE/EPSS/KEV + IOC enrichment (27 tools, 21 sources) │
-│  ollama (optional)  — local LLM for sensitive event data   │
-└────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       CoPilot (FastAPI)                          │
+│  Alert created ─▶ POST /investigate     write-back via MCP tools │
+└───────────────┬──────────────────────────────────▲───────────────┘
+                │ HTTPS + API key                   │
+┌───────────────▼──────────────────────────────────┴───────────────┐
+│ talon (host, Rust)                                               │
+│  talon-http      CoPilot API: /investigate /message (SSE) /status│
+│                  /investigations /metrics /palace /evals         │
+│  talon-channels  Telegram · signed webhook · Emacs bridge        │
+│  talon-scheduler per-lane queue + cron/interval/once tasks       │
+│  talon-ipc       audited, authorized container→host requests     │
+│  talon-llm       LLM gateway: per-run tokens ─────────────┐      │
+│  talon-db        SQLite: messages, tasks, sessions,       │      │
+│                  investigations, IOC sightings, audit log │      │
+└───────────────┬───────────────────────────────────────────┼──────┘
+                │ docker run (hardened, one per lane/turn)  │
+┌───────────────▼───────────────────────────────┐   ┌───────▼──────┐
+│ talon-agent container                          │   │  vLLM server │
+│  supervise (root, no LLM)                      │   │  (your GPUs) │
+│   ├─ MCP servers as mcp-siem, mcp-mysql, …     │   └──────────────┘
+│   │  (secrets readable only by their own user) │
+│   └─ run (unprivileged agent loop) ────────────┼──▶ gateway ──▶ vLLM
+│       tools: bash, files, grep, web_fetch,     │
+│       intel tools, mcp__<server>__<tool>       │
+└────────────────────────────────────────────────┘
+   MCP servers: opensearch / opensearch_anon (anonymizing proxy) · mysql ·
+   copilot · wazuh · velociraptor · shuffle · cve · mempalace
 ```
 
-For the full architecture and design decisions, see:
-- [docs/COPILOT_INTEGRATION.md](docs/COPILOT_INTEGRATION.md) — trigger paths, MySQL schema, MCP tool reference, implementation roadmap
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — design philosophy and architecture decisions
-
----
-
-## Privacy & Anonymization
-
-Raw SIEM events contain sensitive data — usernames, internal hostnames, RFC1918 IPs. Talon's anonymizing MCP proxy intercepts all document and search results before they reach the Claude cloud API and replaces known PII fields with consistent session tokens:
-
-| Token | Replaces |
+| Crate | Responsibility |
 |---|---|
-| `USER_1`, `USER_2`, … | Usernames, account names (`data_win_eventdata_user`, etc.) |
-| `HOST_1`, `HOST_2`, … | Hostnames, computer names (`agent_name`, etc.) |
-| `IP_INT_1`, … | Internal / RFC1918 IP addresses |
-| `EMAIL_1`, … | Email addresses |
+| `talon` | Host binary: orchestrator, CLI (`run`, `setup`, `doctor`, `audit`) |
+| `talon-core` | Shared types, host↔container protocol, traits, config, scheduling |
+| `talon-agent` | In-container runtime: root supervisor + unprivileged vLLM agent loop |
+| `talon-llm` | vLLM client (streaming, tool-call recovery, guided decoding) + host gateway |
+| `talon-mcp` | Native Model Context Protocol client/server/manager |
+| `talon-tools` | Built-in agent tools with path guard and SSRF-safe `web_fetch` |
+| `talon-intel` | IOC / MITRE / command-line / triage / correlation engine + report schema |
+| `talon-anon` | PII anonymizer and `talon-anon-proxy` |
+| `talon-security` | Policies: injection guard, redaction, egress, mounts, senders, IPC authz, auth |
+| `talon-container` | Hardened docker/podman launcher, mounts, output parser |
+| `talon-scheduler` | Group queue and task scheduler |
+| `talon-ipc` | Host-side IPC watcher |
+| `talon-http`, `talon-channels`, `talon-router` | Channels and message formatting |
+| `talon-db` | SQLite store (schema-compatible with Talon 1.x) |
+| `talon-setup` | Setup / verify / service installation logic |
 
-Security-critical values — file hashes, external IPs, domains, process paths, rule metadata — pass through unchanged so threat intel lookups work normally. Before the final report is written, the agent calls a built-in `deanonymize` tool to restore real names and IPs so the analyst sees accurate output.
-
-Field definitions live in [`siem/anon_proxy/fields.yaml`](siem/anon_proxy/fields.yaml) — add new fields and `git pull` to distribute to all deployments.
-
-See [docs/ANON_PROXY.md](docs/ANON_PROXY.md) for a full walkthrough of the proxy flow.
+Design details: [docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md).
 
 ---
 
-## Local LLM Support (Ollama)
+## Security
 
-Two distinct Ollama integrations, used independently or together:
+Talon treats every alert field, log line, web page and tool result as attacker-controlled.
 
-**1. IOC extraction tool (existing)** — when an investigation runs, the agent routes raw-event interpretation through a local Ollama model so the full event JSON never leaves the host. The cloud agent still runs the investigation; Ollama just handles the "extract IOCs from this raw blob" step. Auto-detected at startup; no `.env` required for same-machine installs. See step 14 of the deployment guide.
-
-**2. Agent runtime replacement (air-gapped mode, new)** — replace the **entire Claude Agent runtime** with a local Ollama instance via four `.env` lines. The Claude Agent SDK is redirected at Ollama via `ANTHROPIC_BASE_URL`; Ollama 0.4+ speaks the Anthropic v1/messages API natively. No traffic to `api.anthropic.com`. Suitable for fully air-gapped or compliance-driven deployments.
-
-```bash
-TALON_PROVIDER=ollama
-TALON_OLLAMA_BASE_URL=http://host.docker.internal:11434
-TALON_OLLAMA_MODEL=llama3.3:70b
-TALON_OLLAMA_API_KEY=ollama
-```
-
-Restart Talon and every group inherits the provider. Default mode (no env vars) keeps using Anthropic Claude. See [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md) for model picker, latency expectations (~60-100s/turn vs 3-15s on Anthropic), and troubleshooting. Practical model floor for full Talon scaffolding is 32B; 70B recommended.
+| Layer | Defence |
+|---|---|
+| Prompt injection | Untrusted data is wrapped in randomly-nonced `<untrusted_data>` envelopes the model is told never to obey; a ~75-rule EN/DE scanner (normalization, base64/exfil decoders, tuned to stay silent on real SIEM telemetry) flags and audits high-risk content |
+| Model credentials | The vLLM key stays on the host gateway; each container run gets a short-lived token (SHA-256 stored, revoked at end) passed over stdin, never env. The gateway pins models, clamps tokens, strips dangerous vLLM parameters and rate-limits per run |
+| Container | `--cap-drop=ALL` (+ minimal caps for the supervisor), `no-new-privileges`, read-only rootfs + tmpfs, `--init`, pid/memory/cpu limits, no sudo/node in the image, fail-closed host blocks |
+| Privilege separation | Root supervisor launches each MCP server as its own `mcp-*` user from read-only config with a private HOME; the agent runs unprivileged and cannot read MCP secrets or their process environments |
+| Host ↔ container | Identity derived from the IPC directory, strict authorization (non-main lanes only touch their own tasks), `openat`/`O_NOFOLLOW` file handling, size/depth limits, claim-before-dispatch, every decision audited |
+| Egress | `web_fetch` and webhooks check every hop against all private/special IPv4/IPv6 ranges and cloud metadata endpoints, pin DNS to vetted addresses, refuse redirects to internal hosts |
+| HTTP API | Fail-closed constant-time API key, per-IP throttling, allowlist CORS, body limits, strict input validation, security headers |
+| Secrets in output | Logs and outbound messages pass through a redactor (bearer/JWT/vendor keys/PEM/basic-auth + every configured secret value) |
+| Audit | Append-only SQLite audit log with a SHA-256 hash chain: `talon audit verify` detects tampering |
 
 ---
 
@@ -134,414 +114,130 @@ Restart Talon and every group inherits the provider. Default mode (no env vars) 
 
 ### Prerequisites
 
-- Docker
-- Node.js 20+
-- A running OpenSearch / Wazuh SIEM
-- A running CoPilot instance (MySQL/MariaDB + FastAPI)
-- A [Claude Code](https://claude.ai/download) OAuth token
+- Linux host (macOS works for development) with Docker (or Podman)
+- Rust 1.85+ (`rustup`), to build the host binary
+- A **vLLM** server reachable from the host (see [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md))
+- A running OpenSearch / Wazuh SIEM and CoPilot instance (MySQL/MariaDB + FastAPI)
 
-### 1. Clone and install
-
-```bash
-git clone https://github.com/taylorwalton/talon.git talon
-cd talon
-npm install && npm run build
-```
-
-### 2. Get a Claude OAuth token
+### 1. Build
 
 ```bash
-claude setup-token
-# Copy the sk-ant-oat01-... token that is printed
+git clone https://github.com/taylorwalton/talon.git /opt/talon
+cd /opt/talon
+cargo build --release
+sudo install -m 0755 target/release/talon /usr/local/bin/talon
+CONTAINER_RUNTIME=docker ./container/build.sh      # builds talon-agent:latest
 ```
+
+### 2. Start vLLM
+
+```bash
+vllm serve Qwen/Qwen3-32B --enable-auto-tool-choice --tool-call-parser hermes \
+  --reasoning-parser qwen3 --enable-prefix-caching --max-model-len 131072 \
+  --api-key "$(openssl rand -hex 32)"
+```
+
+Model and parser choices per family: [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md).
 
 ### 3. Create `.env`
 
 ```bash
-cat > .env <<EOF
-CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-
-# Optional: webhook endpoint for the 15-minute SOC alert digest
-# WEBHOOK_URL=https://your-endpoint.example.com/talon-digest
-# WEBHOOK_SECRET=optional-bearer-token
-
-# Required: API key for all HTTP channel requests (except /health)
-HTTP_API_KEY=your-secret-key-here
-
-# Optional: restrict the native credential-proxy fallback to loopback only
-# (only used when OneCLI is unavailable; default: 0.0.0.0)
-# CREDENTIAL_PROXY_HOST=127.0.0.1
-
-# Optional: agent runtime provider. Default is 'anthropic' (Claude via OneCLI).
-# Set to 'ollama' for fully air-gapped operation. See docs/PROVIDER_SELECTION.md
-# and .env.provider.example for model recommendations and latency expectations.
-# TALON_PROVIDER=ollama
-# TALON_OLLAMA_BASE_URL=http://host.docker.internal:11434
-# TALON_OLLAMA_MODEL=llama3.3:70b
-# TALON_OLLAMA_API_KEY=ollama
-EOF
+cp .env.example .env && chmod 600 .env
+# Set at least: TALON_VLLM_BASE_URL, TALON_VLLM_MODEL, TALON_VLLM_MAX_CONTEXT,
+#               TALON_VLLM_API_KEY (if vLLM uses --api-key), HTTP_API_KEY
+talon setup vllm        # checks that the models are served
 ```
 
-> **Note:** `CLAUDE_CODE_OAUTH_TOKEN` is required here so the OneCLI migration in step 5 can pick it up. After that step strips it from `.env`, the token lives only in the OneCLI Vault.
+### 4. Create the mount allowlist
 
-### 4. Install OneCLI (recommended)
-
-Install the OneCLI gateway and bootstrap a per-group agent identity. OneCLI manages the Anthropic credential (and optionally other backend credentials) so they never enter agent containers — auth is injected at the network layer via an HTTPS proxy.
+Controls which host directories may be mounted into agent containers. It lives outside the project root (`~/.config/talon/`, legacy `~/.config/nanoclaw/` is still read) so agents cannot modify it. Without it, no additional mounts are allowed.
 
 ```bash
-bash scripts/install-onecli.sh
-```
-
-What it does (idempotent — safe to re-run):
-
-- Installs the OneCLI Docker stack and CLI binary if missing
-- Probes the gateway URL (Docker bridge IP on Linux, loopback on macOS)
-- Detects groups under `groups/` and creates a OneCLI agent for each one (excluding `main`, which uses OneCLI's default agent)
-- Persists `ONECLI_URL` and `ONECLI_API_KEY` to `.env`
-- Pins `ONECLI_VERSION` in `~/.onecli/.env` so a later `docker compose up` can't drift
-
-**Version pin.** Talon targets OneCLI **1.24.0**, the all-in-one container that
-serves the REST API and gateway on ports 10254/10255. OneCLI 2.0 split that into
-separate `web` / `api` / `gateway` services and moved the REST API to port 10256,
-which breaks every `/api/agents`, `/api/secrets` and `/api/health` call in
-`scripts/`. The installer writes the pin into `~/.onecli/.env` — upstream's
-installer only honours `ONECLI_VERSION` for its own run — and refuses to
-configure a host where a 2.x stack is already installed, printing rollback
-instructions instead. Override with `ONECLI_VERSION=<version> bash
-scripts/install-onecli.sh` once the scripts are ported.
-
-If you skip this step, Talon falls back to injecting `CLAUDE_CODE_OAUTH_TOKEN` directly into the container as an env var. The fallback works in most cases, but in some environments the in-container Claude CLI requires a manual `claude /login` to bootstrap on first run. With OneCLI present, that manual step is never needed.
-
-### 5. Migrate the Anthropic credential to the OneCLI Vault
-
-After OneCLI is running, register your Claude OAuth token (or API key) in the Vault:
-
-```bash
-bash scripts/migrate-anthropic-to-vault.sh
-```
-
-This reads `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) from `.env` and registers it as an `anthropic` secret bound to `api.anthropic.com`, then **grants that secret to every OneCLI agent**. The raw token stays in `.env` for now so you can verify the Vault path works first.
-
-Registering a secret is not enough on its own — an agent with no grant to it gets refused at injection time. Non-main groups authenticate as their own agent (`agentIdentifier` in `src/container-runner.ts`), so each group's agent needs the grant. Confirm with:
-
-```bash
-onecli agents list
-onecli agents grants list --id <agent id>   # expect "Anthropic" under secrets
-```
-
-The script exits `4` if the secret registered but any agent was left without access.
-
-Restart Talon and confirm with:
-
-```bash
-sudo systemctl restart talon
-grep -E 'OneCLI gateway|Injecting' logs/talon.log | tail
-```
-
-You should see `OneCLI gateway config applied` and **not** `Injecting CLAUDE_CODE_OAUTH_TOKEN into container`. Once verified, strip the raw token from `.env`:
-
-```bash
-bash scripts/migrate-anthropic-to-vault.sh --strip-env
-sudo systemctl restart talon
-```
-
-### 6. Create the mount allowlist
-
-Controls which host directories can be mounted into agent containers. Lives outside the project root so agents cannot modify it.
-
-**Run this from your Talon installation directory** (e.g. `/opt/talon`) so `$(pwd)` resolves correctly:
-
-```bash
-mkdir -p ~/.config/nanoclaw
+mkdir -p ~/.config/talon && chmod 700 ~/.config/talon
 TALON_DIR=$(pwd)
-cat > ~/.config/nanoclaw/mount-allowlist.json <<EOF
+cat > ~/.config/talon/mount-allowlist.json <<EOF
 {
   "allowedRoots": [
-    {
-      "path": "${TALON_DIR}/mempalace-data",
-      "allowReadWrite": true,
-      "description": "MemPalace palace data — writable so the agent can persist investigation memories"
-    },
-    {
-      "path": "${TALON_DIR}",
-      "allowReadWrite": false,
-      "description": "Talon project root"
-    }
+    { "path": "${TALON_DIR}/mempalace-data", "allowReadWrite": true,
+      "description": "MemPalace data — writable so investigations persist memories" },
+    { "path": "${TALON_DIR}", "allowReadWrite": false,
+      "description": "Talon project root (MCP wrappers, field definitions)" }
   ],
   "blockedPatterns": [],
-  "nonMainReadOnly": false
+  "nonMainReadOnly": true
 }
 EOF
+chmod 600 ~/.config/talon/mount-allowlist.json
 ```
 
-> **Order matters:** the `mempalace-data` entry must come before the project root entry — the security layer matches the first applicable root. If all MCP tools are unavailable after starting Talon, this file is the first thing to check.
+Credential files (`.env`, `*.pem`, `.ssh`, …) are always blocked, MCP directories are always mounted read-only, and `.env` files inside MCP directories are shadowed and staged for their `mcp-*` user only.
 
-### 7. Configure SIEM credentials
+### 5. Configure the MCP servers
+
+Each MCP server keeps its credentials in its own directory. Inside the container they are readable only by that server's user.
+
+| Directory | Setup | Credentials |
+|---|---|---|
+| `siem/` | `bash siem/setup.sh` | `OPENSEARCH_HOSTS`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD` |
+| `mysql/` | `bash mysql/setup.sh` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB` |
+| `copilot-mcp/` | `bash copilot-mcp/setup.sh` | `COPILOT_URL`, `COPILOT_USERNAME`, `COPILOT_PASSWORD` |
+| `wazuh-mcp/` | `bash wazuh-mcp/setup.sh` | `WAZUH_PROD_URL`, `WAZUH_PROD_USERNAME`, `WAZUH_PROD_PASSWORD` |
+| `velociraptor-mcp/` | `bash velociraptor-mcp/setup.sh` + `api.config.yaml` | Velociraptor API client config |
+| `shuffle-mcp/` (optional) | `bash shuffle-mcp/setup.sh` | `SHUFFLE_URL`, `SHUFFLE_API_KEY` |
+| `cve-mcp/` (optional) | `bash cve-mcp/setup.sh` | `NVD_API_KEY`, optional VirusTotal/Shodan/AbuseIPDB/GreyNoise/urlscan keys |
+| `mempalace/` (optional) | `bash mempalace/setup.sh` | — (local ChromaDB + SQLite in `mempalace-data/`) |
+
+Services on the Talon host are reachable from containers as `host.docker.internal`. Which servers a group uses, and as which user, is defined in `groups/<group>/.mcp.json` (`"runAs": "mcp-siem"` etc.).
+
+### 6. Register groups and install the service
 
 ```bash
-bash siem/setup.sh
-# Edit siem/.env — set OPENSEARCH_HOSTS, OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD
+talon setup environment                 # runtime, image, vLLM, gateway, disk
+talon setup register --jid http:copilot --name CoPilot --folder copilot \
+  --trigger @Talon --no-trigger-required
+talon setup service                     # systemd user unit (hardened) or launchd plist
+talon doctor                            # everything in one report
 ```
 
-The setup script creates the Python venv and installs `opensearch-mcp-server` into it. The `.env` file is created from the template automatically if it doesn't already exist.
+Manual alternative: `systemctl --user enable --now talon` with `ExecStart=/usr/local/bin/talon run` and `WorkingDirectory=/opt/talon`, or `launchd/com.talon.plist` on macOS.
 
-### 8. Configure MySQL credentials
+### 7. Verify
 
 ```bash
-bash mysql/setup.sh
-# Edit mysql/.env — set MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASS, MYSQL_DB
+curl http://localhost:3100/health                         # unauthenticated
+export TALON_API_KEY=...                                   # HTTP_API_KEY from .env
+curl -s -N -X POST http://localhost:3100/message \
+  -H "Content-Type: application/json" -H "x-api-key: $TALON_API_KEY" \
+  -d '{"message": "Check SIEM cluster health", "sender": "test"}'
+curl -s -H "x-api-key: $TALON_API_KEY" http://localhost:3100/status
+talon audit tail -n 20
 ```
-
-### 9. Configure CoPilot MCP credentials
-
-```bash
-bash copilot-mcp/setup.sh
-# Edit copilot-mcp/.env — set COPILOT_URL, COPILOT_USERNAME, COPILOT_PASSWORD
-```
-
-> **Note:** If CoPilot is on the same host as Talon, use `host.docker.internal` instead of `127.0.0.1`:
-> ```
-> COPILOT_URL=http://host.docker.internal:5000
-> ```
-
-### 10. Configure Wazuh MCP credentials
-
-```bash
-bash wazuh-mcp/setup.sh
-# Edit wazuh-mcp/.env — set WAZUH_PROD_URL, WAZUH_PROD_USERNAME, WAZUH_PROD_PASSWORD
-```
-
-The Wazuh MCP server gives the agent direct access to the Wazuh manager API — querying agent inventory, network connections, installed packages, running processes, SCA results, and security rules. Credentials must be for a Wazuh user with at least read-only API access.
-
-> **Note:** The default Wazuh manager API port is `55000`. If the manager is on the same host as Talon, use `host.docker.internal`:
-> ```
-> WAZUH_PROD_URL=https://host.docker.internal:55000
-> ```
-> Set `WAZUH_PROD_SSL_VERIFY=false` if the manager uses a self-signed certificate.
-
-### 11. Configure Velociraptor MCP credentials
-
-```bash
-bash velociraptor-mcp/setup.sh
-```
-
-Then copy your Velociraptor API config into the directory:
-
-```bash
-# On your Velociraptor server, generate a client config:
-velociraptor config api_client --name talon > api.config.yaml
-# Then copy it to your Talon install:
-cp api.config.yaml velociraptor-mcp/api.config.yaml
-```
-
-The Velociraptor MCP server gives the agent direct DFIR capability — querying client inventory, running VQL queries, listing and collecting artifacts (Windows and Linux), and retrieving collection results. The `VELOCIRAPTOR_API_KEY` in `.env` is set to `api.config.yaml` by default; the wrapper script resolves it to an absolute path automatically, so the same `.env` works on both the host and inside the container.
-
-> **Note:** Set `VELOCIRAPTOR_SSL_VERIFY=false` in `velociraptor-mcp/.env` if your Velociraptor server uses a self-signed certificate.
-
-### 12. Configure Shuffle MCP credentials (optional)
-
-```bash
-bash shuffle-mcp/setup.sh
-# Edit shuffle-mcp/.env — set SHUFFLE_URL and SHUFFLE_API_KEY
-```
-
-The Shuffle MCP server gives the agent interactive access to Shuffle's 3,000+ SaaS app catalog — `RunAppAgentTool` and `GetExecutionResultTool` for natural-language driving of any authenticated app, plus `AuthenticateTool` and `GetAppsTool` for discovery. Use it for mid-investigation tool calls (e.g. "look up this user's email via Outlook search," "post a Slack thread to #soc," "open a Jira ticket"). This is separate from CoPilot's notification-dispatch path — that path goes through `mcp__copilot__DispatchNotificationsTool`.
-
-> **Note:** Cloud users typically set `SHUFFLE_URL=https://shuffler.io`. Self-hosted users use their own region/instance. The `SHUFFLE_API_KEY` should be the same admin-scoped key configured in CoPilot's Shuffle connector. Skip this step if you don't use Shuffle — Talon will start without the MCP and continue with the other tools.
-
-### 13. Configure CVE MCP credentials (optional)
-
-```bash
-bash cve-mcp/setup.sh
-# Edit cve-mcp/.env — at minimum set NVD_API_KEY (free signup)
-```
-
-The CVE MCP server ([source](https://github.com/mukul975/cve-mcp-server)) provides 27 security intelligence tools across 21 data sources — CVE/EPSS/KEV/CVSS lookups, exploit availability, MITRE ATT&CK techniques, IP reputation (AbuseIPDB, GreyNoise, Shodan), threat intel (VirusTotal, urlscan, MalwareBazaar), and GitHub advisories. These replace the `WebFetch`/`WebSearch` scrapes Talon previously used for IOC enrichment with native, structured, cached calls.
-
-The MCP works **without any keys** but rate-limits aggressively (NVD: 5 req/30s, GitHub: 60/hr). With a free `NVD_API_KEY` and `GITHUB_TOKEN`, rates rise to 50 req/30s and 5,000/hr respectively. Optional Tier 2 keys (`VIRUSTOTAL_KEY`, `SHODAN_KEY`, `ABUSEIPDB_KEY`, etc.) unlock commercial threat intel data sources.
-
-> **Note:** Skip this step if you don't need CVE/IOC enrichment — Talon will start without the MCP and fall back to its existing `WebFetch`/`WebSearch` flow. NVD signup is free at [nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key).
-
-### 14. Configure local LLM analysis (optional)
-
-Talon can route raw SIEM event analysis through an open-source LLM instead of the Claude cloud model. Combined with the anonymizing proxy — which replaces PII with session tokens before any LLM call — this keeps sensitive data interpretation off Anthropic's API entirely.
-
-If no LLM is configured, the agent skips local analysis silently and continues the investigation without it.
-
-There are two ways to run the LLM:
 
 ---
 
-#### Option A — Local Ollama (on-premises, best privacy)
+## Operations
 
-Install [Ollama](https://ollama.com) on the same machine as Talon and pull a model:
+| Command | Purpose |
+|---|---|
+| `talon run` | Run the service (default) |
+| `talon doctor` | Diagnose runtime, image, vLLM, gateway, directories, audit chain |
+| `talon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `service`, `verify` |
+| `talon audit verify` | Recompute the audit hash chain (exit 1 on tampering) |
+| `talon audit tail -n 50 --kind ipc.` | Recent audit events as JSON lines |
 
-```bash
-ollama pull qwen2.5:7b    # recommended — strong analytical capability
-# or: ollama pull mistral:7b
-# or: ollama pull llama3.2:3b  (lighter, faster)
-```
+HTTP API (all but `/health` require `X-Api-Key` or `Authorization: Bearer`):
 
-No `.env` is needed for same-machine installs — the agent container reaches Ollama automatically via `host.docker.internal:11434`. If Ollama is running on a **different host**, create the config file:
+| Endpoint | Purpose |
+|---|---|
+| `POST /investigate` | `{alert_id, customer_code, triggered_by?, template_override?}` → queued investigation (deduplicated per alert) |
+| `GET /investigations`, `GET /investigations/{id}` | Investigation status and structured verdicts |
+| `POST /message` | Analyst chat (SSE stream), per-user lanes via `user_id` |
+| `POST /session/reset` | `{scope, user_id?}` with scope `chat`, `investigate` or `all` |
+| `GET /status`, `GET /metrics` | Queue, lanes, sessions, tasks; Prometheus metrics |
+| `GET /templates`, `GET /evals/{alert_id}` | Investigation templates and eval records |
+| `POST /palace/lesson`, `GET /palace/search`, `POST /palace/forget` | MemPalace memory |
 
-```bash
-cp ollama/.env.example ollama/.env
-# Edit ollama/.env — set OLLAMA_HOST=http://<host>:11434
-```
-
-**Best for:** clients with an existing GPU server or workstation.
-
----
-
-#### Option B — RunPod cloud GPU (no hardware required)
-
-[RunPod](https://www.runpod.io) lets you run open-source models on cloud GPUs and pay only for what you use. Because Talon's anonymizing proxy has already replaced PII with tokens before the LLM call, what RunPod sees is desensitised data — not real usernames, hostnames, or internal IPs.
-
-**Recommended: RunPod Pod** — persistent GPU instance with no cold start. Stop the pod when not in use (you only pay for storage at ~$0.20/month while stopped).
-
-1. Create a RunPod account at [runpod.io](https://www.runpod.io)
-2. Deploy a pod using the **Ollama NVIDIA CUDA** template
-   - GPU: `RTX 3090` or `RTX 4090` recommended
-   - Expose port `11434` via HTTP proxy
-   - Your endpoint will be: `https://<pod-id>-11434.proxy.runpod.net`
-3. SSH into the pod and pull your chosen model:
-   ```bash
-   ollama pull qwen2.5:7b
-   ```
-4. Point Talon at the RunPod endpoint — note this goes in `ollama/.env`, **not** the root `.env`:
-   ```bash
-   echo 'OLLAMA_HOST=https://<pod-id>-11434.proxy.runpod.net' > ollama/.env
-   ```
-
-**Best for:** clients without GPU hardware who still want open-source model analysis.
-
-| | Local Ollama | RunPod Serverless | RunPod Persistent Pod |
-|---|---|---|---|
-| Hardware required | Yes (GPU) | No | No |
-| Running cost | $0 (sunk) | Pay per investigation | ~$0.20–0.44/hr |
-| Cold start | None | ~30–60s | None |
-| Privacy | Best (fully on-prem) | Good (PII already tokenized) | Good (PII already tokenized) |
-| Best for | Existing GPU infra | Most clients | High-volume SOCs |
-
----
-
-### 15. Set up MemPalace persistent memory
-
-MemPalace gives the SOC agent long-term memory — past investigation outcomes, asset metadata, confirmed false positives, and IOC history are stored in a local ChromaDB + SQLite knowledge graph and retrieved automatically at the start of each investigation.
-
-```bash
-bash mempalace/setup.sh
-```
-
-If the build fails try installing the C++ complier and build tools:
-
-```bash
-apt install -y build-essential g++ python3-dev
-```
-
-This creates the local venv and the `mempalace-data/` directory where the palace is stored. The palace initialises automatically on first agent run — no separate init step is needed.
-
-> **Note:** `mempalace-data/` is gitignored and persists across container restarts. The writable mount entry added in Step 6 is what allows the agent to write to it. Back up `mempalace-data/` alongside your other `.env` files.
-
-### 16. Build the container
-
-```bash
-CONTAINER_RUNTIME=docker ./container/build.sh
-```
-
-### 17. Start the service
-
-**macOS:**
-```bash
-sed -e "s|{{NODE_PATH}}|$(which node)|g" \
-    -e "s|{{PROJECT_ROOT}}|$(pwd)|g" \
-    -e "s|{{HOME}}|$HOME|g" \
-    launchd/com.nanoclaw.plist > ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-```
-
-**Linux (system service):**
-```bash
-mkdir -p logs
-cat > /etc/systemd/system/talon.service <<EOF
-[Unit]
-Description=Talon SOC Analyst
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$(which node) $(pwd)/dist/index.js
-WorkingDirectory=$(pwd)
-Restart=always
-RestartSec=5
-KillMode=process
-Environment=HOME=$HOME
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin
-StandardOutput=append:$(pwd)/logs/talon.log
-StandardError=append:$(pwd)/logs/talon.error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable --now talon
-```
-
-**Linux (user service):**
-```bash
-mkdir -p ~/.config/systemd/user logs
-cat > ~/.config/systemd/user/talon.service <<EOF
-[Unit]
-Description=Talon SOC Analyst
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$(which node) $(pwd)/dist/index.js
-WorkingDirectory=$(pwd)
-Restart=always
-RestartSec=5
-KillMode=process
-Environment=HOME=$HOME
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin
-StandardOutput=append:$(pwd)/logs/talon.log
-StandardError=append:$(pwd)/logs/talon.error.log
-
-[Install]
-WantedBy=default.target
-EOF
-systemctl --user daemon-reload
-systemctl --user enable --now talon
-loginctl enable-linger
-```
-
-### 18. Verify
-
-```bash
-# /health is unauthenticated
-curl http://localhost:3100/health
-
-# All other endpoints require the API key from your .env
-export TALON_API_KEY="your-secret-key-here"
-
-# Test SIEM connectivity
-curl -s -N -X POST http://localhost:3100/message \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: $TALON_API_KEY" \
-  -d '{"message": "Check cluster health", "sender": "test"}'
-
-# Test CoPilot MCP connectivity
-curl -s -N -X POST http://localhost:3100/message \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: $TALON_API_KEY" \
-  -d '{"message": "Use the copilot MCP tool to list all customers.", "sender": "test"}'
-
-# Test Ollama (optional — only if installed)
-curl -s -N -X POST http://localhost:3100/message \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: $TALON_API_KEY" \
-  -d '{"message": "List available Ollama models.", "sender": "test"}'
-```
+Logs: `RUST_LOG=info` (JSON with `TALON_LOG_FORMAT=json`); every line is redacted.
 
 ---
 
@@ -549,55 +245,15 @@ curl -s -N -X POST http://localhost:3100/message \
 
 | File | Purpose |
 |------|---------|
-| `siem/.env` | OpenSearch credentials — gitignored |
-| `mysql/.env` | CoPilot MySQL credentials — gitignored |
-| `copilot-mcp/.env` | CoPilot REST API credentials — gitignored |
-| `wazuh-mcp/.env` | Wazuh manager API credentials — gitignored |
-| `velociraptor-mcp/.env` | Velociraptor API config path — gitignored |
-| `velociraptor-mcp/api.config.yaml` | Velociraptor API client config — gitignored, copy from server |
-| `shuffle-mcp/.env` | Shuffle SOAR API credentials — gitignored, optional |
-| `cve-mcp/.env` | CVE MCP API keys (NVD, GitHub, VirusTotal, etc.) — gitignored, optional |
-| `ollama/.env` | Optional Ollama host override — gitignored, omit if using defaults |
-| `mempalace-data/` | MemPalace palace data (ChromaDB + SQLite) — gitignored, back up separately |
-| `.env` | `CLAUDE_CODE_OAUTH_TOKEN`, `WEBHOOK_URL`, `WEBHOOK_SECRET` — gitignored |
-| `groups/copilot/CLAUDE.md` | SOC agent identity, known assets, ongoing investigations |
-| `groups/copilot/prompts/` | Per-alert-type investigation templates (e.g. `sysmon_event_1.txt`) |
+| `.env` | vLLM, gateway, HTTP API key, channels — `chmod 600`, gitignored |
+| `<mcp-dir>/.env` | Per-MCP credentials (siem, mysql, copilot-mcp, wazuh-mcp, velociraptor-mcp, shuffle-mcp, cve-mcp) — gitignored |
+| `groups/copilot/CLAUDE.md` | SOC agent identity and investigation workflow; append client context (assets, known-good ranges, crown jewels) at the bottom |
+| `groups/copilot/.mcp.json` | MCP servers and their `runAs` users (mounted read-only into containers) |
+| `groups/copilot/prompts/` | Per-alert-type investigation templates — add `.txt` files, no code changes |
 | `siem/anon_proxy/fields.yaml` | PII field definitions for the anonymizing proxy |
-| `~/.config/nanoclaw/mount-allowlist.json` | Mount security policy — outside repo, tamper-proof |
-
-Append client-specific context (asset inventory, known-good IP ranges, crown jewel assets, business hours) to the bottom of `groups/copilot/CLAUDE.md`.
-
----
-
-## Adding Alert-Type Templates
-
-Investigation templates live in `groups/copilot/prompts/`. Each file is a plain-text guide with template variables that the agent fills in at runtime.
-
-| File | Alert type |
-|------|-----------|
-| `sysmon_event_1.txt` | Process Creation (Sysmon Event 1) |
-| `sysmon_event_3.txt` | Network Connection (Event 3) |
-| `sysmon_event_7.txt` | Image Load / DLL (Event 7) |
-| `sysmon_event_11.txt` | File Create (Event 11) |
-| `sysmon_event_22.txt` | DNS Query (Event 22) |
-
-To add a new alert type, create the corresponding `.txt` file — no code changes required. The agent detects the type from `rule.groups` in the raw event and loads the matching template automatically.
-
----
-
-## Key Source Files
-
-| File | Purpose |
-|------|---------|
-| `src/index.ts` | Orchestrator: message loop, agent invocation |
-| `src/channels/http.ts` | HTTP channel: `/investigate`, `/status`, `/jobs/:id`, `/message` |
-| `src/task-scheduler.ts` | 15-minute scheduled alert sweep |
-| `src/container-runner.ts` | Spawns agent containers with mounts |
-| `groups/copilot/CLAUDE.md` | SOC agent investigation workflow |
-| `groups/copilot/.mcp.json` | MCP server registry (opensearch, mysql, copilot, wazuh, velociraptor, ollama) |
-| `siem/anon_proxy/anon_proxy.py` | Anonymizing MCP proxy |
-| `siem/anon_proxy/fields.yaml` | PII field definitions (git-pullable) |
-| `container/Dockerfile` | Agent container image |
+| `~/.config/talon/mount-allowlist.json` | Mount policy — outside the repo, tamper-proof |
+| `~/.config/talon/sender-allowlist.json` | Optional per-chat sender allowlist (`TALON_SENDER_ALLOWLIST_REQUIRED=true` to fail closed) |
+| `mempalace-data/` | MemPalace data — back up separately |
 
 ---
 
@@ -605,10 +261,14 @@ To add a new alert type, create the corresponding `.txt` file — no code change
 
 | Doc | Contents |
 |-----|---------|
-| [docs/COPILOT_INTEGRATION.md](docs/COPILOT_INTEGRATION.md) | Full CoPilot integration architecture, MySQL schema, MCP tool reference, implementation roadmap |
-| [docs/ANON_PROXY.md](docs/ANON_PROXY.md) | Anonymizing proxy deep-dive: flow, token types, preserved fields, de-anonymization, extending `fields.yaml` |
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | Design philosophy and architecture decisions |
-| [docs/SECURITY.md](docs/SECURITY.md) | Container isolation model and security boundaries |
+| [docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md) | Talon 2.0 architecture, crate map, security contracts |
+| [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md) | vLLM setup, model/parser choice, gateway, settings |
+| [docs/COPILOT_INTEGRATION.md](docs/COPILOT_INTEGRATION.md) | CoPilot integration, MySQL schema, MCP tool reference |
+| [docs/ANON_PROXY.md](docs/ANON_PROXY.md) | Anonymizing proxy: flow, token types, `fields.yaml` |
+| [docs/SECURITY.md](docs/SECURITY.md) | Security model and trust boundaries |
+| [groups/copilot/prompts/README.md](groups/copilot/prompts/README.md) | Writing investigation templates |
+
+Talon 1.x (TypeScript, Claude Agent SDK, Ollama) documentation such as `docs/SPEC.md` and `docs/REQUIREMENTS.md` describes the previous release.
 
 ---
 
@@ -617,21 +277,3 @@ To add a new alert type, create the corresponding `.txt` file — no code change
 You can reach us on [Discord](https://discord.gg/UN3pNBzaEQ) or by [📧](mailto:info@socfortress.co) if you have any question, issue, or idea!
 
 Check out the full SOCfortress video tutorial series on [![YouTube](https://img.shields.io/badge/YouTube-%23FF0000.svg?style=for-the-badge&logo=YouTube&logoColor=white)](https://www.youtube.com/@taylorwalton_socfortress/videos)
-
-## Sponsoring
-
-If you find this project useful and want to support continued development, consider becoming a sponsor:
-
-[![GitHub Sponsors](https://img.shields.io/badge/sponsor-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=#EA4AAA)](https://github.com/sponsors/taylorwalton)
-
----
-
-## Based On
-
-Talon is a fork of [NanoClaw](https://github.com/qwibitai/nanoclaw), a minimal Claude Agent SDK harness where agents run in isolated Linux containers. The core orchestration engine, container runner, channel system, and IPC layer are NanoClaw. Everything in `groups/copilot/`, `siem/`, `mysql/`, `copilot-mcp/`, `wazuh-mcp/`, `velociraptor-mcp/`, `ollama/`, and `src/channels/http.ts` is purpose-built for the SOCfortress stack.
-
----
-
-## License
-
-The contents of this repository are available under the [MIT license](LICENSE).

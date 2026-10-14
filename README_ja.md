@@ -1,3 +1,5 @@
+> **Note:** This translation describes NanoClaw / Talon 1.x (TypeScript). For Talon 2.0 (Rust, vLLM) see the English [README.md](README.md).
+
 <p align="center">
   <img src="assets/nanoclaw-logo.png" alt="NanoClaw" width="400">
 </p>

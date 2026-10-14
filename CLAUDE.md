@@ -1,80 +1,58 @@
-# NanoClaw
+# Talon 2.0
 
-Personal Claude assistant. See [README.md](README.md) for philosophy and setup. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for architecture decisions.
+Automated AI SOC analyst for the SOCFortress CoPilot stack, written in Rust. See [README.md](README.md) for setup and [docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md) for the architecture and security contracts.
 
 ## Quick Context
 
-Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
+One host process (`talon`) receives alerts and chat through channels (CoPilot HTTP API, Telegram, signed webhook, Emacs), queues work per lane, and runs each agent turn in a hardened container. Inside the container `talon-agent supervise` (root, no LLM) starts the MCP servers as separate `mcp-*` users, then `talon-agent run` executes the agent loop unprivileged against a self-hosted **vLLM** server reached only through the host LLM gateway. Each group has an isolated folder (`groups/<folder>/`), session store and IPC namespace.
 
-## Key Files
+## Key Paths
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/registry.ts` | Channel registry (self-registration at startup) |
-| `src/ipc.ts` | IPC watcher and task processing |
-| `src/router.ts` | Message formatting and outbound routing |
-| `src/config.ts` | Trigger pattern, paths, intervals |
-| `src/container-runner.ts` | Spawns agent containers with mounts |
-| `src/task-scheduler.ts` | Runs scheduled tasks |
-| `src/db.ts` | SQLite operations |
-| `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
-| `container/skills/` | Skills loaded inside agent containers (browser, status, formatting) |
-
-## Secrets / Credentials / Proxy (OneCLI)
-
-API keys, secret keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway — which handles secret injection into containers at request time, so no keys or tokens are ever passed to containers directly. Run `onecli --help`.
-
-## Skills
-
-Four types of skills exist in NanoClaw. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxonomy and guidelines.
-
-- **Feature skills** — merge a `skill/*` branch to add capabilities (e.g. `/add-telegram`, `/add-slack`)
-- **Utility skills** — ship code files alongside SKILL.md (e.g. `/claw`)
-- **Operational skills** — instruction-only workflows, always on `main` (e.g. `/setup`, `/debug`)
-- **Container skills** — loaded inside agent containers at runtime (`container/skills/`)
-
-| Skill | When to Use |
-|-------|-------------|
-| `/setup` | First-time installation, authentication, service configuration |
-| `/customize` | Adding channels, integrations, changing behavior |
-| `/debug` | Container issues, logs, troubleshooting |
-| `/update-nanoclaw` | Bring upstream NanoClaw updates into a customized install |
-| `/init-onecli` | Install OneCLI Agent Vault and migrate `.env` credentials to it |
-| `/qodo-pr-resolver` | Fetch and fix Qodo PR review issues interactively or in batch |
-| `/get-qodo-rules` | Load org- and repo-level coding rules from Qodo before code tasks |
-
-## Contributing
-
-Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the four skill types and their guidelines, SKILL.md format rules, PR requirements, and the pre-submission checklist (searching for existing PRs/issues, testing, description format).
+| `crates/talon/` | Host binary: orchestrator (`src/orchestrator/`), CLI, wiring (`src/app.rs`) |
+| `crates/talon-core/` | Shared contract: types, host↔container protocol, `Channel`/`Tool` traits, config, schedules |
+| `crates/talon-agent/` | In-container runtime: `supervise.rs` (privileged), `run.rs` + `agent/` (vLLM loop), `prompt.rs` |
+| `crates/talon-llm/` | vLLM client and host LLM gateway |
+| `crates/talon-container/` | `docker run` args, mounts, output parser |
+| `crates/talon-security/` | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
+| `crates/talon-intel/` | IOC / MITRE / triage / report engine and intel tools |
+| `crates/talon-http/` | CoPilot HTTP API channel |
+| `container/` | Agent image (`Dockerfile`, `entrypoint.sh`, `build.sh`) |
+| `groups/{name}/CLAUDE.md` | Per-group agent instructions and memory |
+| `groups/copilot/prompts/` | Alert-type investigation templates |
+| `siem/`, `mysql/`, `*-mcp/`, `mempalace/` | MCP server wrappers (+ gitignored `.env` credentials) |
 
 ## Development
 
-Run commands directly—don't tell the user to run them.
+Run commands directly — don't tell the user to run them.
 
 ```bash
-npm run dev          # Run with hot reload
-npm run build        # Compile TypeScript
-./container/build.sh # Rebuild agent container
+cargo build --workspace                                # build everything
+cargo test --workspace                                 # all tests
+cargo clippy --workspace --all-targets -- -D warnings  # lint (CI gate)
+cargo fmt --all                                        # format (CI checks --check)
+./container/build.sh                                   # rebuild the agent image
+cargo run -p talon -- doctor                           # diagnose a local install
 ```
+
+Rules of the codebase: no `unsafe` (workspace lint), no `unwrap`/`expect` outside tests, public items documented, untrusted data fenced with `talon_security::injection::fence_untrusted`, security decisions audited via `talon_core::audit`. `talon-core` is the cross-crate contract: change it deliberately and update both host and agent.
 
 Service management:
-```bash
-# macOS (launchd)
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
 
-# Linux (systemd)
-systemctl --user start nanoclaw
-systemctl --user stop nanoclaw
-systemctl --user restart nanoclaw
+```bash
+systemctl --user restart talon                       # Linux
+launchctl kickstart -k gui/$(id -u)/com.talon        # macOS
 ```
 
-## Troubleshooting
+## Model Provider
 
-**WhatsApp not connecting after upgrade:** WhatsApp is now a separate skill, not bundled in core. Run `/add-whatsapp` (or `npx tsx scripts/apply-skill.ts .claude/skills/add-whatsapp && npm run build`) to install it. Existing auth credentials and groups are preserved.
+vLLM only (`TALON_VLLM_*` in `.env`, see [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md)). The vLLM API key stays on the host gateway; containers receive a per-run token over stdin.
+
+## Skills
+
+The skills under `.claude/skills/` were written for the TypeScript NanoClaw/Talon 1.x codebase (they patch `src/*.ts`). Do not apply feature skills to this Rust workspace; port the feature into the relevant crate instead. Operational guidance in `/setup` and `/debug` maps to `talon setup <step>` and `talon doctor`.
 
 ## Container Build Cache
 
-The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+The container buildkit caches the build context aggressively. `--no-cache` alone does not invalidate COPY steps; prune the builder, then re-run `./container/build.sh` for a truly clean rebuild.
