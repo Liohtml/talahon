@@ -167,6 +167,24 @@ impl TokenStore {
         self.lock().remove(&digest(token.trim())).is_some()
     }
 
+    /// Push a live token's expiry to `now + ttl` (capped like `issue`).
+    /// Never shortens a token and never revives an expired or revoked one.
+    /// Returns whether the token was live.
+    pub(crate) fn extend(&self, token: &str, ttl: Duration) -> bool {
+        let now = Instant::now();
+        let new_expiry = now.checked_add(ttl.min(MAX_TTL)).unwrap_or(now);
+        let mut map = self.lock();
+        match map.get_mut(&digest(token.trim())) {
+            Some(entry) if entry.expires_at > now => {
+                if new_expiry > entry.expires_at {
+                    entry.expires_at = new_expiry;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Revoke every token issued for `label`. Returns how many were removed.
     pub(crate) fn revoke_label(&self, label: &str) -> usize {
         let mut map = self.lock();
@@ -320,6 +338,29 @@ mod tests {
             store.authorize(Some(&t)),
             AuthDecision::Allowed { .. }
         ));
+    }
+
+    #[test]
+    fn extend_only_lengthens_live_tokens() {
+        let store = TokenStore::new(0, 0);
+        let t = store.issue("g", Duration::from_secs(60));
+        let before = store.lock()[&digest(&t)].expires_at;
+        assert!(store.extend(&t, Duration::from_secs(3600)));
+        let after = store.lock()[&digest(&t)].expires_at;
+        assert!(after > before);
+        // A shorter extension never shortens the token.
+        assert!(store.extend(&t, Duration::from_secs(1)));
+        assert_eq!(store.lock()[&digest(&t)].expires_at, after);
+        // Expired and revoked tokens are never revived.
+        let dead = store.issue("g", Duration::ZERO);
+        assert!(!store.extend(&dead, Duration::from_secs(3600)));
+        assert!(matches!(
+            store.authorize(Some(&dead)),
+            AuthDecision::Expired { .. }
+        ));
+        assert!(store.revoke(&t));
+        assert!(!store.extend(&t, Duration::from_secs(3600)));
+        assert!(!store.extend("tlgw_unknown", Duration::from_secs(60)));
     }
 
     #[test]

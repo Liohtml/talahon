@@ -230,14 +230,39 @@ impl Orchestrator {
     }
 
     /// Whether a follow-up may be piped into the lane's running container:
-    /// its LLM token must outlive another idle period.
+    /// its LLM token must outlive another idle period. A token about to run
+    /// out is extended through the gateway first; only when that fails is
+    /// the container recycled.
     fn may_pipe(&self, jid: &str) -> bool {
-        let deadline = self.lock().token_deadlines.get(jid).copied();
-        match deadline {
-            None => true,
-            Some(deadline) => {
-                Instant::now() + self.config.idle_timeout + PIPE_TOKEN_HEADROOM < deadline
-            }
+        let (deadline, run_token) = {
+            let st = self.lock();
+            (
+                st.token_deadlines.get(jid).copied(),
+                st.run_tokens.get(jid).cloned(),
+            )
+        };
+        let Some(deadline) = deadline else {
+            return true;
+        };
+        let needed = self.config.idle_timeout + PIPE_TOKEN_HEADROOM;
+        if Instant::now() + needed < deadline {
+            return true;
+        }
+        let (Some((token, ttl)), Some(llm)) = (run_token, self.llm.clone()) else {
+            return false;
+        };
+        let ttl = ttl.max(needed);
+        if !llm.extend(&token, ttl) {
+            return false;
+        }
+        let mut st = self.lock();
+        // The run may have ended while the gateway call was in flight.
+        if st.run_tokens.get(jid).is_some_and(|(t, _)| *t == token) {
+            st.token_deadlines
+                .insert(jid.to_string(), Instant::now() + ttl);
+            true
+        } else {
+            false
         }
     }
 

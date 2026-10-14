@@ -112,6 +112,9 @@ pub(crate) struct State {
     pub(crate) last_agent_timestamp: BTreeMap<String, String>,
     /// Lanes with a running message container: when its LLM token expires.
     pub(crate) token_deadlines: HashMap<String, Instant>,
+    /// Lanes with a running message container: its LLM token and TTL, so a
+    /// piped follow-up can extend the token instead of recycling the run.
+    pub(crate) run_tokens: HashMap<String, (String, Duration)>,
 }
 
 /// The host orchestrator. Share it as `Arc<Orchestrator>`.
@@ -553,5 +556,6 @@ fn load_state(db: &Db) -> Result<State> {
         last_timestamp,
         last_agent_timestamp,
         token_deadlines: HashMap::new(),
+        run_tokens: HashMap::new(),
     })
 }

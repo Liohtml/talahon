@@ -382,6 +382,14 @@ impl GatewayHandle {
         self.inner.state.tokens.revoke(token)
     }
 
+    /// Extend a live token so it stays valid for another `ttl` from now
+    /// (e.g. when a follow-up message is piped into a long-running chat
+    /// container). Never shortens a token and never revives an expired or
+    /// revoked one. Returns whether the token was live.
+    pub fn extend(&self, token: &str, ttl: Duration) -> bool {
+        self.inner.state.tokens.extend(token, ttl)
+    }
+
     /// Revoke every token issued for `label`. Returns how many were removed.
     pub fn revoke_label(&self, label: &str) -> usize {
         self.inner.state.tokens.revoke_label(label)

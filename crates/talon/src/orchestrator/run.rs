@@ -223,9 +223,11 @@ impl Orchestrator {
         let spec = RunSpec::new(group.clone(), input).with_config(merged);
 
         if !opts.scheduled_task {
-            self.lock()
-                .token_deadlines
+            let mut st = self.lock();
+            st.token_deadlines
                 .insert(chat_jid.to_string(), Instant::now() + ttl);
+            st.run_tokens
+                .insert(chat_jid.to_string(), (token.clone(), ttl));
         }
         let hook: StartHook = {
             let queue = self.queue.clone();
@@ -257,7 +259,9 @@ impl Orchestrator {
 
         llm.revoke(&token);
         if !opts.scheduled_task {
-            self.lock().token_deadlines.remove(chat_jid);
+            let mut st = self.lock();
+            st.token_deadlines.remove(chat_jid);
+            st.run_tokens.remove(chat_jid);
         }
 
         if opts.manage_session {

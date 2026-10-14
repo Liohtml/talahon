@@ -565,6 +565,52 @@ async fn follow_up_is_not_piped_when_the_token_would_expire() {
 }
 
 #[tokio::test]
+async fn follow_up_extends_an_expiring_token_and_is_piped() {
+    let h = harness_with(HarnessOptions {
+        settings: Settings {
+            token_ttl_margin: Duration::ZERO,
+            ..Settings::default()
+        },
+        ..HarnessOptions::default()
+    });
+    h.llm
+        .allow_extend
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *h.launcher.hard_timeout.lock().unwrap() = Duration::ZERO;
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    let gate = Arc::new(Notify::new());
+    h.launcher.push(Script {
+        gate: Some(gate.clone()),
+        ..Script::default()
+    });
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "1", "me", "q1", &ts(1)));
+    h.orch.poll_once().await;
+    h.launcher.wait_started(1).await;
+
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "2", "me", "q2", &ts(2)));
+    let summary = h.orch.poll_once().await;
+    assert_eq!(summary.piped, vec![MAIN.to_string()]);
+    let extended = h.llm.extended.lock().unwrap().clone();
+    assert_eq!(extended.len(), 1);
+    assert_eq!(extended[0].0, h.llm.issued.lock().unwrap()[0].0);
+    assert_eq!(h.orch.cursor(MAIN), ts(2));
+
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.queue.is_active(MAIN) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(h.orch.lock().run_tokens.is_empty());
+}
+
+#[tokio::test]
 async fn session_command_in_loop_closes_container_for_authorized_sender() {
     let h = harness();
     h.orch

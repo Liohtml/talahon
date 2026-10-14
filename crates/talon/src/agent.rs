@@ -46,6 +46,12 @@ pub trait LlmAccess: Send + Sync {
 
     /// Revoke a credential when its run is over.
     fn revoke(&self, token: &str);
+
+    /// Keep a live credential valid for another `ttl` from now. Returns
+    /// false when it cannot be extended (expired, revoked, unsupported).
+    fn extend(&self, _token: &str, _ttl: Duration) -> bool {
+        false
+    }
 }
 
 /// [`RunningContainer`] adapter over a `talon-container` handle.
@@ -145,6 +151,10 @@ impl LlmAccess for GatewayLlm {
 
     fn revoke(&self, token: &str) {
         self.gateway.revoke(token);
+    }
+
+    fn extend(&self, token: &str, ttl: Duration) -> bool {
+        self.gateway.extend(token, ttl)
     }
 }
 

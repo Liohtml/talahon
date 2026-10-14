@@ -265,6 +265,9 @@ impl ContainerLauncher for FakeLauncher {
 pub struct FakeLlm {
     pub issued: Mutex<Vec<(String, String, Duration)>>,
     pub revoked: Mutex<Vec<String>>,
+    /// When true, `extend` succeeds for issued, unrevoked tokens.
+    pub allow_extend: std::sync::atomic::AtomicBool,
+    pub extended: Mutex<Vec<(String, Duration)>>,
 }
 
 impl LlmAccess for FakeLlm {
@@ -291,6 +294,22 @@ impl LlmAccess for FakeLlm {
 
     fn revoke(&self, token: &str) {
         self.revoked.lock().unwrap().push(token.to_string());
+    }
+
+    fn extend(&self, token: &str, ttl: Duration) -> bool {
+        if !self.allow_extend.load(std::sync::atomic::Ordering::SeqCst)
+            || self.revoked.lock().unwrap().iter().any(|t| t == token)
+            || !self
+                .issued
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _, _)| t == token)
+        {
+            return false;
+        }
+        self.extended.lock().unwrap().push((token.to_string(), ttl));
+        true
     }
 }
 
