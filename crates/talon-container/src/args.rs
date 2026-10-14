@@ -3,7 +3,7 @@
 //! `docs/RUST_ARCHITECTURE.md` §3.3.
 //!
 //! ```text
-//! run --rm -i --name talon-<folder>-<millis>
+//! run --rm -i --init --name talon-<folder>-<millis>
 //!   --label talon.managed=true --label talon.group=<folder>
 //!   --cap-drop=ALL --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID
 //!   --cap-add=FOWNER --cap-add=DAC_OVERRIDE --cap-add=KILL
@@ -572,7 +572,9 @@ pub fn build_run_args(input: &RunArgsInput<'_>) -> Result<RunArgs> {
 
     let mut args: Vec<String> = Vec::with_capacity(64 + 2 * input.mounts.len());
     let mut push = |items: &[&str]| args.extend(items.iter().map(|s| s.to_string()));
-    push(&["run", "--rm", "-i", "--name", input.name]);
+    // `--init`: a tiny init (tini/catatonit) becomes PID 1, forwards signals
+    // and reaps orphaned MCP-wrapper processes the supervisor cannot.
+    push(&["run", "--rm", "-i", "--init", "--name", input.name]);
     push(&["--label", MANAGED_LABEL]);
     push(&[
         "--label",
@@ -669,6 +671,7 @@ mod tests {
                 "run",
                 "--rm",
                 "-i",
+                "--init",
                 "--name",
                 "talon-team-1700000000000",
                 "--label",

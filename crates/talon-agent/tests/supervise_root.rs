@@ -249,9 +249,13 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
         .collect();
     assert!(tools.contains(&"mcp__echo__echo"));
     assert!(!tools.iter().any(|t| t.starts_with("mcp__evil")));
+    // Per-run notes travel in the first user message, keeping the system
+    // prompt byte-stable across runs (vLLM prefix caching).
     let system = first["messages"][0]["content"].as_str().unwrap();
-    assert!(system.contains("Echo server for tests."));
-    assert!(system.contains("Unavailable MCP servers this run: evil"));
+    assert!(!system.contains("Echo server for tests."));
+    let user = first["messages"][1]["content"].as_str().unwrap();
+    assert!(user.contains("Echo server for tests."));
+    assert!(user.contains("Unavailable MCP servers this run: evil"));
     let second: Value = serde_json::from_slice(&requests[1].body).unwrap();
     let tool_msg = second["messages"]
         .as_array()

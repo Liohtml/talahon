@@ -239,7 +239,7 @@ async fn execute_inner(
     tracing::info!(tools = registry.len(), "tools ready");
 
     let investigation = prompt::is_investigation(input);
-    let system_prompt = prompt::build_system_prompt(&SystemPromptInputs {
+    let prompt_inputs = SystemPromptInputs {
         assistant_name: archive.assistant_name.clone(),
         group_folder: input.group_folder.clone(),
         is_main: input.is_main,
@@ -250,8 +250,12 @@ async fn execute_inner(
             .map(talon_mcp::McpManager::instructions)
             .unwrap_or_default(),
         unavailable_mcp_servers: mcp.unavailable.clone(),
-    });
+    };
+    let system_prompt = prompt::build_system_prompt(&prompt_inputs);
     tracing::debug!(chars = system_prompt.len(), "system prompt built");
+    if let Some(notes) = prompt::build_run_notes(&prompt_inputs) {
+        first_prompt = format!("{notes}\n\n{first_prompt}");
+    }
 
     if investigation {
         first_prompt.push_str("\n\n");
