@@ -22,6 +22,8 @@ chrono-tz = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `test-util` enables `tokio::time::pause` / `#[tokio::test(start_paused = true)]`.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
