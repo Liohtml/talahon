@@ -5,13 +5,19 @@
 //! registered group. The Anthropic/OAuth credential check of the
 //! TypeScript version is replaced by the vLLM probe (`CREDENTIALS` now
 //! reports whether `TALON_VLLM_BASE_URL`/`TALON_VLLM_MODEL` are set).
+//!
+//! `WARNINGS` lists settings that expose the host to agent containers
+//! (`vllm_api_key_unset`, `http_bind_all_interfaces`, see
+//! [`exposure_issues`]); they do not fail verification.
 
 use std::collections::BTreeMap;
 
 use super::StepArgs;
 use super::service::{LAUNCHD_LABEL, SERVICE_NAME, pid_file_path};
 use super::vllm::add_vllm_fields;
-use crate::checks::{VllmStatus, check_configured_vllm, detect_runtime, image_present};
+use crate::checks::{
+    VllmStatus, check_configured_vllm, detect_runtime, exposure_issues, image_present,
+};
 use crate::context::{SETUP_LOG, SetupContext};
 use crate::platform::ServiceManager;
 use crate::runner::CommandSpec;
@@ -198,6 +204,18 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
     block.set("CHANNEL_AUTH", channel_auth);
     block.set("REGISTERED_GROUPS", registered);
     block.set("MOUNT_ALLOWLIST", allowlist);
+    let warnings = exposure_issues(&ctx.config.env);
+    if !warnings.is_empty() {
+        tracing::warn!(warnings = %warnings.join(","), "Host exposed to agent containers");
+    }
+    block.set(
+        "WARNINGS",
+        if warnings.is_empty() {
+            "none".to_string()
+        } else {
+            warnings.join(",")
+        },
+    );
     block.set("STATUS", if ok { "success" } else { "failed" });
     block.set("LOG", SETUP_LOG);
     tracing::info!(
@@ -308,6 +326,34 @@ mod tests {
         assert_eq!(b.get("MOUNT_ALLOWLIST"), Some("missing"));
         assert_eq!(b.status(), Some("failed"));
         assert_eq!(out.exit_code, 1);
+    }
+
+    #[tokio::test]
+    async fn exposure_warnings_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(
+            dir.path(),
+            Arc::new(MockRunner::new()),
+            "COPILOT_HTTP_BIND=::\nHTTP_API_KEY=x\n",
+        );
+        let b = run(&StepArgs::default(), &c).await.unwrap().block.unwrap();
+        let warnings = b.get("WARNINGS").unwrap();
+        assert!(warnings.contains("vllm_api_key_unset"), "{warnings}");
+        if std::env::var_os("COPILOT_HTTP_BIND").is_none() {
+            assert_eq!(warnings, "vllm_api_key_unset,http_bind_all_interfaces");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let c = ctx(
+            dir.path(),
+            Arc::new(MockRunner::new()),
+            "TALON_VLLM_API_KEY=secret-key\nCOPILOT_HTTP_BIND=127.0.0.1\n",
+        );
+        let out = run(&StepArgs::default(), &c).await.unwrap();
+        assert!(!out.render().contains("secret-key"));
+        if std::env::var_os("COPILOT_HTTP_BIND").is_none() {
+            assert_eq!(out.block.unwrap().get("WARNINGS"), Some("none"));
+        }
     }
 
     #[tokio::test]

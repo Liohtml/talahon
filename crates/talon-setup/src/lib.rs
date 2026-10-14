@@ -9,12 +9,13 @@
 //! | step          | block               | purpose                                              |
 //! |---------------|---------------------|------------------------------------------------------|
 //! | `timezone`    | `TIMEZONE`          | resolve + persist `TZ`                               |
-//! | `environment` | `CHECK_ENVIRONMENT` | runtime, image, vLLM, gateway port, dirs, disk       |
+//! | `environment` | `CHECK_ENVIRONMENT` | runtime, image, vLLM, gateway port, dirs, disk, exposure |
 //! | `vllm`        | `CHECK_VLLM`        | `GET <base>/v1/models`, model served                 |
 //! | `container`   | `SETUP_CONTAINER`   | build + smoke-test the agent image                   |
 //! | `groups`      | `SYNC_GROUPS`       | chat discovery report, `--list`                      |
 //! | `register`    | `REGISTER_CHANNEL`  | register a chat, create its folder / `CLAUDE.md`     |
 //! | `mounts`      | `CONFIGURE_MOUNTS`  | write the mount allowlist                            |
+//! | `egress`      | `SETUP_EGRESS`      | firewall for the agent bridge (print / `--apply`)    |
 //! | `service`     | `SETUP_SERVICE`     | systemd (hardened) / launchd / nohup                 |
 //! | `verify`      | `VERIFY`            | end-to-end health                                    |
 //!
@@ -55,5 +56,8 @@ pub use context::{SETUP_LOG, SetupContext, StdinSource};
 pub use platform::{Platform, PlatformInfo, ServiceManager};
 pub use runner::{CommandOutput, CommandRunner, CommandSpec, SystemCommandRunner};
 pub use status::{StatusBlock, StepOutcome, parse_status_blocks};
+pub use steps::egress::{
+    AllowEntry, Backend, EgressAction, EgressMode, EgressPolicy, egress_plan, render_script,
+};
 pub use steps::service::{Hardening, ServiceSpec, launchd_plist, nohup_wrapper, systemd_unit};
 pub use steps::{Step, StepArgs, UnknownStep, run_step, run_step_by_name};

@@ -13,6 +13,12 @@
 //! Every generated file is built with proper escaping for its format
 //! (systemd specifiers/quoting, XML, POSIX shell), so unusual paths cannot
 //! inject directives or commands.
+//!
+//! Every variant raises the open-file limit to [`MAX_OPEN_FILES`]: the usual
+//! soft default of 1024 descriptors is easy to exhaust with slow or idle
+//! connections to the HTTP API, the LLM gateway and the Emacs bridge
+//! (MYTH-06). systemd units additionally cap the task count
+//! ([`MAX_TASKS`]).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,6 +38,11 @@ pub const SERVICE_NAME: &str = "talon";
 pub const LAUNCHD_LABEL: &str = "com.talon";
 /// Unit name of the TypeScript release.
 pub const LEGACY_SERVICE_NAME: &str = "nanoclaw";
+/// Open-file limit (soft and hard) of the service process
+/// (`LimitNOFILE=`, launchd `NumberOfFiles`, `ulimit -n`).
+pub const MAX_OPEN_FILES: u32 = 65536;
+/// systemd `TasksMax=` of the service (threads + helper processes).
+pub const MAX_TASKS: u32 = 4096;
 
 /// systemd sandboxing level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +277,10 @@ pub fn systemd_unit(spec: &ServiceSpec) -> anyhow::Result<String> {
         "# itself, and leftovers are reaped by label on the next start.".into(),
         "KillMode=process".into(),
         "TimeoutStopSec=45".into(),
+        "# Resource limits (every hardening level): the default soft limit of".into(),
+        "# 1024 open files is easy to exhaust with many slow connections.".into(),
+        format!("LimitNOFILE={MAX_OPEN_FILES}"),
+        format!("TasksMax={MAX_TASKS}"),
         format!("Environment={home}"),
         format!("Environment={path}"),
     ];
@@ -336,6 +351,16 @@ pub fn launchd_plist(spec: &ServiceSpec) -> anyhow::Result<String> {
     <string>Background</string>
     <key>Umask</key>
     <integer>23</integer>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>{MAX_OPEN_FILES}</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>{MAX_OPEN_FILES}</integer>
+    </dict>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -395,6 +420,10 @@ pub fn nohup_wrapper(spec: &ServiceSpec) -> anyhow::Result<String> {
         String::new(),
         "echo \"Starting Talon...\"".into(),
         "umask 027".into(),
+        "# Raise the open-file limit (the soft default of 1024 is easy to exhaust).".into(),
+        format!(
+            "ulimit -n {MAX_OPEN_FILES} 2>/dev/null || ulimit -n \"$(ulimit -Hn)\" 2>/dev/null || true"
+        ),
         format!("nohup {bin} run >> {out_log} 2>> {err_log} &"),
         String::new(),
         "echo $! > \"$PID_FILE\"".into(),
@@ -768,6 +797,22 @@ mod tests {
     }
 
     #[test]
+    fn every_hardening_level_raises_fd_and_task_limits() {
+        for hardening in [Hardening::Strict, Hardening::Basic, Hardening::None] {
+            for system in [false, true] {
+                let unit = systemd_unit(&spec(hardening, system)).unwrap();
+                assert!(unit.contains("\nLimitNOFILE=65536\n"), "{unit}");
+                assert!(unit.contains("\nTasksMax=4096\n"), "{unit}");
+                // Limits belong to [Service], not [Install].
+                let service = unit.find("[Service]").unwrap();
+                let install = unit.find("[Install]").unwrap();
+                let limit = unit.find("LimitNOFILE=").unwrap();
+                assert!(service < limit && limit < install);
+            }
+        }
+    }
+
+    #[test]
     fn unit_escapes_hostile_paths() {
         let mut s = spec(Hardening::Strict, false);
         s.binary = PathBuf::from("/opt/my talon/%h/$HOME/talon");
@@ -818,6 +863,28 @@ mod tests {
     }
 
     #[test]
+    fn plist_raises_open_file_limits() {
+        let plist = launchd_plist(&spec(Hardening::None, false)).unwrap();
+        for key in ["SoftResourceLimits", "HardResourceLimits"] {
+            let expected = format!(
+                "<key>{key}</key>\n    <dict>\n        <key>NumberOfFiles</key>\n        <integer>65536</integer>\n    </dict>"
+            );
+            assert!(plist.contains(&expected), "missing {key}\n{plist}");
+        }
+    }
+
+    #[test]
+    fn plist_is_well_formed_xml_shape() {
+        let plist = launchd_plist(&spec(Hardening::None, false)).unwrap();
+        // Every opened <dict> is closed (cheap structural sanity check).
+        assert_eq!(
+            plist.matches("<dict>").count(),
+            plist.matches("</dict>").count()
+        );
+        assert_eq!(plist.matches("<dict>").count(), 4);
+    }
+
+    #[test]
     fn plist_escapes_xml() {
         let mut s = spec(Hardening::None, false);
         s.binary = PathBuf::from("/opt/a&b/</string><string>evil");
@@ -838,6 +905,11 @@ mod tests {
         );
         assert!(script.contains("talon.pid"));
         assert!(script.contains("set -euo pipefail"));
+        // Raised before the service starts, failure-tolerant under `set -e`.
+        let ulimit = script
+            .find("ulimit -n 65536 2>/dev/null || ulimit -n \"$(ulimit -Hn)\" 2>/dev/null || true")
+            .unwrap();
+        assert!(ulimit < script.find("nohup ").unwrap());
     }
 
     #[test]
@@ -984,6 +1056,9 @@ mod tests {
             .unwrap();
         assert!(!unit.contains("ProtectSystem"));
         assert!(unit.contains("NoNewPrivileges=yes"));
+        // The downgraded unit keeps the resource limits.
+        assert!(unit.contains("LimitNOFILE=65536"));
+        assert!(unit.contains("TasksMax=4096"));
         assert_eq!(
             runner
                 .calls()

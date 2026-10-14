@@ -54,6 +54,11 @@ pub struct SetupContext {
     pub http_timeout: Duration,
     /// How long to wait after (re)starting a service before checking it.
     pub service_settle: Duration,
+    /// `resolv.conf` candidates (first readable one wins) for the upstream
+    /// DNS servers Docker's embedded resolver forwards to. Empty in
+    /// [`SetupContext::new`] (deterministic), the host's files in
+    /// [`SetupContext::detect`].
+    pub resolv_conf_paths: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for SetupContext {
@@ -88,6 +93,12 @@ impl SetupContext {
         ctx.platform = PlatformInfo::detect();
         ctx.env_tz = std::env::var("TZ").ok().filter(|v| !v.is_empty());
         ctx.system_tz = platform::detect_system_timezone();
+        // With systemd-resolved (`nameserver 127.0.0.53`) Docker forwards to
+        // the upstream servers listed in the resolved-managed file.
+        ctx.resolv_conf_paths = vec![
+            PathBuf::from("/run/systemd/resolve/resolv.conf"),
+            PathBuf::from("/etc/resolv.conf"),
+        ];
         if let Ok(exe) = std::env::current_exe() {
             ctx.talon_binary = exe;
         }
@@ -118,6 +129,7 @@ impl SetupContext {
             system_tz: None,
             http_timeout: Duration::from_secs(10),
             service_settle: Duration::from_secs(3),
+            resolv_conf_paths: Vec::new(),
         }
     }
 

@@ -5,13 +5,16 @@
 //! Probes: platform/WSL/headless, docker + podman state, agent image
 //! present, vLLM reachable with the model served, LLM gateway port free,
 //! runtime directories writable, free disk space, existing `.env` and
-//! registered groups.
+//! registered groups, and settings that expose the host to agent
+//! containers (`vllm_api_key_unset`, `http_bind_all_interfaces`; see
+//! [`exposure_issues`]).
 
 use super::StepArgs;
 use super::vllm::add_vllm_fields;
 use crate::checks::{
     MIN_FREE_DISK_MB, PortStatus, RuntimeState, VllmStatus, check_configured_vllm, check_port,
-    check_writable_dirs, detect_runtime, disk_free_mb, image_present, runtime_dirs,
+    check_writable_dirs, detect_runtime, disk_free_mb, exposure_issues, image_present,
+    runtime_dirs,
 };
 use crate::context::{SETUP_LOG, SetupContext};
 use crate::status::{StatusBlock, StepOutcome};
@@ -72,6 +75,20 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
     if vllm.status != VllmStatus::Ok {
         issues.push(format!("vllm_{}", vllm.status.as_str()));
     }
+
+    // Exposure of the host to agent containers (MYTH-05): a vLLM without an
+    // API key can be called directly, bypassing the gateway; an HTTP API on
+    // 0.0.0.0 / :: is reachable from the agent bridge.
+    let http_bind = ctx.config.env.get("COPILOT_HTTP_BIND");
+    block.set(
+        "HTTP_BIND",
+        http_bind.as_deref().map_or("default", str::trim),
+    );
+    issues.extend(
+        exposure_issues(&ctx.config.env)
+            .into_iter()
+            .map(String::from),
+    );
 
     // LLM gateway port.
     let port = check_port(&ctx.config.llm_gateway_bind, ctx.config.llm_gateway_port).await;
@@ -188,6 +205,45 @@ mod tests {
         // Runtime directories were created.
         for d in ["store", "data", "groups", "logs"] {
             assert!(dir.path().join(d).is_dir(), "{d}");
+        }
+    }
+
+    #[tokio::test]
+    async fn exposure_settings_are_issues() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "COPILOT_HTTP_BIND=0.0.0.0\n").unwrap();
+        let mut ctx = SetupContext::new(dir.path(), dir.path(), Arc::new(MockRunner::new()));
+        ctx.config.llm_gateway_port = 0;
+        ctx.config.llm_gateway_bind = "127.0.0.1".into();
+        let b = run(&StepArgs::default(), &ctx)
+            .await
+            .unwrap()
+            .block
+            .unwrap();
+        let issues = b.get("ISSUES").unwrap().to_string();
+        assert!(issues.contains("vllm_api_key_unset"), "{issues}");
+        assert_eq!(b.get("VLLM_API_KEY"), Some("unset"));
+        if std::env::var_os("COPILOT_HTTP_BIND").is_none() {
+            assert!(issues.contains("http_bind_all_interfaces"), "{issues}");
+            assert_eq!(b.get("HTTP_BIND"), Some("0.0.0.0"));
+        }
+
+        std::fs::write(
+            dir.path().join(".env"),
+            "TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n",
+        )
+        .unwrap();
+        ctx.reload_config();
+        let b = run(&StepArgs::default(), &ctx)
+            .await
+            .unwrap()
+            .block
+            .unwrap();
+        let issues = b.get("ISSUES").unwrap();
+        assert!(!issues.contains("vllm_api_key_unset"), "{issues}");
+        if std::env::var_os("COPILOT_HTTP_BIND").is_none() {
+            assert!(!issues.contains("http_bind_all_interfaces"), "{issues}");
+            assert_eq!(b.get("HTTP_BIND"), Some("127.0.0.1"));
         }
     }
 

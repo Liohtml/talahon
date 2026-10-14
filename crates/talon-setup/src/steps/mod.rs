@@ -2,6 +2,7 @@
 //! dispatcher the host CLI (`talon setup <step> [args...]`) calls.
 
 pub mod container;
+pub mod egress;
 pub mod environment;
 pub mod groups;
 pub mod mounts;
@@ -48,6 +49,17 @@ impl StepArgs {
         self.args.get(idx + 1).map(String::as_str)
     }
 
+    /// The argument following every occurrence of `--name` (repeatable
+    /// options such as `--allow`).
+    pub fn values(&self, name: &str) -> Vec<&str> {
+        self.args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == name)
+            .filter_map(|(i, _)| self.args.get(i + 1).map(String::as_str))
+            .collect()
+    }
+
     /// Raw arguments.
     pub fn raw(&self) -> &[String] {
         &self.args
@@ -71,6 +83,8 @@ pub enum Step {
     Register,
     /// Write the mount allowlist (`CONFIGURE_MOUNTS`).
     Mounts,
+    /// Generate / apply the agent-network firewall (`SETUP_EGRESS`).
+    Egress,
     /// Install the systemd / launchd service (`SETUP_SERVICE`).
     Service,
     /// End-to-end health report (`VERIFY`).
@@ -79,7 +93,7 @@ pub enum Step {
 
 impl Step {
     /// All steps in the order the setup skill runs them.
-    pub const ALL: [Step; 9] = [
+    pub const ALL: [Step; 10] = [
         Step::Timezone,
         Step::Environment,
         Step::Vllm,
@@ -87,6 +101,7 @@ impl Step {
         Step::Groups,
         Step::Register,
         Step::Mounts,
+        Step::Egress,
         Step::Service,
         Step::Verify,
     ];
@@ -101,6 +116,7 @@ impl Step {
             Step::Groups => "groups",
             Step::Register => "register",
             Step::Mounts => "mounts",
+            Step::Egress => "egress",
             Step::Service => "service",
             Step::Verify => "verify",
         }
@@ -134,6 +150,7 @@ pub async fn run_step(step: Step, args: &StepArgs, ctx: &SetupContext) -> StepOu
         Step::Groups => groups::run(args, ctx).await,
         Step::Register => register::run(args, ctx).await,
         Step::Mounts => mounts::run(args, ctx).await,
+        Step::Egress => egress::run(args, ctx).await,
         Step::Service => service::run(args, ctx).await,
         Step::Verify => verify::run(args, ctx).await,
     };
@@ -200,12 +217,26 @@ mod tests {
     }
 
     #[test]
+    fn repeated_values() {
+        let a = StepArgs::new(["--allow", "10.0.0.1", "--apply", "--allow", "10.0.0.2"]);
+        assert_eq!(a.values("--allow"), vec!["10.0.0.1", "10.0.0.2"]);
+        assert!(a.values("--nope").is_empty());
+        // A trailing option without a value contributes nothing.
+        assert!(StepArgs::new(["--allow"]).values("--allow").is_empty());
+    }
+
+    #[test]
     fn step_names_round_trip() {
         for s in Step::ALL {
             assert_eq!(Step::parse(s.name()), Some(s));
         }
         assert_eq!(Step::parse("nope"), None);
         assert!(Step::names().contains("verify"));
+        assert_eq!(Step::parse("egress"), Some(Step::Egress));
+        assert_eq!(Step::Egress.to_string(), "egress");
+        // Firewall setup runs before the service is installed.
+        let pos = |s: Step| Step::ALL.iter().position(|x| *x == s).unwrap();
+        assert!(pos(Step::Egress) < pos(Step::Service));
     }
 
     #[tokio::test]

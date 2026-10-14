@@ -1,9 +1,12 @@
 //! Environment probes: container runtime, image, vLLM, gateway port,
-//! writable directories and disk space.
+//! writable directories, disk space and settings that expose the host to
+//! agent containers.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use talon_core::env::EnvFile;
 use talon_core::provider::effective_vllm;
 
 use crate::context::SetupContext;
@@ -418,6 +421,56 @@ pub fn parse_df_available_kb(output: &str) -> Option<u64> {
     line.split_whitespace().nth(3)?.parse().ok()
 }
 
+// ---------------------------------------------------------------------------
+// Exposure to agent containers (MYTH-05)
+// ---------------------------------------------------------------------------
+
+/// Issue code: `TALON_VLLM_API_KEY` is unset.
+pub const ISSUE_VLLM_API_KEY_UNSET: &str = "vllm_api_key_unset";
+/// Issue code: `COPILOT_HTTP_BIND` listens on every interface.
+pub const ISSUE_HTTP_BIND_ALL_INTERFACES: &str = "http_bind_all_interfaces";
+
+/// `TALON_VLLM_API_KEY` is set (non-blank) in `.env` — the only place the
+/// secret is read from.
+pub fn vllm_api_key_set(env: &EnvFile) -> bool {
+    env.file_value("TALON_VLLM_API_KEY")
+        .is_some_and(|k| !k.trim().is_empty())
+}
+
+/// `value` is an unspecified ("any") address: `0.0.0.0`, `::`, `[::]`.
+pub fn binds_all_interfaces(value: &str) -> bool {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified())
+}
+
+/// Settings that weaken the containment of agent containers, as issue
+/// codes for the `environment` / `verify` blocks:
+///
+/// - [`ISSUE_VLLM_API_KEY_UNSET`]: without an API key on the vLLM server,
+///   anything that can reach it — agent containers included, if egress is
+///   not firewalled (`talon setup egress`) — can call the model directly,
+///   bypassing the LLM gateway's token, model and parameter checks.
+/// - [`ISSUE_HTTP_BIND_ALL_INTERFACES`]: `COPILOT_HTTP_BIND` is `0.0.0.0` /
+///   `::`, so the HTTP API also listens on the docker bridge (reachable from
+///   agent containers) and on every other network the host is on.
+pub fn exposure_issues(env: &EnvFile) -> Vec<&'static str> {
+    let mut issues = Vec::new();
+    if !vllm_api_key_set(env) {
+        issues.push(ISSUE_VLLM_API_KEY_UNSET);
+    }
+    if env
+        .get("COPILOT_HTTP_BIND")
+        .is_some_and(|b| binds_all_interfaces(&b))
+    {
+        issues.push(ISSUE_HTTP_BIND_ALL_INTERFACES);
+    }
+    issues
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -428,6 +481,41 @@ mod tests {
     use super::*;
     use crate::runner::CommandOutput;
     use crate::runner::mock::MockRunner;
+
+    #[test]
+    fn unspecified_bind_addresses() {
+        for any in ["0.0.0.0", "::", "[::]", " 0.0.0.0 ", "0:0:0:0:0:0:0:0"] {
+            assert!(binds_all_interfaces(any), "{any}");
+        }
+        for specific in ["127.0.0.1", "::1", "172.17.0.1", "", "*", "localhost"] {
+            assert!(!binds_all_interfaces(specific), "{specific}");
+        }
+    }
+
+    #[test]
+    fn exposure_issues_from_env() {
+        let env = EnvFile::from_str_content("TALON_VLLM_API_KEY=k\n");
+        assert!(vllm_api_key_set(&env));
+        assert!(!exposure_issues(&env).contains(&ISSUE_VLLM_API_KEY_UNSET));
+        for unset in ["", "TALON_VLLM_API_KEY=\n", "TALON_VLLM_API_KEY=   \n"] {
+            let env = EnvFile::from_str_content(unset);
+            assert!(!vllm_api_key_set(&env), "{unset:?}");
+            assert!(exposure_issues(&env).contains(&ISSUE_VLLM_API_KEY_UNSET));
+        }
+        // COPILOT_HTTP_BIND may come from the process env, which wins.
+        if std::env::var_os("COPILOT_HTTP_BIND").is_none() {
+            let env =
+                EnvFile::from_str_content("TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=0.0.0.0\n");
+            assert_eq!(exposure_issues(&env), vec![ISSUE_HTTP_BIND_ALL_INTERFACES]);
+            let env = EnvFile::from_str_content("TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=::\n");
+            assert_eq!(exposure_issues(&env), vec![ISSUE_HTTP_BIND_ALL_INTERFACES]);
+            let env =
+                EnvFile::from_str_content("TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n");
+            assert!(exposure_issues(&env).is_empty());
+            let env = EnvFile::from_str_content("TALON_VLLM_API_KEY=k\n");
+            assert!(exposure_issues(&env).is_empty());
+        }
+    }
 
     #[test]
     fn models_url_variants() {

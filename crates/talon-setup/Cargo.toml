@@ -19,9 +19,10 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 regex = { workspace = true }
+# Private (0700) directory for the nftables ruleset applied by `egress --apply`.
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]
