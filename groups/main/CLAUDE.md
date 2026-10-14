@@ -36,12 +36,14 @@ When working as a sub-agent or teammate, only use `send_message` if instructed t
 
 ## Memory
 
-The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
+Earlier conversations of this chat are archived (Markdown) in `/home/agent/.talon/conversations/` when the context is compacted; they are private to this chat. Read them to recall context from previous sessions.
+
+Persistent notes for this group go into `/workspace/group/MEMORY.md` (keep it short; it is shown to you at the start of every run and is shared by every chat of the group, so never store secrets or one user's private data there). `CLAUDE.md` files are read-only instructions maintained by the operator.
 
 When you learn something important:
 - Create files for structured data (e.g., `customers.md`, `preferences.md`)
 - Split files larger than 500 lines into folders
-- Keep an index in your memory for the files you create
+- Keep an index of the files you create in `MEMORY.md`
 
 ## Message Formatting
 
@@ -258,7 +260,7 @@ Read `/workspace/project/data/registered_groups.json` and format it nicely.
 
 ## Global Memory
 
-You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
+`/workspace/project/groups/global/CLAUDE.md` holds instructions shared by all groups. It is read-only inside containers (the project is mounted read-only); when asked to "remember this globally", tell the operator exactly what to add to `groups/global/CLAUDE.md` on the host.
 
 ---
 

@@ -577,7 +577,7 @@ All persistent knowledge is stored in **MemPalace** — do not update this CLAUD
 
 **At the start of every investigation**, query MemPalace before touching the SIEM (Step 0.5 in the workflow above). Knowledge written during one investigation is automatically available in all future ones.
 
-Only update this CLAUDE.md for structural changes to the investigation workflow itself — not for customer-specific data.
+This CLAUDE.md is read-only operator configuration. Customer knowledge goes to MemPalace; short operational notes for this group may go to `/workspace/group/MEMORY.md`.
 
 ---
 *Deployed by SOCfortress. Each client instance has its own credentials in `siem/.env` and `mysql/.env`.*
