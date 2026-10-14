@@ -44,3 +44,35 @@ Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
 | N-8 | low | Lane-key hash only 32 bits → collisions for ids > 40 chars | G6 |
 | N-9 | low | Secret scan depth 3, skips `.git` (deep `.env`, `.git/config` exposed); agents can make rw-mount scans fail | G3 |
 | N-10 | info | Read-only is not immutable: main's `/workspace/project` view includes agent-writable `groups/`, `data/`, `store/` | G5 (supervisor refuses commands there) |
+
+## Round 3 — verification and final status
+
+| ID | Status |
+|---|---|
+| N-1 | Fixed — tasks run only in their own lane; unregistered lanes are deferred |
+| N-2 | Fixed — verdicts/evals only from the investigation lane's private state dir; `prompts/` and operator files read-only (R3-1); future-dated reports rejected (R3-3) |
+| N-3 | Fixed — 320-request flood now yields 25 tasks (quota, prompt cap, frequency floor, op rate limit) |
+| N-4 | Fixed — HTTP/1.1 only; idle keep-alive closed; unauthenticated/error responses close the connection (R3-2) |
+| N-5 | Fixed — session ids validated in runner and host |
+| N-6 | Fixed — schema keyword allowlist, bounds clamped to 4096, per-lane cache salt |
+| N-7 | Fixed — palace lock-down before secret staging, no walk of mcp-palace-owned trees |
+| N-8 | Fixed — 128-bit lane key hashes |
+| N-9 | Fixed — unlimited-depth scan, git-config credentials, extended credential names |
+| N-10 | Fixed — MCP commands under agent-writable project dirs refused |
+
+### Accepted residual risks
+- Prompt injection is inherent; containment (per-lane isolation, privilege
+  separation, egress firewall) is the control. `talon setup egress --apply`
+  is opt-in, needs root and must be re-applied after a reboot.
+- Shared-by-design state within a group folder: `MEMORY.md` (fenced),
+  MemPalace (readable by every lane of the deployment).
+- Anonymization limits exposure in model context and logs; it is not a
+  confidentiality control against the model (`opensearch` raw server and
+  `deanonymize` remain available).
+- The audit chain is unkeyed; anchor `audit_chain_head()` externally.
+- No fair-share scheduling of vLLM capacity between lanes beyond the
+  gateway's concurrency limits.
+- The main group is the root of trust inside Talon.
+- On upgrade from 1.x, reset `groups/*/prompts/` and
+  `groups/copilot/notifications.md` from git: content an agent planted there
+  before the read-only binds existed would now be trusted.

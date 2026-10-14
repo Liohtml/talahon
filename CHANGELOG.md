@@ -16,6 +16,8 @@ For detailed release notes, see the [full changelog on the documentation site](h
 - New offline intelligence engine (`talon-intel`): IOC extraction, MITRE ATT&CK mapping, command-line analysis, triage scoring, correlation, structured `submit_triage_report` verdicts.
 - Anonymizing proxy rewritten in Rust (`talon-anon-proxy`) with more token classes and detectors; map format unchanged.
 - New HTTP endpoints: `GET /investigations`, `GET /investigations/{id}`, `GET /metrics`; investigation deduplication.
+- Independent adversarial security review (three rounds, see `docs/MYTHOS_REVIEW.md`) with all findings fixed.
+- [UPGRADE] Reset `groups/*/prompts/` and `groups/copilot/notifications.md` from git after upgrading (they are read-only inside containers now; anything planted earlier would be trusted). Per-user CoPilot sessions start fresh (new lane keys). `sudo chown -R 61008:61008 mempalace-data`.
 
 ## [1.2.36] - 2026-03-26
 
