@@ -89,6 +89,22 @@ pub const DEFAULT_MAX_RUN_TIME_FACTOR: u32 = 4;
 /// Env / `.env` key selecting the agent network (`default` or empty: the
 /// runtime's default bridge; unset: [`AGENT_NETWORK`]).
 pub const CONTAINER_NETWORK_ENV: &str = "TALON_CONTAINER_NETWORK";
+/// Longest session id accepted from a container frame (N-5). The agent
+/// reports a UUID (36 bytes); the id is persisted, logged and sent back to
+/// the container on the next run, so anything longer is dropped.
+pub const MAX_SESSION_ID_BYTES: usize = 128;
+
+/// `true` for a session id accepted from a container frame: 1 to
+/// [`MAX_SESSION_ID_BYTES`] bytes of `[A-Za-z0-9_-]` (a UUID in practice).
+/// Frames carrying anything else have the id removed before delivery (with a
+/// warning that never quotes it).
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_SESSION_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
 
 /// Interpret a [`CONTAINER_NETWORK_ENV`] value: unset => [`AGENT_NETWORK`];
 /// empty or `default` => `None` (the runtime's default bridge); anything
@@ -1184,7 +1200,7 @@ async fn run_loop<H: OutputHandler>(
                 }
             },
             ev = ev_rx.recv(), if events_open && pending.is_none() => match ev {
-                Some(ParseEvent::Output(output)) => {
+                Some(ParseEvent::Output(mut output)) => {
                     let bytes = payload_bytes(&output);
                     let exceeded = if st.limit.is_some() {
                         None
@@ -1216,8 +1232,18 @@ async fn run_loop<H: OutputHandler>(
                         st.had_output = true;
                         st.outputs += 1;
                         st.result_bytes = st.result_bytes.saturating_add(bytes);
-                        if let Some(id) = output.new_session_id.as_ref().filter(|s| !s.is_empty()) {
-                            st.new_session_id = Some(id.clone());
+                        // N-5: the id is persisted, logged and sent back to the
+                        // container; anything but a short token is dropped
+                        // (from the run result and the delivered frame alike).
+                        match output.new_session_id.as_deref() {
+                            None | Some("") => {}
+                            Some(id) if is_valid_session_id(id) => {
+                                st.new_session_id = Some(id.to_string());
+                            }
+                            Some(id) => {
+                                tracing::warn!(group = %ctx.group_name, container = %ctx.name, bytes = id.len(), max_bytes = MAX_SESSION_ID_BYTES, "Container reported an invalid session id; ignored");
+                                output.new_session_id = None;
+                            }
                         }
                         if output.usage.is_some() {
                             st.usage = output.usage;
@@ -1804,6 +1830,83 @@ mod tests {
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(seen.lock().unwrap().len(), 1);
         assert!(h.exec.calls().is_empty(), "no stop on a clean exit");
+    }
+
+    // --- N-5: session ids from container frames ---
+
+    #[test]
+    fn session_id_validation() {
+        assert!(is_valid_session_id("3f2504e0-4f89-41d3-9a0c-0305e82c3301"));
+        assert!(is_valid_session_id("session-123"));
+        assert!(is_valid_session_id("s_1"));
+        assert!(is_valid_session_id(&"a".repeat(MAX_SESSION_ID_BYTES)));
+        assert!(!is_valid_session_id(&"a".repeat(MAX_SESSION_ID_BYTES + 1)));
+        for bad in [
+            "",
+            "a b",
+            "../etc",
+            "a/b",
+            "a.b",
+            "a:b",
+            "id\nforged log line",
+            "id\u{1b}[31m",
+            "s\u{e9}ssion",
+            "\u{0}",
+        ] {
+            assert!(!is_valid_session_id(bad), "{bad:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invalid_session_ids_are_dropped() {
+        let h = harness();
+        let (spawner, mut proc) = FakeSpawner::new();
+        let runner = h.runner(h.config(), spawner);
+        let (seen, handler) = recording_handler();
+        let started = runner
+            .start(RunSpec::new(test_group(), test_input()), handler)
+            .await
+            .unwrap();
+        let huge = "x".repeat(64 * 1024);
+        for (result, session) in [
+            ("one", "valid-1"),
+            ("two", huge.as_str()),
+            ("three", "bad id\nforged log line"),
+            ("four", ""),
+        ] {
+            proc.stdout
+                .write_all(&framed(result, session))
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        proc.exit(0);
+        drop(proc.stdout);
+        let result = started.wait().await;
+        assert_eq!(result.status, OutputStatus::Success);
+        assert_eq!(result.outputs, 4);
+        // The last *valid* id wins; invalid ones never replace or extend it.
+        assert_eq!(result.new_session_id.as_deref(), Some("valid-1"));
+        assert_eq!(
+            result.to_container_output().new_session_id.as_deref(),
+            Some("valid-1")
+        );
+        let seen = seen.lock().unwrap();
+        let delivered: Vec<(Option<&str>, Option<&str>)> = seen
+            .iter()
+            .map(|o| (o.result.as_deref(), o.new_session_id.as_deref()))
+            .collect();
+        assert_eq!(
+            delivered,
+            vec![
+                (Some("one"), Some("valid-1")),
+                // Invalid ids are removed from the delivered frame as well.
+                (Some("two"), None),
+                (Some("three"), None),
+                // An empty id is "no id", passed through unchanged.
+                (Some("four"), Some("")),
+            ]
+        );
     }
 
     // --- additional behaviour ---

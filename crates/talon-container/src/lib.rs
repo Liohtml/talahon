@@ -11,7 +11,8 @@
 //!   with `.env*` shadowed, sessions at `/home/agent/.talon`, IPC, allowlisted
 //!   extras refused near host secrets and scanned for credential files,
 //!   per-MCP secret staging + shadowing by canonical host path, read-only
-//!   `.mcp.json` and `CLAUDE.md`, symlinked lane directories refused).
+//!   `.mcp.json`, `CLAUDE.md` and `prompts/`, symlinked lane directories
+//!   refused).
 //! - [`palace`]: the hardened one-shot `run` for host-side MemPalace calls.
 //! - [`args`]: the hardened `run` argument vector of §3.3 (capabilities,
 //!   read-only rootfs, tmpfs, limits, env overlay without secrets, blocked
@@ -44,16 +45,17 @@ pub mod snapshot;
 
 pub use args::{ResourceLimits, RunAs, build_run_args, container_name};
 pub use mounts::{
-    GROUP_INSTRUCTIONS_FILE, GROUP_MEMORY_FILE, ISOLATED_MCPS, MountLayout, MountOptions,
-    MountRequest, SecretScanLimits, VolumeMount, build_mounts,
+    GROUP_INSTRUCTIONS_FILE, GROUP_MEMORY_FILE, GROUP_PROMPTS_DIR, ISOLATED_MCPS, MountLayout,
+    MountOptions, MountRequest, SecretScanLimits, VolumeMount, build_mounts,
 };
 pub use palace::{MCP_PALACE_GID, MCP_PALACE_UID, PalaceRunSpec, build_palace_run_args};
 pub use parser::{OutputParser, ParseEvent};
 pub use policy::{DenyAllMounts, LogRedactor, MountPolicy};
 pub use process::{ProcessSpawner, TokioProcessSpawner};
 pub use runner::{
-    ContainerHandle, ContainerRunner, OutputHandler, PreparedRun, RunOutcome, RunResult, RunSpec,
-    RunnerConfig, StartError, StartedContainer, noop_handler,
+    ContainerHandle, ContainerRunner, MAX_SESSION_ID_BYTES, OutputHandler, PreparedRun, RunOutcome,
+    RunResult, RunSpec, RunnerConfig, StartError, StartedContainer, is_valid_session_id,
+    noop_handler,
 };
 pub use runtime::{
     AGENT_NETWORK, ContainerRuntime, HostPlatform, RuntimeKind, detect_gateway_bind_addr,

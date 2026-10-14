@@ -9,15 +9,17 @@
 #   2. remaps the `agent` user to RUN_UID/RUN_GID when /etc/passwd is
 #      writable (under --read-only the supervisor uses the numeric ids),
 #   3. hands the agent its tmpfs home (/home/agent, 0700),
-#   4. copies every staged secret /etc/mcp-staging/<id>.<file> (root-only
+#   4. hands MemPalace data (/workspace/extra/mempalace-data) to
+#      mcp-palace, top directory 0700, so the agent can neither read nor
+#      plant files there (e.g. a malicious ChromaDB index_metadata.pickle —
+#      MYTH-01). Runs before any secret is staged; the tree is walked only
+#      once, to migrate a host-created directory, never once mcp-palace owns
+#      it (N-7). Symlinks are never followed; a writable mount that cannot
+#      be secured is fatal,
+#   5. copies every staged secret /etc/mcp-staging/<id>.<file> (root-only
 #      host bind mounts) to /etc/mcp-secrets/<id>.<file>, owner mcp-<id>,
 #      mode 0600 — only that MCP's user can read it,
-#   4b. hands MemPalace data (/workspace/extra/mempalace-data) to
-#      mcp-palace, top directory 0700, nothing group/world accessible, so
-#      the agent can neither read nor plant files there (e.g. a malicious
-#      ChromaDB index_metadata.pickle — MYTH-01). Symlinks are never
-#      followed; a writable mount that cannot be secured is fatal,
-#   5. execs `talon-agent supervise`, which reads the ContainerInput from
+#   6. execs `talon-agent supervise`, which reads the ContainerInput from
 #      stdin, runs each MCP server as its mcp-* user and the agent as `agent`.
 #
 # Not root (dev / degraded mode): exec `talon-agent run` directly.
@@ -105,7 +107,89 @@ if [ -d /home/agent ]; then
     chmod 0700 /home/agent 2>/dev/null || true
 fi
 
-# --- 4. per-MCP secrets ----------------------------------------------------------
+# --- 4. MemPalace data: mcp-palace only ------------------------------------------
+# Runs as root BEFORE any secret is staged and before privileges are dropped.
+# The host only mounts the palace data at this exact path (talon-container
+# refuses other names / overlaps).
+#
+# The tree below an already secured directory belongs to mcp-palace, and a
+# compromised MemPalace (in another container sharing the data) could swap an
+# intermediate directory for a symlink while root walks it, redirecting a
+# chown/chmod onto e.g. /etc/mcp-secrets (N-7). So root never walks a tree
+# mcp-palace controls:
+#   - top directory already mcp-palace:mcp-palace 0700 -> nothing to do;
+#   - top directory owned by mcp-palace (group/mode drifted) -> fix the top
+#     directory only (it is the mount point: it cannot be swapped);
+#   - top directory not owned by mcp-palace yet -> one-time migration of a
+#     host-created directory (nothing inside can be mcp-palace's yet): lock
+#     the top directory, hand the tree over without following symlinks, and
+#     chown the top directory LAST so an interrupted migration is redone.
+# And because this runs before step 5, no secret exists in the container
+# while the tree is walked.
+secure_palace_data() {
+    local dir=$PALACE_DATA puid pgid state owner hardlinked
+    if [ -L "$dir" ]; then
+        die "$dir is a symlink; refusing to start"
+    fi
+    [ -d "$dir" ] || return 0
+    puid=$(id -u "$PALACE_USER") || die "image has no $PALACE_USER user"
+    pgid=$(id -g "$PALACE_USER") || die "image has no $PALACE_USER group"
+    case "$puid:$pgid" in
+        0:* | *:0) die "$PALACE_USER must not be root" ;;
+    esac
+    state=$(stat -c '%u:%g:%a' -- "$dir") || die "cannot stat $dir"
+    if [ "$state" = "$puid:$pgid:700" ]; then
+        # Already secured: never walk the tree (it is mcp-palace's).
+        return 0
+    fi
+    if [ ! -w "$dir" ]; then
+        # access(2) reports EROFS even for root: a read-only mount cannot be
+        # planted into, and cannot be re-owned either.
+        log "$dir is mounted read-only; leaving ownership unchanged"
+        return 0
+    fi
+    owner=${state%%:*}
+    if [ "$owner" = "$puid" ]; then
+        # Handed over before; only the top directory drifted (mcp-palace may
+        # chmod its own directory). Everything below stays untouched.
+        log "$dir is owned by $PALACE_USER but is $state; fixing the top directory only"
+        chown -h -- "$puid:$pgid" "$dir" || die "cannot chown $dir"
+        chmod 0700 -- "$dir" || die "cannot chmod $dir"
+    else
+        log "handing $dir over to $PALACE_USER (one-time migration)"
+        # Lock the top directory first: from now on only root and its current
+        # owner (the host user that created it) can enter it while it is walked.
+        chmod 0700 -- "$dir" || die "cannot chmod $dir"
+        # Files with several hard links may be inodes shared with other host
+        # files: never re-own or re-mode them (and the 0700 top directory keeps
+        # the agent away from them anyway).
+        # (`|| true`: `head` closing the pipe early is not an error.)
+        hardlinked=$(find -P "$dir" -xdev -mindepth 1 -type f -links +1 -print 2>/dev/null |
+            head -n 5 | tr '\n' ' ') || true
+        if [ -n "$hardlinked" ]; then
+            log "palace data contains hard-linked files (left untouched): $hardlinked"
+        fi
+        # -P: never follow symlinks; -xdev: stay on the mounted filesystem;
+        # chown -h: change a symlink itself, never its target; chmod skips
+        # symlinks entirely (it would follow them).
+        if ! find -P "$dir" -xdev -mindepth 1 ! \( -type f -links +1 \) \
+            -exec chown -h -- "$puid:$pgid" {} + 2>/dev/null; then
+            die "cannot give $dir to $PALACE_USER"
+        fi
+        if ! find -P "$dir" -xdev -mindepth 1 ! -type l ! \( -type f -links +1 \) \
+            -exec chmod u+rwX,go-rwx -- {} + 2>/dev/null; then
+            die "cannot restrict permissions under $dir"
+        fi
+        # Last: marks the migration as done.
+        chown -h -- "$puid:$pgid" "$dir" || die "cannot chown $dir"
+    fi
+    state=$(stat -c '%u:%g:%a' -- "$dir") || die "cannot stat $dir"
+    [ "$state" = "$puid:$pgid:700" ] ||
+        die "$dir is $state after securing it (expected $puid:$pgid:700)"
+}
+secure_palace_data
+
+# --- 5. per-MCP secrets (after step 4: see above) --------------------------------
 if [ -d "$STAGING_DIR" ]; then
     if [ ! -d "$SECRETS_DIR" ]; then
         install -d -m 0711 -o root -g root "$SECRETS_DIR" ||
@@ -143,53 +227,7 @@ if [ -d "$STAGING_DIR" ]; then
     done
 fi
 
-# --- 4b. MemPalace data: mcp-palace only ------------------------------------------
-# Runs as root BEFORE privileges are dropped. The host only mounts the palace
-# data at this exact path (talon-container refuses other names / overlaps).
-secure_palace_data() {
-    local dir=$PALACE_DATA puid pgid state hardlinked
-    if [ -L "$dir" ]; then
-        die "$dir is a symlink; refusing to start"
-    fi
-    [ -d "$dir" ] || return 0
-    puid=$(id -u "$PALACE_USER") || die "image has no $PALACE_USER user"
-    pgid=$(id -g "$PALACE_USER") || die "image has no $PALACE_USER group"
-    case "$puid:$pgid" in
-        0:* | *:0) die "$PALACE_USER must not be root" ;;
-    esac
-    if [ ! -w "$dir" ]; then
-        # access(2) reports EROFS even for root: a read-only mount cannot be
-        # planted into, and cannot be re-owned either.
-        log "$dir is mounted read-only; leaving ownership unchanged"
-        return 0
-    fi
-    # Files with several hard links may be inodes shared with other host
-    # files: never re-own or re-mode them (and the 0700 top directory keeps
-    # the agent away from them anyway).
-    # (`|| true`: `head` closing the pipe early is not an error.)
-    hardlinked=$(find -P "$dir" -xdev -type f -links +1 -print 2>/dev/null | head -n 5 | tr '\n' ' ') || true
-    if [ -n "$hardlinked" ]; then
-        log "palace data contains hard-linked files (left untouched): $hardlinked"
-    fi
-    # -P: never follow symlinks; -xdev: stay on the mounted filesystem;
-    # chown -h: change a symlink itself, never its target; chmod skips
-    # symlinks entirely (it would follow them).
-    if ! find -P "$dir" -xdev ! \( -type f -links +1 \) \
-        -exec chown -h -- "$puid:$pgid" {} + 2>/dev/null; then
-        die "cannot give $dir to $PALACE_USER"
-    fi
-    if ! find -P "$dir" -xdev ! -type l ! \( -type f -links +1 \) \
-        -exec chmod u+rwX,go-rwx -- {} + 2>/dev/null; then
-        die "cannot restrict permissions under $dir"
-    fi
-    chmod 0700 -- "$dir" || die "cannot chmod $dir"
-    state=$(stat -c '%u:%g:%a' -- "$dir") || die "cannot stat $dir"
-    [ "$state" = "$puid:$pgid:700" ] ||
-        die "$dir is $state after securing it (expected $puid:$pgid:700)"
-}
-secure_palace_data
-
-# --- 5. hand over to the supervisor ---------------------------------------------
+# --- 6. hand over to the supervisor ---------------------------------------------
 install -d -m 0755 -o root -g root /run/talon 2>/dev/null || true
 export RUN_UID RUN_GID
 exec "$AGENT_BIN" supervise

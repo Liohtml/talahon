@@ -338,6 +338,185 @@ mod tests {
         assert!(args.contains(&expected));
     }
 
+    // --- N-7: container/entrypoint.sh palace step ---
+
+    fn entrypoint_text() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../container/entrypoint.sh");
+        fs::read_to_string(path).unwrap()
+    }
+
+    /// The `secure_palace_data` function from the entrypoint, verbatim.
+    fn palace_function(script: &str) -> String {
+        let start = script.find("\nsecure_palace_data() {\n").unwrap() + 1;
+        let len = script[start..].find("\n}\n").unwrap() + 3;
+        script[start..start + len].to_string()
+    }
+
+    #[test]
+    fn entrypoint_is_valid_bash() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../container/entrypoint.sh");
+        match std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&path)
+            .output()
+        {
+            Ok(out) => assert!(
+                out.status.success(),
+                "bash -n failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(e) => eprintln!("bash not available ({e}); syntax check skipped"),
+        }
+    }
+
+    #[test]
+    fn entrypoint_secures_palace_before_staging_secrets() {
+        let script = entrypoint_text();
+        let call = script.find("\nsecure_palace_data\n").unwrap();
+        let staging_loop = script.find("for staged in \"$STAGING_DIR\"/*").unwrap();
+        let first_secret_write = script.find("install -m 0600").unwrap();
+        let supervise = script.find("exec \"$AGENT_BIN\" supervise").unwrap();
+        assert!(
+            call < staging_loop,
+            "palace step must run before secrets are staged"
+        );
+        assert!(call < first_secret_write);
+        assert!(call < supervise);
+        assert!(
+            !script[..call].contains("$SECRETS_DIR\""),
+            "no secret before the walk"
+        );
+
+        // The tree is walked only in the migration branch, after the
+        // already-secured early return, and never follows symlinks.
+        let func = palace_function(&script);
+        let secured = func
+            .find("if [ \"$state\" = \"$puid:$pgid:700\" ]; then")
+            .unwrap();
+        let early_return = func[secured..].find("return 0").unwrap() + secured;
+        let migration = func.find("one-time migration").unwrap();
+        let first_find = func.find("find ").unwrap();
+        assert!(early_return < first_find && migration < first_find);
+        for line in func.lines().filter(|l| l.contains("find ")) {
+            assert!(line.contains("find -P"), "{line}");
+            assert!(line.contains("-xdev"), "{line}");
+            assert!(line.contains("-mindepth 1"), "{line}");
+        }
+        assert!(!func.contains("chown -R") && !func.contains("chmod -R"));
+    }
+
+    /// Runs the entrypoint's `secure_palace_data` on `dir` with `id` stubbed
+    /// to report uid/gid [`MCP_PALACE_UID`] for `mcp-palace`.
+    fn run_palace_step(scratch: &Path, dir: &Path) -> std::process::Output {
+        let harness = format!(
+            "set -euo pipefail\nPALACE_DATA=$1\nPALACE_USER=mcp-palace\n\
+             log() {{ printf 'talon-entrypoint: %s\\n' \"$*\" >&2; }}\n\
+             die() {{ log \"FATAL: $*\"; exit 70; }}\n\
+             id() {{ case \"$1\" in -u|-g) echo {MCP_PALACE_UID} ;; *) command id \"$@\" ;; esac; }}\n\
+             {}\nsecure_palace_data\n",
+            palace_function(&entrypoint_text())
+        );
+        let script = scratch.join("harness.sh");
+        fs::write(&script, harness).unwrap();
+        std::process::Command::new("bash")
+            .arg(&script)
+            .arg(dir)
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn entrypoint_palace_step_never_walks_a_secured_tree() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+        if !rustix::process::geteuid().is_root() {
+            eprintln!("not root: entrypoint palace behaviour test skipped");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let p = MCP_PALACE_UID;
+        let owner_mode = |path: &Path| {
+            let m = fs::symlink_metadata(path).unwrap();
+            (m.uid(), m.gid(), m.mode() & 0o7777)
+        };
+        let set_mode = |path: &Path, mode: u32| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        // One-time migration of a host-created directory.
+        let data = root.join("data");
+        let outside = root.join("outside");
+        fs::create_dir_all(data.join("palace/sub")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(data.join("palace/sub/chroma.sqlite3"), "db").unwrap();
+        fs::write(outside.join("target"), "host file").unwrap();
+        fs::write(outside.join("shared"), "shared inode").unwrap();
+        fs::hard_link(outside.join("shared"), data.join("hardlinked")).unwrap();
+        symlink(outside.join("target"), data.join("link")).unwrap();
+        for d in [&data, &data.join("palace"), &data.join("palace/sub")] {
+            set_mode(d, 0o755);
+        }
+        set_mode(&data.join("palace/sub/chroma.sqlite3"), 0o644);
+        set_mode(&outside.join("target"), 0o644);
+        set_mode(&outside.join("shared"), 0o644);
+        let out = run_palace_step(&root, &data);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("one-time migration"));
+        assert_eq!(owner_mode(&data), (p, p, 0o700));
+        assert_eq!(owner_mode(&data.join("palace")), (p, p, 0o700));
+        assert_eq!(owner_mode(&data.join("palace/sub")), (p, p, 0o700));
+        assert_eq!(
+            owner_mode(&data.join("palace/sub/chroma.sqlite3")),
+            (p, p, 0o600)
+        );
+        // Symlinks: re-owned themselves, their targets never touched.
+        assert_eq!(fs::symlink_metadata(data.join("link")).unwrap().uid(), p);
+        assert_eq!(owner_mode(&outside.join("target")), (0, 0, 0o644));
+        // Hard-linked inodes are left alone.
+        assert_eq!(owner_mode(&outside.join("shared")), (0, 0, 0o644));
+
+        // Already secured: nothing below the top directory is touched, even
+        // things mcp-palace could have swapped in.
+        let canary = data.join("palace/canary");
+        fs::write(&canary, "x").unwrap();
+        set_mode(&canary, 0o644);
+        let out = run_palace_step(&root, &data);
+        assert!(out.status.success());
+        assert!(
+            out.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(owner_mode(&canary), (0, 0, 0o644));
+
+        // Owned by mcp-palace but drifted (group / mode): top directory only.
+        chown(&data, Some(p), Some(0)).unwrap();
+        set_mode(&data, 0o755);
+        let out = run_palace_step(&root, &data);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("top directory only"));
+        assert_eq!(owner_mode(&data), (p, p, 0o700));
+        assert_eq!(owner_mode(&canary), (0, 0, 0o644));
+
+        // A symlinked data path is fatal; a missing one is fine.
+        let linked = root.join("linked");
+        symlink(&data, &linked).unwrap();
+        assert_eq!(run_palace_step(&root, &linked).status.code(), Some(70));
+        assert!(
+            run_palace_step(&root, &root.join("missing"))
+                .status
+                .success()
+        );
+    }
+
     #[test]
     fn palace_uid_matches_dockerfile() {
         let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../container/Dockerfile");
