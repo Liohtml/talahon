@@ -99,12 +99,15 @@ Talon treats every alert field, log line, web page and tool result as attacker-c
 | Layer | Defence |
 |---|---|
 | Prompt injection | Untrusted data is wrapped in randomly-nonced `<untrusted_data>` envelopes the model is told never to obey; a ~75-rule EN/DE scanner (normalization, base64/exfil decoders, tuned to stay silent on real SIEM telemetry) flags and audits high-risk content |
-| Model credentials | The vLLM key stays on the host gateway; each container run gets a short-lived token (SHA-256 stored, revoked at end) passed over stdin, never env. The gateway pins models, clamps tokens, strips dangerous vLLM parameters and rate-limits per run |
-| Container | `--cap-drop=ALL` (+ minimal caps for the supervisor), `no-new-privileges`, read-only rootfs + tmpfs, `--init`, pid/memory/cpu limits, no sudo/node in the image, fail-closed host blocks |
+| Model credentials | The vLLM key stays on the host gateway; each container run gets a short-lived token (SHA-256 stored, revoked at end) passed over stdin, never env. The gateway pins models, clamps tokens, forwards only an allowlist of request fields (no template overrides, grammars, media URLs), salts the prefix cache per lane, and rate-/concurrency-limits per run and globally |
+| Container | `--cap-drop=ALL` (+ minimal caps for the supervisor), `no-new-privileges`, read-only rootfs + tmpfs, `--init`, pid/memory/cpu limits, no sudo/node in the image, fail-closed host blocks; read-only `CLAUDE.md`/`.mcp.json`/MCP dirs; mounts that contain the project root, `store/`, `data/`, `groups/` or `.env` are refused and credential files in any mount are shadowed |
+| Network | Dedicated `talon-agents` bridge with inter-container traffic disabled; `talon setup egress` firewall: metadata/link-local always blocked, host reachable only on the gateway port, allowlist of MCP destinations |
+| Lane isolation | Every chat lane (each CoPilot analyst, the investigation lane, the webhook lane) is its own principal: it can only message and schedule into itself, only touch tasks it owns, never attach scripts; transcripts and archives are per lane |
 | Privilege separation | Root supervisor launches each MCP server as its own `mcp-*` user from read-only config with a private HOME; the agent runs unprivileged and cannot read MCP secrets or their process environments |
 | Host ↔ container | Identity derived from the IPC directory, strict authorization (non-main lanes only touch their own tasks), `openat`/`O_NOFOLLOW` file handling, size/depth limits, claim-before-dispatch, every decision audited |
 | Egress | `web_fetch` and webhooks check every hop against all private/special IPv4/IPv6 ranges and cloud metadata endpoints, pin DNS to vetted addresses, refuse redirects to internal hosts |
-| HTTP API | Fail-closed constant-time API key, per-IP throttling, allowlist CORS, body limits, strict input validation, security headers |
+| HTTP API | Loopback by default, fail-closed constant-time API key, per-IP throttling, allowlist CORS, body limits, strict input validation, security headers; header-read timeouts and connection caps (slowloris-safe) on every listener |
+| Memory | MemPalace data belongs to `mcp-palace` (agents cannot read or plant files there); host `/palace/*` calls run in a one-shot locked-down container |
 | Secrets in output | Logs and outbound messages pass through a redactor (bearer/JWT/vendor keys/PEM/basic-auth + every configured secret value) |
 | Audit | Append-only SQLite audit log with a SHA-256 hash chain: `talon audit verify` detects tampering |
 
@@ -137,14 +140,14 @@ vllm serve Qwen/Qwen3-32B --enable-auto-tool-choice --tool-call-parser hermes \
   --api-key "$(openssl rand -hex 32)"
 ```
 
-Model and parser choices per family: [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md).
+Model and parser choices per family: [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md). Always run vLLM with `--api-key`: the host gateway refuses to start without `TALON_VLLM_API_KEY` (override only with `TALON_VLLM_ALLOW_NO_API_KEY=true`), because an unauthenticated vLLM could be called by containers directly, bypassing the gateway.
 
 ### 3. Create `.env`
 
 ```bash
 cp .env.example .env && chmod 600 .env
 # Set at least: TALON_VLLM_BASE_URL, TALON_VLLM_MODEL, TALON_VLLM_MAX_CONTEXT,
-#               TALON_VLLM_API_KEY (if vLLM uses --api-key), HTTP_API_KEY
+#               TALON_VLLM_API_KEY, HTTP_API_KEY
 talon setup vllm        # checks that the models are served
 ```
 
@@ -168,7 +171,11 @@ ro() { printf '    { "path": "%s/%s", "allowReadWrite": false },\n' "$T" "$1"; }
 chmod 600 ~/.config/talon/mount-allowlist.json
 ```
 
-MCP directories are always mounted read-only, whatever the allowlist says, and their `.env`/credential files are shadowed and staged for their `mcp-*` user only. `nonMainReadOnly` is `false` only so that `mempalace-data` can stay writable: inside the container it is handed to the `mcp-palace` user (mode 0700), so the agent itself can neither read nor modify it. Because of that ownership change, back up `mempalace-data/` with `sudo`.
+MCP directories are always mounted read-only, whatever the allowlist says, and their `.env`/credential files are shadowed and staged for their `mcp-*` user only. `nonMainReadOnly` is `false` only so that `mempalace-data` can stay writable: inside the container it is handed to the `mcp-palace` user (mode 0700), so the agent itself can neither read nor modify it. Because of that ownership change, back up `mempalace-data/` with `sudo`. Host-side `/palace/*` calls also run inside a locked-down one-shot container as `mcp-palace` (uid 61008), never on the host, so hand the directory over once before the first start:
+
+```bash
+mkdir -p mempalace-data && sudo chown -R 61008:61008 mempalace-data && sudo chmod 700 mempalace-data
+```
 
 ### 5. Configure the MCP servers
 
@@ -187,7 +194,20 @@ Each MCP server keeps its credentials in its own directory. Inside the container
 
 Services on the Talon host are reachable from containers as `host.docker.internal`. Which servers a group uses, and as which user, is defined in `groups/<group>/.mcp.json` (`"runAs": "mcp-siem"` etc.).
 
-### 6. Register groups and install the service
+### 6. Restrict container egress (Linux)
+
+Agent containers run on the dedicated `talon-agents` bridge (`br-talon`, inter-container traffic disabled). Install firewall rules for it: cloud-metadata and link-local addresses are always blocked, containers can reach the host only on the LLM gateway port, and — in allowlist mode — only the destinations your MCP servers need:
+
+```bash
+talon setup egress --allow 10.0.0.10:9200 --allow 10.0.0.11:3306 \
+                   --allow 10.0.0.12:55000 --allow 10.0.0.13:443   # SIEM, MySQL, Wazuh, CoPilot ...
+# review the printed nft/iptables script, then:
+sudo talon setup egress --apply --allow ...                          # same arguments
+```
+
+Without `--allow` the rules block private address ranges and keep internet egress (`--keep-internet` combines both). Rules do not survive a reboot: re-apply from a root boot unit.
+
+### 7. Register groups and install the service
 
 ```bash
 talon setup environment                 # runtime, image, vLLM, gateway, disk
@@ -199,10 +219,12 @@ talon doctor                            # everything in one report
 
 Manual alternative: `systemctl --user enable --now talon` with `ExecStart=/usr/local/bin/talon run` and `WorkingDirectory=/opt/talon`, or `launchd/com.talon.plist` on macOS.
 
-### 7. Verify
+### 8. Verify
 
 ```bash
 curl http://localhost:3100/health                         # unauthenticated
+# The API binds 127.0.0.1 by default; set COPILOT_HTTP_BIND to a private
+# interface if CoPilot runs on another host (terminate TLS in front of it).
 export TALON_API_KEY=...                                   # HTTP_API_KEY from .env
 curl -s -N -X POST http://localhost:3100/message \
   -H "Content-Type: application/json" -H "x-api-key: $TALON_API_KEY" \
@@ -219,7 +241,7 @@ talon audit tail -n 20
 |---|---|
 | `talon run` | Run the service (default) |
 | `talon doctor` | Diagnose runtime, image, vLLM, gateway, directories, audit chain |
-| `talon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `service`, `verify` |
+| `talon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `egress`, `service`, `verify` |
 | `talon audit verify` | Recompute the audit hash chain (exit 1 on tampering) |
 | `talon audit tail -n 50 --kind ipc.` | Recent audit events as JSON lines |
 
@@ -245,7 +267,8 @@ Logs: `RUST_LOG=info` (JSON with `TALON_LOG_FORMAT=json`); every line is redacte
 |------|---------|
 | `.env` | vLLM, gateway, HTTP API key, channels — `chmod 600`, gitignored |
 | `<mcp-dir>/.env` | Per-MCP credentials (siem, mysql, copilot-mcp, wazuh-mcp, velociraptor-mcp, shuffle-mcp, cve-mcp) — gitignored |
-| `groups/copilot/CLAUDE.md` | SOC agent identity and investigation workflow; append client context (assets, known-good ranges, crown jewels) at the bottom |
+| `groups/copilot/CLAUDE.md` | SOC agent identity and investigation workflow (read-only inside containers); append client context (assets, known-good ranges, crown jewels) at the bottom |
+| `groups/<group>/MEMORY.md` | The group's own agent-written notes (shown to the agent as untrusted data) |
 | `groups/copilot/.mcp.json` | MCP servers and their `runAs` users (mounted read-only into containers) |
 | `groups/copilot/prompts/` | Per-alert-type investigation templates — add `.txt` files, no code changes |
 | `siem/anon_proxy/fields.yaml` | PII field definitions for the anonymizing proxy |
@@ -264,6 +287,7 @@ Logs: `RUST_LOG=info` (JSON with `TALON_LOG_FORMAT=json`); every line is redacte
 | [docs/COPILOT_INTEGRATION.md](docs/COPILOT_INTEGRATION.md) | CoPilot integration, MySQL schema, MCP tool reference |
 | [docs/ANON_PROXY.md](docs/ANON_PROXY.md) | Anonymizing proxy: flow, token types, `fields.yaml` |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security model and trust boundaries |
+| [docs/MYTHOS_REVIEW.md](docs/MYTHOS_REVIEW.md) | Adversarial security review: findings and remediation |
 | [groups/copilot/prompts/README.md](groups/copilot/prompts/README.md) | Writing investigation templates |
 
 Talon 1.x (TypeScript, Claude Agent SDK, Ollama) documentation such as `docs/SPEC.md` and `docs/REQUIREMENTS.md` describes the previous release.
