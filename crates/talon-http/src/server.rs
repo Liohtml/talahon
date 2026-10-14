@@ -41,9 +41,7 @@ use crate::investigate::{
     self, InvestigationRequest, investigation_prompt, investigation_record, investigation_task,
     is_duplicate, job_id,
 };
-use crate::lanes::{
-    INVESTIGATE_SESSION_KEY, LaneIds, OpenError, StreamRegistry, USER_SESSION_KEY_PREFIX, UserId,
-};
+use crate::lanes::{LaneIds, OpenError, StreamRegistry, USER_SESSION_KEY_PREFIX, UserId};
 use crate::metrics::{self, Gauges, Metrics};
 use crate::palace::{
     DisabledPalaceRunner, PalaceError, PalaceRunner, ScriptPalaceRunner, add_lesson_request,
@@ -245,11 +243,13 @@ impl HttpState {
         *lock(&s.base_group) = Some(chat.clone());
         s.register_lane(&s.lanes.base, chat, true).await;
         // Investigation lane: same folder and mounts, separate ephemeral
-        // session; nothing types slash commands at it.
+        // session; nothing types slash commands at it. Its state directory
+        // (keyed by this session key) is where `GET /evals` reads from.
+        let key = s.config.investigation_session_key();
         let investigate = RegisteredGroup {
             name: "CoPilot Investigations".to_string(),
-            session_key: Some(INVESTIGATE_SESSION_KEY.to_string()),
-            ipc_key: Some(INVESTIGATE_SESSION_KEY.to_string()),
+            session_key: Some(key.to_string()),
+            ipc_key: Some(key.to_string()),
             ephemeral_session: true,
             ..group
         };
@@ -1171,8 +1171,14 @@ async fn get_investigation(State(st): State<HttpState>, Path(id): Path<String>) 
     }
 }
 
-/// `GET /evals/{alert_id}` — eval JSON written by the agent at the end of an
-/// investigation; replays are returned in descending job-id order.
+/// `GET /evals/{alert_id}` — eval JSON written by the investigation agent
+/// at the end of an investigation; replays are returned in descending job-id
+/// order.
+///
+/// Records are read from the investigation lane's private state directory
+/// (`<data_dir>/sessions/<investigation session key>/evals/`), which no other
+/// lane can write; the shared `groups/<folder>/evals/` is consulted only when
+/// the operator enabled `COPILOT_EVALS_LEGACY_GROUP_DIR` (N-2).
 async fn evals(State(st): State<HttpState>, Path(alert_id): Path<String>) -> ApiResult {
     if alert_id.is_empty()
         || alert_id.len() > crate::validate::MAX_ALERT_ID_DIGITS
@@ -1183,14 +1189,20 @@ async fn evals(State(st): State<HttpState>, Path(alert_id): Path<String>) -> Api
     let numeric: u64 = alert_id
         .parse()
         .map_err(|_| ApiError::bad_request("invalid alert_id"))?;
-    let dir = st.0.config.group_dir();
-    let evals = tokio::task::spawn_blocking(move || files::read_evals(&dir, &alert_id))
-        .await
-        .map_err(|_| ApiError::internal("failed to read evals"))?
-        .map_err(|e| {
-            tracing::error!(err = %e, "GET /evals failed");
-            ApiError::internal("failed to read evals")
-        })?;
+    let config = &st.0.config;
+    let sources = files::EvalSources {
+        sessions_dir: config.sessions_dir(),
+        lane_key: config.investigation_session_key().to_string(),
+        legacy_group_dir: config.evals_legacy_group_dir.then(|| config.group_dir()),
+    };
+    let evals =
+        tokio::task::spawn_blocking(move || files::read_investigation_evals(&sources, &alert_id))
+            .await
+            .map_err(|_| ApiError::internal("failed to read evals"))?
+            .map_err(|e| {
+                tracing::error!(err = %e, "GET /evals failed");
+                ApiError::internal("failed to read evals")
+            })?;
     Ok(Json(json!({ "alert_id": numeric, "evals": evals })).into_response())
 }
 

@@ -425,7 +425,7 @@ Similarly, the **live similar-lessons preview** in the teach-the-palace UI is se
 The copilot agent writes a structured eval file at the end of Step 6 of the workflow. One per investigation, siblings to the transcript in `groups/copilot/logs/`:
 
 ```
-groups/copilot/evals/<alert_id>-<job_id>.json
+data/sessions/copilot-investigate/evals/ (the investigation lane's private state dir, `/home/agent/.talon/evals/` in the container)<alert_id>-<job_id>.json
 ```
 
 ```json
@@ -469,7 +469,7 @@ NanoClaw is the sole owner of MemPalace — every palace interaction from CoPilo
 **Investigation workflow changes**
 
 - **Step 2.5** — if the job was created with `template_override`, skip Ollama ranking and filename fallback; load the override directly. Log `selection_method: "override"` in the eval.
-- **Step 6 (end of write-back)** — write the eval JSON to `groups/copilot/evals/`.
+- **Step 6 (end of write-back)** — write the eval JSON to `data/sessions/copilot-investigate/evals/ (the investigation lane's private state dir, `/home/agent/.talon/evals/` in the container)`.
 - **Step 0.5 enhancement** — record how many palace lessons were recalled into the eval; powers the "hit rate" metric on the dashboard.
 
 **MemPalace room taxonomy for reviews**
@@ -521,7 +521,7 @@ Reviews can generate lessons fast. Two guards keep the palace useful:
 | 9 | `GET /status` endpoint in NanoClaw | NanoClaw | ✅ Done |
 | 10 | Additional prompt templates (events 3, 7, 11, 22) | NanoClaw | ✅ Done |
 | 11 | CoPilot UI: alert analysis tab + status badges | CoPilot | ✅ Done |
-| 12 | Eval JSON output per investigation (`groups/copilot/evals/`) + `GET /evals/:alertId` endpoint | NanoClaw | ✅ Done |
+| 12 | Eval JSON output per investigation (`data/sessions/copilot-investigate/evals/ (the investigation lane's private state dir, `/home/agent/.talon/evals/` in the container)`) + `GET /evals/:alertId` endpoint | NanoClaw | ✅ Done |
 | 13 | `template_override` param on `POST /investigate` | NanoClaw | ✅ Done |
 | 14 | NanoClaw palace HTTP endpoints: `POST /palace/lesson` + `GET /palace/search` wrapping MemPalace MCP tools | NanoClaw | ✅ Done |
 | 15 | Review MySQL tables (`ai_analyst_review`, `ai_analyst_ioc_review`, `ai_analyst_palace_lesson`) | CoPilot | ✅ Done |

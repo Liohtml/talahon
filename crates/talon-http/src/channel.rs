@@ -133,6 +133,13 @@ impl HttpChannel {
         if let Some(warning) = self.state.config().exposure_warning() {
             tracing::warn!("{warning}");
         }
+        if self.state.config().evals_legacy_group_dir {
+            tracing::warn!(
+                "COPILOT_EVALS_LEGACY_GROUP_DIR is enabled: GET /evals also serves records from \
+                 the shared group folder, which every CoPilot lane can write (forgeable). Disable \
+                 it once old evals are no longer needed"
+            );
+        }
     }
 }
 

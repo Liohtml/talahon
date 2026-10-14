@@ -186,7 +186,7 @@ Steps:
 
    c. mcp__copilot__SubmitAiAnalystIocsTool(report_id=<from 4b>, alert_id={alert_id}, customer_code="{customer_code}", iocs=[...])
 
-5. Write the eval JSON to /workspace/group/evals/{alert_id}-{job_id}.json as instructed in CLAUDE.md Step 6.
+5. Write the eval JSON to /home/agent/.talon/evals/{alert_id}-{job_id}.json as instructed in CLAUDE.md Step 6 (create the directory if needed). That directory is private to this investigation lane; never write evals under /workspace/group.
 6. Send the full investigation report via send_message."#
     )
 }
@@ -369,7 +369,10 @@ mod tests {
         let p = investigation_prompt(&req(None), "copilot-inv-1234-1");
         assert!(p.contains("- alert_id: 1234\n- customer_code: acme\n- job_id: copilot-inv-1234-1\n- triggered_by: webhook\n\nSteps:"));
         assert!(p.contains(r#"WHERE a.id = 1234 AND a.customer_code = "acme";"#));
-        assert!(p.contains("/workspace/group/evals/1234-copilot-inv-1234-1.json"));
+        assert!(p.contains(
+            "5. Write the eval JSON to /home/agent/.talon/evals/1234-copilot-inv-1234-1.json as instructed"
+        ));
+        assert!(!p.contains("/workspace/group/evals"));
         assert!(!p.contains("TEMPLATE OVERRIDE"));
         assert!(p.contains("SIEM correlation).\n3b. Complete Step 5.5"));
         assert!(p.contains(r#"submit_triage_report with id="copilot-inv-1234-1""#));

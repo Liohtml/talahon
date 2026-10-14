@@ -25,6 +25,11 @@
 //! | `TALON_PALACE_HOST_EXEC` | unset | `unsafe` runs `mempalace/palace-call.sh` **on the host** when no palace runner is supplied. DANGEROUS: agents can write `mempalace-data/`, so this allows host code execution (MYTH-01) |
 //! | `COPILOT_HTTP_MAX_USER_LANES` | `256` | Cap on in-memory per-user lanes |
 //! | `COPILOT_HTTP_MAX_STREAMS` | `256` | Cap on concurrently open SSE streams |
+//! | `COPILOT_EVALS_LEGACY_GROUP_DIR` | `false` | Migration only: `GET /evals` also reads the old `groups/<folder>/evals/`, which every CoPilot lane can write (forgeable records, N-2) |
+//!
+//! Eval records are served from the investigation lane's private state
+//! directory, `<data_dir>/sessions/copilot-investigate/evals/` (the
+//! container's `/home/agent/.talon/evals/`), which no other lane can reach.
 //!
 //! `/palace/*` is disabled (503) unless the host supplies a palace runner
 //! (see [`crate::HttpDeps::with_palace`]) or the operator opts into host
@@ -41,6 +46,8 @@ use talon_core::env::EnvFile;
 use talon_core::paths::is_valid_group_folder;
 use talon_core::{Error, Result};
 
+use crate::files::EVALS_DIR;
+use crate::lanes::INVESTIGATE_SESSION_KEY;
 use crate::palace::{HOST_EXEC_ENV, HOST_EXEC_UNSAFE};
 
 /// Default listen port (TS: `COPILOT_HTTP_PORT || 3100`).
@@ -63,6 +70,9 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
 pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 320;
 /// Default time a client has to send complete request headers.
 pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Env flag: also serve eval records from the legacy, shared
+/// `groups/<folder>/evals/` directory (migration only; forgeable).
+pub const EVALS_LEGACY_GROUP_DIR_ENV: &str = "COPILOT_EVALS_LEGACY_GROUP_DIR";
 
 /// The shared API key. `Debug` never prints the value.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -137,6 +147,13 @@ pub struct HttpConfig {
     pub project_root: PathBuf,
     /// `<project_root>/groups`.
     pub groups_dir: PathBuf,
+    /// Host runtime data (`<project_root>/data`): lane state directories
+    /// live in `<data_dir>/sessions/<session_key>`.
+    pub data_dir: PathBuf,
+    /// `COPILOT_EVALS_LEGACY_GROUP_DIR`: `GET /evals` additionally reads
+    /// the pre-N-2 location `groups/<folder>/evals/` (writable by every
+    /// CoPilot lane, so records found there are forgeable). Off by default.
+    pub evals_legacy_group_dir: bool,
     /// Timezone used for `once` task timestamps and cron evaluation.
     pub timezone: Tz,
     /// Allowed CORS origins (exact match, or `*`). Empty => no CORS headers.
@@ -195,6 +212,8 @@ impl HttpConfig {
             base_jid: DEFAULT_BASE_JID.to_string(),
             group_folder: DEFAULT_GROUP_FOLDER.to_string(),
             groups_dir: project_root.join("groups"),
+            data_dir: project_root.join("data"),
+            evals_legacy_group_dir: false,
             palace_script: project_root.join("mempalace").join("palace-call.sh"),
             palace_host_exec: false,
             project_root,
@@ -219,7 +238,9 @@ impl HttpConfig {
 
     /// Resolve from the host configuration.
     pub fn from_talon_config(cfg: &TalonConfig) -> Result<Self> {
-        Self::from_env(&cfg.project_root, &cfg.groups_dir, cfg.timezone, &cfg.env)
+        let mut http = Self::from_env(&cfg.project_root, &cfg.groups_dir, cfg.timezone, &cfg.env)?;
+        http.data_dir = cfg.data_dir.clone();
+        Ok(http)
     }
 
     /// Resolve from an [`EnvFile`] (see the module docs for the keys).
@@ -298,6 +319,7 @@ impl HttpConfig {
             1,
         ));
         cfg.palace_host_exec = parse_host_exec(env.get(HOST_EXEC_ENV).as_deref())?;
+        cfg.evals_legacy_group_dir = env.get_bool(EVALS_LEGACY_GROUP_DIR_ENV);
         Ok(cfg)
     }
 
@@ -324,9 +346,34 @@ impl HttpConfig {
         self.group_dir().join("prompts")
     }
 
-    /// `<groups_dir>/<group_folder>/evals`.
+    /// `<data_dir>/sessions`: the (operator-controlled) root of every
+    /// lane's private state directory.
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.data_dir.join("sessions")
+    }
+
+    /// Session key of the investigation lane, whose state directory holds
+    /// the eval records (the key [`crate::HttpState::register_base_lanes`]
+    /// registers that lane with).
+    pub fn investigation_session_key(&self) -> &'static str {
+        INVESTIGATE_SESSION_KEY
+    }
+
+    /// `<data_dir>/sessions/<investigation session key>/evals` — where the
+    /// investigation agent writes eval records (`/home/agent/.talon/evals`
+    /// inside its container) and where `GET /evals` reads them. Reads never
+    /// go through this path directly: the lane directory and `evals/` are
+    /// opened without following symlinks.
     pub fn evals_dir(&self) -> PathBuf {
-        self.group_dir().join("evals")
+        self.sessions_dir()
+            .join(self.investigation_session_key())
+            .join(EVALS_DIR)
+    }
+
+    /// `<groups_dir>/<group_folder>/evals` — the pre-N-2 location, shared by
+    /// every CoPilot lane; read only with [`Self::evals_legacy_group_dir`].
+    pub fn legacy_evals_dir(&self) -> PathBuf {
+        self.group_dir().join(EVALS_DIR)
     }
 }
 
@@ -407,6 +454,16 @@ mod tests {
             cfg.prompts_dir(),
             PathBuf::from("/opt/talon/groups/copilot/prompts")
         );
+        assert_eq!(cfg.data_dir, PathBuf::from("/opt/talon/data"));
+        assert_eq!(
+            cfg.evals_dir(),
+            PathBuf::from("/opt/talon/data/sessions/copilot-investigate/evals")
+        );
+        assert_eq!(
+            cfg.legacy_evals_dir(),
+            PathBuf::from("/opt/talon/groups/copilot/evals")
+        );
+        assert!(!cfg.evals_legacy_group_dir);
         assert_eq!(
             cfg.palace_script,
             PathBuf::from("/opt/talon/mempalace/palace-call.sh")
@@ -522,6 +579,41 @@ mod tests {
             );
             assert!(from("TALON_PALACE_HOST_EXEC=true\n").is_err());
         }
+    }
+
+    #[test]
+    fn legacy_evals_dir_is_opt_in() {
+        if std::env::var(EVALS_LEGACY_GROUP_DIR_ENV).is_ok() {
+            return;
+        }
+        let from = |content: &str| {
+            HttpConfig::from_env(
+                Path::new("/x"),
+                Path::new("/x/g"),
+                chrono_tz::UTC,
+                &env(content),
+            )
+            .unwrap()
+        };
+        assert!(!from("").evals_legacy_group_dir);
+        assert!(!from("COPILOT_EVALS_LEGACY_GROUP_DIR=false\n").evals_legacy_group_dir);
+        assert!(from("COPILOT_EVALS_LEGACY_GROUP_DIR=true\n").evals_legacy_group_dir);
+    }
+
+    #[test]
+    fn data_dir_comes_from_the_host_config() {
+        let mut talon = TalonConfig::from_env(Path::new("/srv/talon"), env(""));
+        talon.data_dir = PathBuf::from("/var/lib/talon-data");
+        let Ok(cfg) = HttpConfig::from_talon_config(&talon) else {
+            // A conflicting process env (e.g. COPILOT_HTTP_PORT) is not
+            // what this test is about.
+            return;
+        };
+        assert_eq!(
+            cfg.evals_dir(),
+            PathBuf::from("/var/lib/talon-data/sessions/copilot-investigate/evals")
+        );
+        assert_eq!(cfg.investigation_session_key(), INVESTIGATE_SESSION_KEY);
     }
 
     #[test]

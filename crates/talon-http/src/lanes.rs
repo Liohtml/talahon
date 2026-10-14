@@ -31,14 +31,28 @@ use tokio::sync::mpsc;
 /// Session/IPC key prefix of a per-user lane
 /// (`copilot-u-<id prefix>-<hash>`, see [`UserId::session_key`]).
 pub const USER_SESSION_KEY_PREFIX: &str = "copilot-u-";
-/// Session/IPC key of the investigation lane.
+/// Session/IPC key of the investigation lane. Its state directory
+/// (`<data_dir>/sessions/copilot-investigate`, `/home/agent/.talon` inside
+/// the container) is private to that lane and holds the eval records
+/// served by `GET /evals/{alert_id}`.
 pub const INVESTIGATE_SESSION_KEY: &str = "copilot-investigate";
 /// Max characters of a CoPilot user id (`^[A-Za-z0-9_-]{1,48}$`).
 pub const MAX_USER_ID_CHARS: usize = 48;
-/// Characters of the lowercased user id kept in a per-user session/IPC key.
-pub const USER_KEY_ID_CHARS: usize = 40;
-/// Hex digits of `sha256(exact user id)` appended to a per-user key.
-pub const USER_KEY_HASH_HEX: usize = 8;
+/// Characters of the lowercased user id kept in a per-user session/IPC key
+/// (a readable hint only; uniqueness comes from the hash).
+pub const USER_KEY_ID_CHARS: usize = 20;
+/// Hex digits of `sha256(exact user id)` appended to a per-user key:
+/// 32 hex = 128 bits, so finding an id that shares another user's key is a
+/// second-preimage attack on (truncated) SHA-256, not a 2^32 search (N-8).
+pub const USER_KEY_HASH_HEX: usize = 32;
+/// Max length of a group folder / lane key (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`).
+const MAX_LANE_KEY_CHARS: usize = 64;
+
+// A per-user key must always be a valid group folder.
+const _: () = assert!(
+    USER_SESSION_KEY_PREFIX.len() + USER_KEY_ID_CHARS + 1 + USER_KEY_HASH_HEX <= MAX_LANE_KEY_CHARS
+);
+const _: () = assert!(USER_KEY_HASH_HEX % 2 == 0 && USER_KEY_HASH_HEX <= 64);
 /// Frames buffered per SSE writer before chunks are dropped.
 pub(crate) const WRITER_BUFFER: usize = 256;
 
@@ -144,11 +158,14 @@ impl UserId {
     }
 
     /// Session/IPC key of this user's lane:
-    /// `copilot-u-<lowercased id, first 40 chars>-<first 8 hex of sha256(exact id)>`.
+    /// `copilot-u-<lowercased id, first 20 chars>-<first 32 hex of sha256(exact id)>`,
+    /// e.g. `copilot-u-bob-81b637d8fcd2c6da6359e6963113a117`.
     ///
-    /// At most 59 characters of `[a-z0-9_-]`, so always a valid group
-    /// folder; the hash keeps `Bob` and `bob` (and ids sharing a 40-char
-    /// prefix) apart even where the filesystem folds case.
+    /// At most 63 characters of `[a-z0-9_-]`, so always a valid group
+    /// folder. The 128-bit hash of the *exact* id keeps `Bob` and `bob` (and
+    /// ids sharing a 20-char prefix) apart even where the filesystem folds
+    /// case, and makes it infeasible to pick an id whose key collides with
+    /// another user's (and so share their session, IPC namespace and lane).
     pub fn session_key(&self) -> String {
         let prefix: String = self
             .0
@@ -759,15 +776,65 @@ mod tests {
     #[test]
     fn session_key_has_the_documented_format() {
         let bob = UserId::parse("bob").unwrap();
-        // sha256("bob") = 81b637d8...
-        assert_eq!(bob.session_key(), "copilot-u-bob-81b637d8");
+        // sha256("bob") = 81b637d8fcd2c6da6359e6963113a117...
+        assert_eq!(
+            bob.session_key(),
+            "copilot-u-bob-81b637d8fcd2c6da6359e6963113a117"
+        );
         let upper = UserId::parse("Bob").unwrap();
-        // sha256("Bob") = cd9fb1e1...
-        assert_eq!(upper.session_key(), "copilot-u-bob-cd9fb1e1");
+        // sha256("Bob") = cd9fb1e148ccd8442e5aa74904cc73bf...
+        assert_eq!(
+            upper.session_key(),
+            "copilot-u-bob-cd9fb1e148ccd8442e5aa74904cc73bf"
+        );
         assert_eq!(
             UserId::parse("42").unwrap().session_key(),
-            "copilot-u-42-73475cb4"
+            "copilot-u-42-73475cb40a568e8da8a045ced110137e"
         );
+    }
+
+    #[test]
+    fn session_key_carries_a_128_bit_hash_of_the_exact_id() {
+        // N-8: a 32-bit suffix let a caller grind an id (~2^32 tries) whose
+        // key equals a victim's whenever both shared the truncated prefix.
+        for raw in ["bob", "Bob", "42", &"Q".repeat(MAX_USER_ID_CHARS)] {
+            let id = UserId::parse(raw).unwrap();
+            let key = id.session_key();
+            let (head, hash) = key.rsplit_once('-').unwrap();
+            assert_eq!(hash.len(), USER_KEY_HASH_HEX, "{key}");
+            assert!(hash.len() * 4 >= 128, "{key}");
+            assert!(
+                hash.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            );
+            let digest = Sha256::digest(raw.as_bytes());
+            let full: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hash, &full[..USER_KEY_HASH_HEX]);
+            let prefix = head.strip_prefix(USER_SESSION_KEY_PREFIX).unwrap();
+            assert!(prefix.len() <= USER_KEY_ID_CHARS, "{key}");
+            assert!(raw.to_ascii_lowercase().starts_with(prefix), "{key}");
+        }
+    }
+
+    #[test]
+    fn ids_sharing_a_long_prefix_get_distinct_full_hash_keys() {
+        // Ids longer than the readable prefix are told apart by the hash
+        // alone (the old format kept 40 characters + 32 bits).
+        let base = "victim-account-with-a-long-identifier-00";
+        let victim = UserId::parse(&format!("{base}zz")).unwrap().session_key();
+        assert_eq!(
+            victim.len(),
+            USER_SESSION_KEY_PREFIX.len() + USER_KEY_ID_CHARS + 1 + USER_KEY_HASH_HEX
+        );
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(victim.clone());
+        for i in 0..2_000u32 {
+            let k = UserId::parse(&format!("{base}{i:x}"))
+                .unwrap()
+                .session_key();
+            assert_eq!(k.len(), victim.len());
+            assert!(seen.insert(k), "duplicate key for suffix {i:x}");
+        }
     }
 
     #[test]
@@ -788,7 +855,7 @@ mod tests {
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), ids.len(), "{keys:?}");
-        // Ids sharing the first 40 characters still get distinct keys.
+        // Ids sharing the readable prefix still get distinct keys.
         let base = "a".repeat(USER_KEY_ID_CHARS);
         let k1 = UserId::parse(&format!("{base}1")).unwrap().session_key();
         let k2 = UserId::parse(&format!("{base}2")).unwrap().session_key();
@@ -803,9 +870,18 @@ mod tests {
             "-leading-dash".to_string(),
             "Z".repeat(MAX_USER_ID_CHARS),
             "_".repeat(MAX_USER_ID_CHARS),
+            "-".repeat(MAX_USER_ID_CHARS),
+            "9".repeat(USER_KEY_ID_CHARS + 1),
         ] {
             let key = UserId::parse(&raw).unwrap().session_key();
-            assert!(key.len() <= 64, "{key}");
+            assert!(key.len() <= MAX_LANE_KEY_CHARS, "{key}");
+            assert_eq!(
+                key.len(),
+                USER_SESSION_KEY_PREFIX.len()
+                    + raw.len().min(USER_KEY_ID_CHARS)
+                    + 1
+                    + USER_KEY_HASH_HEX
+            );
             assert!(key.starts_with(USER_SESSION_KEY_PREFIX));
             assert!(talon_core::paths::is_valid_group_folder(&key), "{key}");
             assert_eq!(key, key.to_ascii_lowercase());

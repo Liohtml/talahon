@@ -1,16 +1,22 @@
 //! Read-only filesystem views: eval JSON files and prompt templates.
 //!
-//! `groups/<folder>/evals` and `groups/<folder>/prompts` sit inside the
-//! group folder agent containers mount read-write, so both their files *and
-//! the directory entries themselves* are attacker-controlled (MYTH-10). A
-//! path-based check-then-read can be raced (swap `evals/` for a symlink to
-//! a host directory, or a file for a FIFO that blocks the reader forever).
-//! Therefore:
+//! Eval records live in the investigation lane's private state directory,
+//! `<data_dir>/sessions/<investigation session key>/evals` (the container's
+//! `/home/agent/.talon/evals`): only that lane can write them, so another
+//! CoPilot lane can no longer forge an alert's evals (N-2). Prompt templates
+//! (and, for migration only, legacy evals) live in `groups/<folder>/`.
 //!
-//! - the group directory is operator-controlled and opened normally; the
-//!   `evals`/`prompts` sub-directory is opened relative to it with
-//!   `O_DIRECTORY | O_NOFOLLOW` (a directory symlink is refused) and every
-//!   later access goes through that descriptor;
+//! Both trees are mounted read-write into agent containers, so their files
+//! *and the directory entries themselves* are attacker-controlled (MYTH-10).
+//! A path-based check-then-read can be raced (swap `evals/` for a symlink
+//! to a host directory, or a file for a FIFO that blocks the reader
+//! forever). Therefore:
+//!
+//! - the root (`groups/<folder>` or `<data_dir>/sessions`) is
+//!   operator-controlled and opened normally; every component below it (the
+//!   lane directory, `evals`, `prompts`) is opened relative to its parent
+//!   descriptor with `O_DIRECTORY | O_NOFOLLOW` (a directory symlink is
+//!   refused) and every later access goes through the final descriptor;
 //! - files are opened relative to the directory descriptor with
 //!   `O_NOFOLLOW | O_NONBLOCK | O_NOCTTY` (symlinks fail, FIFOs cannot
 //!   block) and judged on the opened inode via `fstat`: regular files only,
@@ -28,9 +34,12 @@ use rustix::io::Errno;
 use serde::Serialize;
 use serde_json::Value;
 
+use talon_core::paths::is_valid_group_folder;
+
 use crate::validate::{is_valid_template_name, truncate_chars};
 
-/// Agent-written eval JSON files, below the group directory.
+/// Agent-written eval JSON files, below the investigation lane's state
+/// directory (legacy: below the group directory).
 pub(crate) const EVALS_DIR: &str = "evals";
 /// Prompt templates, below the group directory.
 pub(crate) const PROMPTS_DIR: &str = "prompts";
@@ -61,12 +70,14 @@ fn is_symlink_errno(e: Errno) -> bool {
     e == Errno::LOOP || e == Errno::MLINK
 }
 
-/// Open `<group_dir>/<name>` as a directory without following a symlink at
-/// `name`. `Ok(None)` when either does not exist.
-fn open_agent_dir(group_dir: &Path, name: &str) -> io::Result<Option<OwnedFd>> {
-    // Operator-controlled: may legitimately be a symlink (data volume).
-    let base = match rfs::open(
-        group_dir,
+/// Open `<root>/<components...>` as a directory. `root` is
+/// operator-controlled and opened normally (it may legitimately be a
+/// symlink, e.g. to a data volume); each component is opened relative to
+/// its parent's descriptor without following a symlink. `Ok(None)` when
+/// anything along the way does not exist.
+fn open_dir_below(root: &Path, components: &[&str]) -> io::Result<Option<OwnedFd>> {
+    let mut dir = match rfs::open(
+        root,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
@@ -74,14 +85,30 @@ fn open_agent_dir(group_dir: &Path, name: &str) -> io::Result<Option<OwnedFd>> {
         Err(e) if e == Errno::NOENT => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    match rfs::openat(&base, name, dir_flags(), Mode::empty()) {
-        Ok(fd) => Ok(Some(fd)),
-        Err(e) if e == Errno::NOENT => Ok(None),
-        Err(e) if is_symlink_errno(e) || e == Errno::NOTDIR => Err(io::Error::other(format!(
-            "{name}/ is a symlink or not a directory; refusing to follow it"
-        ))),
-        Err(e) => Err(e.into()),
+    for name in components {
+        if name.is_empty() || name.contains('/') || *name == "." || *name == ".." {
+            return Err(io::Error::other(format!(
+                "invalid directory component {name:?}"
+            )));
+        }
+        dir = match rfs::openat(&dir, *name, dir_flags(), Mode::empty()) {
+            Ok(fd) => fd,
+            Err(e) if e == Errno::NOENT => return Ok(None),
+            Err(e) if is_symlink_errno(e) || e == Errno::NOTDIR => {
+                return Err(io::Error::other(format!(
+                    "{name}/ is a symlink or not a directory; refusing to follow it"
+                )));
+            }
+            Err(e) => return Err(e.into()),
+        };
     }
+    Ok(Some(dir))
+}
+
+/// Open `<group_dir>/<name>` as a directory without following a symlink at
+/// `name`. `Ok(None)` when either does not exist.
+fn open_agent_dir(group_dir: &Path, name: &str) -> io::Result<Option<OwnedFd>> {
+    open_dir_below(group_dir, &[name])
 }
 
 /// Sort order of [`collect_names`].
@@ -160,16 +187,14 @@ fn read_capped(file: File, max: u64) -> io::Result<Option<Vec<u8>>> {
     Ok((u64::try_from(buf.len()).unwrap_or(u64::MAX) <= max).then_some(buf))
 }
 
-/// Eval JSON files for `alert_id` (`<group_dir>/evals/<alert_id>-*.json`),
-/// newest job id first. Unsafe, unparseable or oversized files are skipped
-/// with a warning; a symlinked `evals/` directory is an error.
-pub(crate) fn read_evals(group_dir: &Path, alert_id: &str) -> io::Result<Vec<Value>> {
-    let Some(dir) = open_agent_dir(group_dir, EVALS_DIR)? else {
-        return Ok(Vec::new());
-    };
+/// Eval JSON files for `alert_id` (`<dir>/<alert_id>-*.json`) in the
+/// directory `dir` (already opened without following symlinks), newest job
+/// id first, paired with their file names. Unsafe, unparseable or oversized
+/// files are skipped with a warning.
+fn read_evals_in(dir: BorrowedFd<'_>, alert_id: &str) -> io::Result<Vec<(String, Value)>> {
     let prefix = format!("{alert_id}-");
     let names = collect_names(
-        dir.as_fd(),
+        dir,
         |n| n.starts_with(&prefix) && n.ends_with(".json"),
         Order::Descending,
         MAX_EVALS,
@@ -177,7 +202,7 @@ pub(crate) fn read_evals(group_dir: &Path, alert_id: &str) -> io::Result<Vec<Val
 
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        let (file, meta) = match open_regular(dir.as_fd(), &name) {
+        let (file, meta) = match open_regular(dir, &name) {
             Ok(f) => f,
             Err(reason) => {
                 tracing::warn!(file = %name, %reason, "skipping unsafe eval file");
@@ -190,7 +215,7 @@ pub(crate) fn read_evals(group_dir: &Path, alert_id: &str) -> io::Result<Vec<Val
         }
         match read_capped(file, MAX_EVAL_BYTES) {
             Ok(Some(bytes)) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(v) => out.push(v),
+                Ok(v) => out.push((name, v)),
                 Err(e) => tracing::warn!(file = %name, err = %e, "failed to parse eval file"),
             },
             Ok(None) => tracing::warn!(file = %name, "eval file grew past the size cap; skipped"),
@@ -198,6 +223,91 @@ pub(crate) fn read_evals(group_dir: &Path, alert_id: &str) -> io::Result<Vec<Val
         }
     }
     Ok(out)
+}
+
+/// Evals for `alert_id` in `<root>/<components...>/`; nothing when the
+/// directory does not exist, an error when any component is a symlink.
+fn read_evals_below(
+    root: &Path,
+    components: &[&str],
+    alert_id: &str,
+) -> io::Result<Vec<(String, Value)>> {
+    match open_dir_below(root, components)? {
+        Some(dir) => read_evals_in(dir.as_fd(), alert_id),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Eval JSON files for `alert_id` in `<group_dir>/evals/<alert_id>-*.json`,
+/// newest job id first. Unsafe, unparseable or oversized files are skipped
+/// with a warning; a symlinked `evals/` directory is an error.
+#[cfg(test)]
+pub(crate) fn read_evals(group_dir: &Path, alert_id: &str) -> io::Result<Vec<Value>> {
+    Ok(read_evals_below(group_dir, &[EVALS_DIR], alert_id)?
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect())
+}
+
+/// Where `GET /evals` looks for eval records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvalSources {
+    /// `<data_dir>/sessions` (operator-controlled; may be a symlink).
+    pub sessions_dir: std::path::PathBuf,
+    /// Session key of the investigation lane (its state directory below
+    /// `sessions_dir`; never followed if it is a symlink).
+    pub lane_key: String,
+    /// The legacy shared group directory, read in addition when the
+    /// operator enabled `COPILOT_EVALS_LEGACY_GROUP_DIR`.
+    pub legacy_group_dir: Option<std::path::PathBuf>,
+}
+
+/// Eval records for `alert_id`, newest job id first, at most
+/// [`MAX_EVALS`].
+///
+/// The primary source is the investigation lane's private
+/// `<sessions_dir>/<lane_key>/evals/`: a symlinked lane directory or
+/// `evals/` is an error. With a legacy group directory configured, records
+/// found there are merged in (a file name present in both places is taken
+/// from the lane-private copy); a problem with the legacy directory is
+/// logged and that source skipped, so it cannot take the endpoint down.
+pub(crate) fn read_investigation_evals(
+    sources: &EvalSources,
+    alert_id: &str,
+) -> io::Result<Vec<Value>> {
+    if !is_valid_group_folder(&sources.lane_key) {
+        return Err(io::Error::other(format!(
+            "invalid investigation lane key {:?}",
+            sources.lane_key
+        )));
+    }
+    let mut evals = read_evals_below(
+        &sources.sessions_dir,
+        &[sources.lane_key.as_str(), EVALS_DIR],
+        alert_id,
+    )?;
+    if let Some(group_dir) = &sources.legacy_group_dir {
+        match read_evals_below(group_dir, &[EVALS_DIR], alert_id) {
+            Ok(legacy) if !legacy.is_empty() => {
+                tracing::debug!(
+                    count = legacy.len(),
+                    "serving eval records from the legacy shared group directory"
+                );
+                for (name, value) in legacy {
+                    if !evals.iter().any(|(n, _)| *n == name) {
+                        evals.push((name, value));
+                    }
+                }
+                evals.sort_by(|a, b| b.0.cmp(&a.0));
+                evals.truncate(MAX_EVALS);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(err = %e, "skipping the legacy group evals directory");
+            }
+        }
+    }
+    Ok(evals.into_iter().map(|(_, v)| v).collect())
 }
 
 /// One entry of `GET /templates`.
@@ -395,6 +505,234 @@ mod tests {
         if !have_fifo {
             eprintln!("mkfifo unavailable; FIFO case not exercised");
         }
+    }
+
+    // ---- lane-private eval records (N-2) -----------------------------------
+
+    const LANE: &str = "copilot-investigate";
+
+    /// `<tmp>/data/sessions/<LANE>/evals` plus a legacy `<tmp>/groups/copilot/evals`.
+    struct Layout {
+        _tmp: tempfile::TempDir,
+        sessions: std::path::PathBuf,
+        group: std::path::PathBuf,
+    }
+
+    impl Layout {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let sessions = tmp.path().join("data/sessions");
+            let group = tmp.path().join("groups/copilot");
+            fs::create_dir_all(sessions.join(LANE).join(EVALS_DIR)).unwrap();
+            fs::create_dir_all(group.join(EVALS_DIR)).unwrap();
+            Self {
+                _tmp: tmp,
+                sessions,
+                group,
+            }
+        }
+
+        fn lane_evals(&self) -> std::path::PathBuf {
+            self.sessions.join(LANE).join(EVALS_DIR)
+        }
+
+        fn sources(&self, legacy: bool) -> EvalSources {
+            EvalSources {
+                sessions_dir: self.sessions.clone(),
+                lane_key: LANE.to_string(),
+                legacy_group_dir: legacy.then(|| self.group.clone()),
+            }
+        }
+    }
+
+    #[test]
+    fn investigation_evals_come_from_the_lane_private_state_dir() {
+        let l = Layout::new();
+        fs::write(
+            l.lane_evals().join("12-copilot-inv-12-1.json"),
+            r#"{"n":1}"#,
+        )
+        .unwrap();
+        fs::write(
+            l.lane_evals().join("12-copilot-inv-12-2.json"),
+            r#"{"n":2}"#,
+        )
+        .unwrap();
+        fs::write(
+            l.lane_evals().join("120-copilot-inv-120-1.json"),
+            r#"{"n":3}"#,
+        )
+        .unwrap();
+        // A forged record dropped into the shared group folder by another lane.
+        fs::write(
+            l.group.join(EVALS_DIR).join("12-copilot-inv-12-9.json"),
+            r#"{"forged":true}"#,
+        )
+        .unwrap();
+        let evals = read_investigation_evals(&l.sources(false), "12").unwrap();
+        assert_eq!(
+            evals,
+            vec![serde_json::json!({"n": 2}), serde_json::json!({"n": 1})]
+        );
+    }
+
+    #[test]
+    fn missing_lane_or_sessions_dir_yields_no_evals() {
+        let tmp = tempfile::tempdir().unwrap();
+        for sessions in [tmp.path().join("nope"), tmp.path().to_path_buf()] {
+            let sources = EvalSources {
+                sessions_dir: sessions,
+                lane_key: LANE.to_string(),
+                legacy_group_dir: None,
+            };
+            assert!(read_investigation_evals(&sources, "1").unwrap().is_empty());
+        }
+        fs::create_dir_all(tmp.path().join(LANE)).unwrap();
+        let sources = EvalSources {
+            sessions_dir: tmp.path().to_path_buf(),
+            lane_key: LANE.to_string(),
+            legacy_group_dir: None,
+        };
+        assert!(read_investigation_evals(&sources, "1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn symlinked_lane_dir_is_refused() {
+        let l = Layout::new();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join(EVALS_DIR)).unwrap();
+        fs::write(
+            outside.path().join(EVALS_DIR).join("7-x.json"),
+            r#"{"secret":true}"#,
+        )
+        .unwrap();
+        fs::remove_dir_all(l.sessions.join(LANE)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), l.sessions.join(LANE)).unwrap();
+        let err = read_investigation_evals(&l.sources(false), "7").unwrap_err();
+        assert!(err.to_string().contains("refusing to follow"), "{err}");
+    }
+
+    #[test]
+    fn symlinked_lane_evals_dir_is_refused() {
+        let l = Layout::new();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("7-x.json"), r#"{"secret":true}"#).unwrap();
+        fs::remove_dir(l.lane_evals()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), l.lane_evals()).unwrap();
+        let err = read_investigation_evals(&l.sources(false), "7").unwrap_err();
+        assert!(err.to_string().contains("refusing to follow"), "{err}");
+        // A file where the directory should be is refused too.
+        fs::remove_file(l.lane_evals()).unwrap();
+        fs::write(l.lane_evals(), "x").unwrap();
+        assert!(read_investigation_evals(&l.sources(false), "7").is_err());
+    }
+
+    #[test]
+    fn symlinked_and_fifo_lane_eval_files_are_skipped() {
+        let l = Layout::new();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("s.json"), r#"{"secret":true}"#).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("s.json"),
+            l.lane_evals().join("7-link.json"),
+        )
+        .unwrap();
+        let _ = mkfifo(&l.lane_evals().join("7-fifo.json"));
+        fs::write(l.lane_evals().join("7-ok.json"), r#"{"ok":1}"#).unwrap();
+        let started = Instant::now();
+        let evals = read_investigation_evals(&l.sources(false), "7").unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(evals, vec![serde_json::json!({"ok": 1})]);
+    }
+
+    #[test]
+    fn operator_symlinked_sessions_root_is_followed() {
+        let real = tempfile::tempdir().unwrap();
+        let evals = real.path().join(LANE).join(EVALS_DIR);
+        fs::create_dir_all(&evals).unwrap();
+        fs::write(evals.join("3-a.json"), r#"{"ok":1}"#).unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let sessions = links.path().join("sessions");
+        std::os::unix::fs::symlink(real.path(), &sessions).unwrap();
+        let sources = EvalSources {
+            sessions_dir: sessions,
+            lane_key: LANE.to_string(),
+            legacy_group_dir: None,
+        };
+        assert_eq!(read_investigation_evals(&sources, "3").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalid_lane_keys_are_refused() {
+        let l = Layout::new();
+        for key in ["", "..", "a/b", "../copilot", "-x"] {
+            let mut sources = l.sources(false);
+            sources.lane_key = key.to_string();
+            assert!(read_investigation_evals(&sources, "1").is_err(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_group_dir_is_merged_only_when_enabled() {
+        let l = Layout::new();
+        let legacy = l.group.join(EVALS_DIR);
+        fs::write(l.lane_evals().join("5-job-2.json"), r#"{"src":"lane2"}"#).unwrap();
+        fs::write(legacy.join("5-job-1.json"), r#"{"src":"legacy1"}"#).unwrap();
+        fs::write(legacy.join("5-job-3.json"), r#"{"src":"legacy3"}"#).unwrap();
+        // Same name in both places: the lane-private copy wins.
+        fs::write(l.lane_evals().join("5-job-4.json"), r#"{"src":"lane4"}"#).unwrap();
+        fs::write(legacy.join("5-job-4.json"), r#"{"src":"forged4"}"#).unwrap();
+
+        let off = read_investigation_evals(&l.sources(false), "5").unwrap();
+        assert_eq!(
+            off,
+            vec![
+                serde_json::json!({"src": "lane4"}),
+                serde_json::json!({"src": "lane2"})
+            ]
+        );
+        let on = read_investigation_evals(&l.sources(true), "5").unwrap();
+        assert_eq!(
+            on,
+            vec![
+                serde_json::json!({"src": "lane4"}),
+                serde_json::json!({"src": "legacy3"}),
+                serde_json::json!({"src": "lane2"}),
+                serde_json::json!({"src": "legacy1"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn merged_evals_stay_capped() {
+        let l = Layout::new();
+        for i in 0..MAX_EVALS {
+            fs::write(
+                l.lane_evals().join(format!("5-a-{i:04}.json")),
+                format!(r#"{{"i":{i}}}"#),
+            )
+            .unwrap();
+            fs::write(
+                l.group.join(EVALS_DIR).join(format!("5-b-{i:04}.json")),
+                format!(r#"{{"legacy":{i}}}"#),
+            )
+            .unwrap();
+        }
+        let evals = read_investigation_evals(&l.sources(true), "5").unwrap();
+        assert_eq!(evals.len(), MAX_EVALS);
+        assert_eq!(evals[0]["legacy"], MAX_EVALS - 1);
+    }
+
+    #[test]
+    fn a_symlinked_legacy_dir_is_skipped_not_followed() {
+        let l = Layout::new();
+        fs::write(l.lane_evals().join("7-ok.json"), r#"{"ok":1}"#).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("7-x.json"), r#"{"secret":true}"#).unwrap();
+        fs::remove_dir(l.group.join(EVALS_DIR)).unwrap();
+        std::os::unix::fs::symlink(outside.path(), l.group.join(EVALS_DIR)).unwrap();
+        let evals = read_investigation_evals(&l.sources(true), "7").unwrap();
+        assert_eq!(evals, vec![serde_json::json!({"ok": 1})]);
     }
 
     #[test]

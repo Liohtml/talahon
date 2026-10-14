@@ -274,8 +274,9 @@ async fn registers_a_lane_per_user_cloned_from_the_base_group() {
     assert_eq!(jid, lane_jid_for_user("42"));
     let g = h.host.group(&jid).unwrap();
     assert_eq!(g.folder, "copilot");
-    assert_eq!(g.session_key.as_deref(), Some("copilot-u-42-73475cb4"));
-    assert_eq!(g.ipc_key.as_deref(), Some("copilot-u-42-73475cb4"));
+    let key42 = "copilot-u-42-73475cb40a568e8da8a045ced110137e";
+    assert_eq!(g.session_key.as_deref(), Some(key42));
+    assert_eq!(g.ipc_key.as_deref(), Some(key42));
     assert!(g.trusted_session_commands);
     assert!(!g.ephemeral_session);
     assert_eq!(g.name, "CoPilot — Dana");
@@ -356,8 +357,8 @@ async fn ids_differing_only_in_case_get_separate_lanes_and_keys() {
     assert_eq!(upper, "http:copilot:u:Bob");
     let (gl, gu) = (h.host.group(&lower).unwrap(), h.host.group(&upper).unwrap());
     let (kl, ku) = (gl.session_key.unwrap(), gu.session_key.unwrap());
-    assert_eq!(kl, "copilot-u-bob-81b637d8");
-    assert_eq!(ku, "copilot-u-bob-cd9fb1e1");
+    assert_eq!(kl, "copilot-u-bob-81b637d8fcd2c6da6359e6963113a117");
+    assert_eq!(ku, "copilot-u-bob-cd9fb1e148ccd8442e5aa74904cc73bf");
     assert!(!kl.eq_ignore_ascii_case(&ku));
     assert_eq!(gl.ipc_key.as_deref(), Some(kl.as_str()));
     assert_eq!(gu.ipc_key.as_deref(), Some(ku.as_str()));
@@ -634,6 +635,22 @@ async fn reset_rejects_invalid_user_ids() {
         body_json(res).await["lanes"],
         json!(["http:copilot:u:bobsmith"])
     );
+}
+
+#[tokio::test]
+async fn reset_of_a_long_id_clears_only_that_users_lane() {
+    let h = connected_harness().await;
+    let victim = format!("{}-victim", "y".repeat(40));
+    let other = format!("{}-attack", "y".repeat(40));
+    let vj = lane_for(&h, json!(victim), None).await;
+    let oj = lane_for(&h, json!(other), None).await;
+    let (gv, go) = (h.host.group(&vj).unwrap(), h.host.group(&oj).unwrap());
+    assert_ne!(gv.session_key, go.session_key);
+    assert_ne!(gv.ipc_key, go.ipc_key);
+    let body = json!({"scope": "chat", "user_id": other}).to_string();
+    let res = h.send(authed("POST", "/session/reset", Some(&body))).await;
+    assert_eq!(body_json(res).await["lanes"], json!([oj]));
+    assert_eq!(h.host.cleared(), vec![oj]);
 }
 
 #[tokio::test]
@@ -1115,6 +1132,7 @@ async fn status_reports_lanes_sessions_and_tasks() {
     let h = connected_harness().await;
     lane_for(&h, json!("42"), None).await;
     let key42 = key_of("42");
+    assert_eq!(key42, "copilot-u-42-73475cb40a568e8da8a045ced110137e");
     let orphan = key_of("gone");
     {
         let mut s = h.store.sessions.lock().unwrap();
@@ -1162,6 +1180,42 @@ async fn status_reports_lanes_sessions_and_tasks() {
 }
 
 #[tokio::test]
+async fn status_maps_long_ids_sharing_a_prefix_to_their_own_user() {
+    // N-8: ids that only differ after the readable key prefix get distinct
+    // 128-bit-hash keys, and `/status` maps each session back to its owner.
+    let h = connected_harness().await;
+    let victim = format!("{}-victim", "x".repeat(40));
+    let other = format!("{}-attack", "x".repeat(40));
+    lane_for(&h, json!(victim), None).await;
+    lane_for(&h, json!(other), None).await;
+    let (kv, ko) = (key_of(&victim), key_of(&other));
+    assert_ne!(kv, ko);
+    let readable = format!("copilot-u-{}-", "x".repeat(20));
+    assert!(kv.starts_with(&readable) && ko.starts_with(&readable));
+    assert_eq!(kv.len(), readable.len() + 32);
+    assert!(kv.len() <= 64);
+    {
+        let mut s = h.store.sessions.lock().unwrap();
+        for (key, tokens) in [(kv.as_str(), 1), (ko.as_str(), 2)] {
+            s.push(SessionRow {
+                group_folder: key.into(),
+                session_id: format!("sess-{tokens}"),
+                provider: None,
+                input_tokens: Some(tokens),
+                updated_at: None,
+            });
+        }
+    }
+    let v = body_json(h.send(authed("GET", "/status", None)).await).await;
+    let sessions = v["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["lane"], kv.as_str());
+    assert_eq!(sessions[0]["user_id"], victim.as_str());
+    assert_eq!(sessions[1]["lane"], ko.as_str());
+    assert_eq!(sessions[1]["user_id"], other.as_str());
+}
+
+#[tokio::test]
 async fn metrics_expose_prometheus_text() {
     let h = connected_harness().await;
     h.send(authed(
@@ -1199,7 +1253,10 @@ async fn evals_are_returned_newest_first() {
     let res = h.send(authed("GET", "/evals/12", None)).await;
     assert_eq!(body_json(res).await, json!({"alert_id": 12, "evals": []}));
 
-    let dir = h.root().join("groups/copilot/evals");
+    // The investigation lane's private state dir (`/home/agent/.talon/evals`
+    // inside its container).
+    let dir = h.root().join("data/sessions/copilot-investigate/evals");
+    assert_eq!(dir, h.state.config().evals_dir());
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("12-copilot-inv-12-1.json"), r#"{"n":1}"#).unwrap();
     std::fs::write(dir.join("12-copilot-inv-12-2.json"), r#"{"n":2}"#).unwrap();
@@ -1217,6 +1274,59 @@ async fn evals_are_returned_newest_first() {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
         assert_eq!(body_json(res).await["error"], "invalid alert_id");
     }
+}
+
+#[tokio::test]
+async fn evals_written_to_the_shared_group_folder_are_not_served() {
+    // N-2: every CoPilot lane can write `groups/copilot/evals/`, so records
+    // there are forgeable and ignored unless the operator opts in.
+    let h = connected_harness().await;
+    let shared = h.root().join("groups/copilot/evals");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("12-copilot-inv-12-9.json"),
+        r#"{"forged":true}"#,
+    )
+    .unwrap();
+    let lane = h.state.config().evals_dir();
+    std::fs::create_dir_all(&lane).unwrap();
+    std::fs::write(lane.join("12-copilot-inv-12-1.json"), r#"{"n":1}"#).unwrap();
+    let v = body_json(h.send(authed("GET", "/evals/12", None)).await).await;
+    assert_eq!(v, json!({"alert_id": 12, "evals": [{"n": 1}]}));
+}
+
+#[tokio::test]
+async fn legacy_group_evals_are_served_only_when_enabled() {
+    let h = Harness::with_config(|c| c.evals_legacy_group_dir = true);
+    h.state.register_base_lanes().await;
+    let shared = h.root().join("groups/copilot/evals");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("12-copilot-inv-12-1.json"), r#"{"old":1}"#).unwrap();
+    // Before the lane-private directory exists, legacy records still show.
+    let v = body_json(h.send(authed("GET", "/evals/12", None)).await).await;
+    assert_eq!(v, json!({"alert_id": 12, "evals": [{"old": 1}]}));
+    let lane = h.state.config().evals_dir();
+    std::fs::create_dir_all(&lane).unwrap();
+    std::fs::write(lane.join("12-copilot-inv-12-2.json"), r#"{"new":2}"#).unwrap();
+    let v = body_json(h.send(authed("GET", "/evals/12", None)).await).await;
+    assert_eq!(
+        v,
+        json!({"alert_id": 12, "evals": [{"new": 2}, {"old": 1}]})
+    );
+}
+
+#[tokio::test]
+async fn a_user_lanes_state_dir_cannot_feed_evals() {
+    // Only the investigation lane's state dir is read: an analyst lane
+    // writing `/home/agent/.talon/evals` lands in its own directory.
+    let h = connected_harness().await;
+    let jid = lane_for(&h, json!("mallory"), None).await;
+    let key = h.host.group(&jid).unwrap().session_key.unwrap();
+    let own = h.root().join("data/sessions").join(&key).join("evals");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("12-copilot-inv-12-9.json"), r#"{"forged":true}"#).unwrap();
+    let v = body_json(h.send(authed("GET", "/evals/12", None)).await).await;
+    assert_eq!(v, json!({"alert_id": 12, "evals": []}));
 }
 
 #[tokio::test]
@@ -1740,9 +1850,12 @@ async fn symlinked_evals_and_prompts_dirs_are_refused_over_http() {
     let h = connected_harness().await;
     let group = h.root().join("groups/copilot");
     std::fs::create_dir_all(&group).unwrap();
+    let lane = h.root().join("data/sessions/copilot-investigate");
+    std::fs::create_dir_all(&lane).unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("12-x.json"), r#"{"secret":true}"#).unwrap();
     std::fs::write(outside.path().join("t.txt"), "# secret template").unwrap();
+    std::os::unix::fs::symlink(outside.path(), lane.join("evals")).unwrap();
     std::os::unix::fs::symlink(outside.path(), group.join("evals")).unwrap();
     std::os::unix::fs::symlink(outside.path(), group.join("prompts")).unwrap();
 

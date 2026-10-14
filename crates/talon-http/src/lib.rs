@@ -12,9 +12,12 @@
 //!   output reaches CoPilot through the MCP write-back tools, not SSE.
 //! - `http:copilot:u:<id>` — one in-memory lane per CoPilot user, cloned
 //!   from the base group (same folder/mounts, own session + IPC namespace
-//!   `copilot-u-<lowercased id prefix>-<sha256 prefix>`), dropped again by
-//!   the idle-lane sweep. Ids must match `^[A-Za-z0-9_-]{1,48}$`; anything
+//!   `copilot-u-<lowercased id, ≤ 20 chars>-<32 hex of sha256(exact id)>`,
+//!   e.g. `copilot-u-bob-81b637d8fcd2c6da6359e6963113a117`), dropped again
+//!   by the idle-lane sweep. Ids must match `^[A-Za-z0-9_-]{1,48}$`; anything
 //!   else is rejected with 400 rather than stripped into another user's lane.
+//!   The 128-bit hash makes it infeasible to choose an id whose key collides
+//!   with another user's (N-8).
 //!
 //! ## Endpoints
 //! | Method | Path | Notes |
@@ -26,7 +29,7 @@
 //! | POST | `/investigate` | `{alert_id, customer_code, triggered_by?, template_override?}` |
 //! | GET  | `/investigations` | `?limit=` recent investigation jobs |
 //! | GET  | `/investigations/{id}` | one job |
-//! | GET  | `/evals/{alert_id}` | eval JSON files written by the agent |
+//! | GET  | `/evals/{alert_id}` | eval JSON written by the investigation lane (`<data_dir>/sessions/copilot-investigate/evals/`) |
 //! | GET  | `/templates` | prompt templates available for overrides |
 //! | POST | `/palace/lesson` | MemPalace `add_drawer` (503 unless a palace runner is configured) |
 //! | GET  | `/palace/search` | MemPalace `search` (503 unless configured) |
@@ -42,7 +45,10 @@
 //! (header-read timeout, connection caps), bound to `127.0.0.1` unless
 //! configured otherwise. MemPalace code never runs on the host by default
 //! (see [`palace`]); agent-writable `evals/` and `prompts/` are read without
-//! following symlinks.
+//! following symlinks. Eval records come from the investigation lane's
+//! private state directory, so no other CoPilot lane can forge them (N-2);
+//! the shared `groups/<folder>/evals/` is read only with
+//! `COPILOT_EVALS_LEGACY_GROUP_DIR=true` (migration).
 //!
 //! ## Testing
 //! [`router`] builds the full axum [`axum::Router`] from an [`HttpState`];
