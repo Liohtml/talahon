@@ -1,174 +1,186 @@
-# NanoClaw Agent Container
-# Runs Claude Agent SDK in isolated Linux VM with browser automation
-
-FROM node:22-slim
-
-# Install system dependencies for Chromium
-RUN apt-get update && apt-get install -y \
-    chromium \
-    fonts-liberation \
-    fonts-noto-color-emoji \
-    libgbm1 \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libgtk-3-0 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxshmfence1 \
-    curl \
-    git \
-    python3 \
-    python3-pip \
-    python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-# pymysql lives in a venv owned by mcp-mysql (mode 700) so the agent
-# (node uid) cannot import it. The /usr/local/bin/mysql-query wrapper
-# (installed below) sudos to mcp-mysql, sources /etc/mcp-secrets/mysql.env,
-# and runs the python script — agent gets JSON results, never sees creds.
-# See /workspace/extra/mysql/CLAUDE.md for the doctrine on when to use this
-# vs. the mcp__mysql__* tools.
+# Talon agent container image (talon-agent:latest)
 #
-# The mcp-mysql user is created later in the per-MCP isolation block; we
-# install pymysql + helper scripts here but defer chown until after the
-# user exists.
+# Build with the REPOSITORY ROOT as context:
+#
+#   ./container/build.sh [tag]
+#   docker build -f container/Dockerfile -t talon-agent:latest .
+#
+# The context is filtered by container/Dockerfile.dockerignore (allowlist:
+# only the Cargo workspace, the anon-proxy field list and the files below are
+# sent — never .env, store/, data/, groups/ or target/).
+#
+# Stages
+#   rust-builder  compiles talon-agent + talon-anon-proxy from the workspace
+#   py-builder    builds the Python MCP server virtualenvs under /opt
+#   runtime       debian:bookworm-slim: no compilers, no node, no sudo
+#
+# Runtime contract (docs/RUST_ARCHITECTURE.md §3.3). The host launches:
+#
+#   docker run --rm -i --cap-drop=ALL --cap-add=CHOWN,SETUID,SETGID,FOWNER,
+#     DAC_OVERRIDE,KILL --security-opt=no-new-privileges --read-only
+#     --tmpfs /tmp --tmpfs /run --tmpfs /etc/mcp-secrets(0711) --tmpfs /home/agent
+#     -e TZ -e RUN_UID -e RUN_GID ... talon-agent:latest
+#
+# and /usr/local/bin/talon-entrypoint (root) stages per-MCP secrets into
+# /etc/mcp-secrets (owner mcp-<id>, 0600) and execs `talon-agent supervise`,
+# which runs every MCP server as its mcp-* user and the agent as `agent`.
+
+ARG RUST_IMAGE=rust:1-bookworm
+ARG DEBIAN_IMAGE=debian:bookworm-slim
+
+# ---------------------------------------------------------------------------
+# 1. Rust binaries
+# ---------------------------------------------------------------------------
+FROM ${RUST_IMAGE} AS rust-builder
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+# talon-anon embeds the shipped field list at compile time.
+COPY siem/anon_proxy/fields.yaml ./siem/anon_proxy/fields.yaml
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    set -eux; \
+    cargo build --release --locked --bin talon-agent --bin talon-anon-proxy; \
+    install -D -m 0755 target/release/talon-agent /out/talon-agent; \
+    install -D -m 0755 target/release/talon-anon-proxy /out/talon-anon-proxy
+
+# ---------------------------------------------------------------------------
+# 2. Python MCP servers (built here so the runtime has no compilers)
+# ---------------------------------------------------------------------------
+FROM ${DEBIAN_IMAGE} AS py-builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates git python3 python3-venv python3-dev build-essential; \
+    rm -rf /var/lib/apt/lists/*
+
+# OpenSearch (SIEM) MCP server + pyyaml for the Python anon-proxy fallback.
+RUN python3 -m venv /opt/opensearch-mcp \
+    && /opt/opensearch-mcp/bin/pip install --quiet opensearch-mcp-server pyyaml
+
+# MySQL MCP server (Python; replaces the old npm @benborla29/mcp-server-mysql
+# so the image needs no node). Env: MYSQL_HOST/PORT/USER/PASSWORD/DATABASE —
+# the wrapper maps the legacy MYSQL_PASS/MYSQL_DB names.
+RUN python3 -m venv /opt/mysql-mcp \
+    && /opt/mysql-mcp/bin/pip install --quiet mysql-mcp-server
+
+# pymysql for the mysql-query helper (locked to mcp-mysql below).
 RUN python3 -m venv /opt/mysql-tools \
     && /opt/mysql-tools/bin/pip install --quiet pymysql \
     && mkdir -p /opt/mysql-tools/lib
 
-COPY mysql-tools/mysql_query.py /opt/mysql-tools/lib/mysql_query.py
-COPY mysql-tools/mysql-query /usr/local/bin/mysql-query
-RUN chmod 0755 /usr/local/bin/mysql-query
-
-# Install opensearch-mcp-server into a system venv (used by the SIEM MCP wrapper and anon proxy)
-RUN python3 -m venv /opt/opensearch-mcp \
-    && /opt/opensearch-mcp/bin/pip install --quiet opensearch-mcp-server pyyaml
-
-# Install copilot-mcp-server into a system venv (used by the CoPilot MCP wrapper)
 RUN python3 -m venv /opt/copilot-mcp \
     && /opt/copilot-mcp/bin/pip install --quiet \
        "git+https://github.com/socfortress/copilot-mcp-server.git"
 
-# Install wazuh-mcp-server into a system venv (used by the Wazuh MCP wrapper)
 RUN python3 -m venv /opt/wazuh-mcp \
     && /opt/wazuh-mcp/bin/pip install --quiet \
        "git+https://github.com/socfortress/wazuh-mcp-server.git"
 
-# Install velociraptor-mcp-server into a system venv (used by the Velociraptor MCP wrapper)
 RUN python3 -m venv /opt/velociraptor-mcp \
     && /opt/velociraptor-mcp/bin/pip install --quiet \
        "git+https://github.com/socfortress/velociraptor-mcp-server.git"
 
-# Install shuffle-mcp-server into a system venv (used by the Shuffle MCP wrapper)
-# Gives the agent interactive access to Shuffle's 3,000+ apps catalog —
-# RunAppAgentTool / GetExecutionResultTool for natural-language driving of
-# any authenticated app, plus AuthenticateTool / GetAppsTool for discovery.
-# This is separate from CoPilot's notification-dispatch path: that's a
-# fire-and-record server-to-server call; this is for mid-investigation
-# tool use (e.g. "look up this user's email via Outlook search").
+# Shuffle: interactive access to Shuffle's app catalog mid-investigation.
 RUN python3 -m venv /opt/shuffle-mcp \
     && /opt/shuffle-mcp/bin/pip install --quiet \
        "git+https://github.com/socfortress/shuffle-mcp-server.git"
 
-# Install cve-mcp-server into a system venv (used by the CVE MCP wrapper).
-# Provides 27 security intelligence tools — CVE/EPSS/KEV/CVSS lookups,
-# exploit availability, IP reputation (AbuseIPDB, GreyNoise, Shodan),
-# threat intel (VirusTotal, urlscan, MalwareBazaar), MITRE ATT&CK,
-# GitHub advisories. Native MCP tools replace what Talon previously did
-# via WebFetch/WebSearch scrapes — faster, structured, and cached.
-# Source: https://github.com/mukul975/cve-mcp-server
+# CVE / threat-intel server (CVE, EPSS, KEV, exploit availability, IP
+# reputation, VirusTotal, urlscan, MITRE ATT&CK, GitHub advisories).
 RUN python3 -m venv /opt/cve-mcp \
     && /opt/cve-mcp/bin/pip install --quiet \
        "git+https://github.com/mukul975/cve-mcp-server.git"
 
-# Install mempalace + chromadb into a system venv (used by the MemPalace MCP wrapper)
-# chromadb is large — this layer is cached after the first build
+# MemPalace (semantic memory; chromadb is large — keep this layer last).
 RUN python3 -m venv /opt/mempalace \
     && /opt/mempalace/bin/pip install --quiet \
        "chromadb>=0.5.0,<0.7" "pyyaml>=6.0" mempalace
 
-# Set Chromium path for agent-browser
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
+# Byte-compile everything now: the runtime root filesystem is read-only.
+RUN python3 -m compileall -q /opt >/dev/null || true
 
-# Install agent-browser, claude-code, and MySQL MCP server globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code@2.1.91 @benborla29/mcp-server-mysql
+# ---------------------------------------------------------------------------
+# 3. Runtime
+# ---------------------------------------------------------------------------
+FROM ${DEBIAN_IMAGE} AS runtime
 
-# --- Per-MCP credential isolation ---
-# Each backend MCP can run as a dedicated non-privileged user via sudo. The
-# entrypoint copies the MCP's .env into /etc/mcp-secrets/<mcp>.env (mode 600,
-# owned by the matching mcp-* uid), then shadows the original bind-mount so
-# the agent (running as node uid) can't read it. The wrapper in
-# /workspace/extra/<mcp>/ uses `sudo -u mcp-<mcp>` to read the secret at
-# MCP-launch time.
-RUN apt-get update && apt-get install -y --no-install-recommends sudo \
-    && rm -rf /var/lib/apt/lists/* \
-    # Per-MCP non-privileged users (no shell, no home, no login)
-    && useradd -r -u 2001 -s /usr/sbin/nologin mcp-siem \
-    && useradd -r -u 2002 -s /usr/sbin/nologin mcp-mysql \
-    && useradd -r -u 2003 -s /usr/sbin/nologin mcp-wazuh \
-    && useradd -r -u 2004 -s /usr/sbin/nologin mcp-copilot \
-    && useradd -r -u 2005 -s /usr/sbin/nologin mcp-shuffle \
-    && useradd -r -u 2006 -s /usr/sbin/nologin mcp-velociraptor \
-    # mcp-cve needs a home dir because the upstream cve-mcp-server
-    # creates a cache at ~/.cve-mcp/ at startup. -m creates it.
-    && useradd -r -u 2007 -m -d /home/mcp-cve -s /usr/sbin/nologin mcp-cve \
-    # node may sudo to any mcp-* user without password
-    && mkdir -p /etc/sudoers.d \
-    && echo 'node ALL=(mcp-siem,mcp-mysql,mcp-wazuh,mcp-copilot,mcp-shuffle,mcp-velociraptor,mcp-cve) NOPASSWD: ALL' > /etc/sudoers.d/mcp-isolation \
-    && chmod 0440 /etc/sudoers.d/mcp-isolation \
-    # Per-MCP secrets directory: traversable but not listable
-    && mkdir -p /etc/mcp-secrets \
-    && chown root:root /etc/mcp-secrets \
-    && chmod 0711 /etc/mcp-secrets \
-    # Staging directory for the read-only host bind mount of the original
-    # .env (so entrypoint can copy it before chowning to mcp-* uid).
-    # Mode 700 means no other user can list or traverse this dir.
-    && mkdir -p /etc/mcp-staging \
-    && chown root:root /etc/mcp-staging \
-    && chmod 0700 /etc/mcp-staging \
-    # Lock down /opt/mysql-tools (pymysql venv + mysql_query.py) to
-    # mcp-mysql only. Agent (node) cannot list, enter, or import from
-    # this dir. The /usr/local/bin/mysql-query wrapper sudos to mcp-mysql
-    # to use it. chmod -R go-rwx leaves owner perms intact while removing
-    # all access for group + other.
-    && chown -R mcp-mysql:mcp-mysql /opt/mysql-tools \
-    && chmod -R go-rwx /opt/mysql-tools
+# Optional headless browser for web tooling (adds ~400 MB).
+ARG INSTALL_CHROMIUM=false
 
-# Create app directory
-WORKDIR /app
+LABEL org.opencontainers.image.title="talon-agent" \
+      org.opencontainers.image.description="Talon SOC analyst agent runtime (privilege-separated)" \
+      org.opencontainers.image.licenses="MIT"
 
-# Copy package files first for better caching
-COPY agent-runner/package*.json ./
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Install dependencies
-RUN npm install
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates bash coreutils findutils grep sed gawk curl git jq less \
+        procps util-linux passwd python3; \
+    if [ "$INSTALL_CHROMIUM" = "true" ]; then \
+        apt-get install -y --no-install-recommends \
+            chromium fonts-liberation fonts-noto-color-emoji; \
+    fi; \
+    # No privilege-escalation helpers in the image, ever.
+    apt-get purge -y --allow-remove-essential sudo 2>/dev/null || true; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-# Copy source code
-COPY agent-runner/ ./
+# Users (§3.3). `agent` is remapped to RUN_UID/RUN_GID at start-up. Every
+# isolated MCP server gets its own system account; `mcp-default` runs servers
+# without a `runAs`. MCP ids live in a high range so they cannot collide with
+# host user ids (the entrypoint refuses RUN_UID/RUN_GID equal to any of them).
+RUN set -eux; \
+    groupadd -g 1000 agent; \
+    useradd -u 1000 -g 1000 -M -d /home/agent -s /bin/bash agent; \
+    for spec in siem:61001 mysql:61002 wazuh:61003 copilot:61004 shuffle:61005 \
+                velociraptor:61006 cve:61007 palace:61008 default:61009; do \
+        id="${spec%%:*}"; num="${spec##*:}"; \
+        groupadd -r -g "$num" "mcp-$id"; \
+        useradd -r -u "$num" -g "$num" -M -d /nonexistent -s /usr/sbin/nologin "mcp-$id"; \
+    done; \
+    # Staging dir for host bind mounts of secret files: root only.
+    install -d -m 0700 -o root -g root /etc/mcp-staging; \
+    # Secrets dir (a 0711 tmpfs at runtime): traversable, not listable.
+    install -d -m 0711 -o root -g root /etc/mcp-secrets; \
+    install -d -m 0755 /workspace /workspace/group /workspace/global \
+        /workspace/project /workspace/extra /workspace/ipc /run/talon; \
+    install -d -m 0700 -o agent -g agent /home/agent
 
-# Build TypeScript
-RUN npm run build
+COPY --from=py-builder /opt/ /opt/
+COPY --from=rust-builder /out/talon-agent /usr/local/bin/talon-agent
+COPY --from=rust-builder /out/talon-anon-proxy /usr/local/bin/talon-anon-proxy
+COPY container/entrypoint.sh /usr/local/bin/talon-entrypoint
+COPY container/mysql-tools/mysql_query.py /opt/mysql-tools/lib/mysql_query.py
+COPY container/mysql-tools/mysql-query /usr/local/bin/mysql-query
 
-# Create workspace directories
-RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
+RUN set -eux; \
+    chown -R root:root /usr/local/bin /opt; \
+    chmod 0755 /usr/local/bin/talon-entrypoint /usr/local/bin/talon-agent \
+        /usr/local/bin/talon-anon-proxy /usr/local/bin/mysql-query; \
+    chmod -R go-w /opt; \
+    # pymysql + helper usable by mcp-mysql only.
+    chown -R mcp-mysql:mcp-mysql /opt/mysql-tools; \
+    chmod -R go-rwx /opt/mysql-tools; \
+    # Strip setuid/setgid bits (inert under no-new-privileges anyway).
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true; \
+    ! command -v sudo
 
-# Entrypoint script: handles secret-shadowing, per-MCP isolation, and
-# privilege drop before exec'ing the agent. Source: container/entrypoint.sh
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
-# Set ownership to node user (non-root) for writable directories
-RUN chown -R node:node /workspace && chmod 777 /home/node
-
-# Set working directory to group workspace
 WORKDIR /workspace/group
 
-# Entry point reads JSON from stdin, outputs JSON to stdout
-ENTRYPOINT ["/app/entrypoint.sh"]
+# Starts as root by design (secret staging + privilege separation); the
+# entrypoint drops to `agent` / mcp-* users via talon-agent supervise.
+ENTRYPOINT ["/usr/local/bin/talon-entrypoint"]

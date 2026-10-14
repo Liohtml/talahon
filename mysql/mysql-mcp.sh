@@ -1,55 +1,95 @@
 #!/usr/bin/env bash
-# MySQL MCP Server wrapper for NanoClaw.
+# MySQL MCP server wrapper for Talon.
 #
-# Two execution paths:
+# Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Inside the NanoClaw agent container with per-MCP isolation enabled.
-#      The wrapper detects an isolated secret at /etc/mcp-secrets/mysql.env
-#      and uses sudo to drop privs to mcp-mysql before sourcing it.
-#      The agent (running as node uid) cannot read /etc/mcp-secrets/mysql.env.
+#   1. Talon agent container. `talon-agent supervise` starts this script
+#      directly as `mcp-mysql` (`"runAs": "mcp-mysql"` in .mcp.json). The
+#      credentials were staged at /etc/mcp-secrets/mysql.env (owner mcp-mysql,
+#      mode 0600); the visible mysql/.env is shadowed with /dev/null. The
+#      image ships the Python `mysql_mcp_server` (/opt/mysql-mcp) — there is
+#      no node in the image.
 #
-#   2. Legacy / host fallback. Sources mysql/.env directly.
+#   2. Dev / host. Source mysql/.env next to this script; prefer a local
+#      venv, then the image install, then a globally installed npm
+#      `mcp-server-mysql` (legacy hosts).
 #
-# Unlike most other wrappers, mcp-server-mysql is a globally-installed npm
-# binary (not under /opt/), so we resolve it via PATH lookup.
-#
-# This script is called by Claude Code as the MCP server command.
+# .env keys: MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASS (or
+# MYSQL_PASSWORD), MYSQL_DB (or MYSQL_DATABASE). Both naming schemes are
+# exported so either server implementation finds them.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd /
+export PYTHONSAFEPATH=1
+
+LOCAL_MCP="$SCRIPT_DIR/.venv/bin/mysql_mcp_server"
+SYSTEM_MCP="/opt/mysql-mcp/bin/mysql_mcp_server"
 ISOLATED_ENV="/etc/mcp-secrets/mysql.env"
+TAG="[mysql-mcp]"
 
-# === Container path: isolated mcp-mysql uid ===
-if [[ -f "$ISOLATED_ENV" ]] && command -v sudo >/dev/null 2>&1; then
-    # Resolve the binary path before privilege drop so the sudo'd shell
-    # doesn't need to redo PATH lookup with a different environment.
-    SYSTEM_BIN=$(command -v mcp-server-mysql 2>/dev/null || true)
-    if [[ -n "$SYSTEM_BIN" ]]; then
-        exec sudo -n -u mcp-mysql /bin/bash -c "
-            set -a
-            source '$ISOLATED_ENV'
-            set +a
-            exec '$SYSTEM_BIN'
-        "
-    fi
-fi
+_err() { echo "$TAG ERROR: $*" >&2; }
 
-# === Fallback: legacy path ===
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
+_load_env() {
     set -a
     # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/.env"
+    source "$1"
     set +a
+    # Map legacy (benborla) names <-> Python server names.
+    if [[ -n "${MYSQL_PASS:-}" && -z "${MYSQL_PASSWORD:-}" ]]; then export MYSQL_PASSWORD="$MYSQL_PASS"; fi
+    if [[ -n "${MYSQL_PASSWORD:-}" && -z "${MYSQL_PASS:-}" ]]; then export MYSQL_PASS="$MYSQL_PASSWORD"; fi
+    if [[ -n "${MYSQL_DB:-}" && -z "${MYSQL_DATABASE:-}" ]]; then export MYSQL_DATABASE="$MYSQL_DB"; fi
+    if [[ -n "${MYSQL_DATABASE:-}" && -z "${MYSQL_DB:-}" ]]; then export MYSQL_DB="$MYSQL_DATABASE"; fi
+}
+
+_is_native_exec() {
+    local bin="$1"
+    [[ -x "$bin" ]] || return 1
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        local magic
+        magic=$(head -c 4 "$bin" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        [[ "$magic" == "7f454c46" ]] || return 1
+    fi
+    return 0
+}
+
+# === Container: isolated mcp-mysql account ===
+if [[ -e "$ISOLATED_ENV" ]]; then
+    if [[ "$(id -u)" == "0" ]]; then
+        _err "refusing to run as root; the supervisor must start this server as mcp-mysql"
+        exit 1
+    fi
+    if [[ ! -r "$ISOLATED_ENV" ]]; then
+        _err "$ISOLATED_ENV is not readable by uid $(id -u); set \"runAs\": \"mcp-mysql\" in .mcp.json"
+        exit 1
+    fi
+    _load_env "$ISOLATED_ENV"
+    if [[ ! -x "$SYSTEM_MCP" ]]; then
+        _err "mysql_mcp_server is not installed in the image (rebuild: container/build.sh)"
+        exit 1
+    fi
+    exec "$SYSTEM_MCP"
+fi
+
+# === Dev / host: local .env ===
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    _load_env "$SCRIPT_DIR/.env"
 else
-    echo "[mysql-mcp] ERROR: .env not found at $SCRIPT_DIR/.env" >&2
-    echo "[mysql-mcp] Run setup.sh first and fill in your MySQL credentials." >&2
+    _err ".env not found at $SCRIPT_DIR/.env"
+    _err "Run setup.sh first and fill in your MySQL credentials."
     exit 1
 fi
 
-# Prefer globally installed binary; fall back to npx (slower but always works)
-if command -v mcp-server-mysql &>/dev/null; then
+if _is_native_exec "$LOCAL_MCP"; then
+    exec "$LOCAL_MCP"
+elif [[ -x "$SYSTEM_MCP" ]]; then
+    exec "$SYSTEM_MCP"
+elif command -v mcp-server-mysql >/dev/null 2>&1; then
     exec mcp-server-mysql
 else
-    exec npx --yes @benborla29/mcp-server-mysql
+    _err "no MySQL MCP server found."
+    _err "  In a container: rebuild the image (container/build.sh)"
+    _err "  On the host: python3 -m venv $SCRIPT_DIR/.venv && $SCRIPT_DIR/.venv/bin/pip install mysql-mcp-server"
+    exit 1
 fi

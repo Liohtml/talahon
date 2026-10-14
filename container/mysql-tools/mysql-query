@@ -5,10 +5,13 @@
 # database using credentials isolated to the mcp-mysql uid, returns
 # results as JSON on stdout.
 #
-# The agent (node uid) cannot read /etc/mcp-secrets/mysql.env. This
-# wrapper escalates via sudo to mcp-mysql, sources the credentials in
-# the privileged context, and runs pymysql against them. The agent
-# never sees host/user/password — only the resulting rows.
+# Credential isolation (no sudo in the Talon image, docs/RUST_ARCHITECTURE.md
+# §3.3): the MySQL credentials live in /etc/mcp-secrets/mysql.env, owned by
+# the mcp-mysql user (mode 0600), and /opt/mysql-tools is only accessible to
+# that user. This helper therefore works only when it runs as mcp-mysql (or
+# on a dev host with MYSQL_* already exported). The agent itself cannot
+# escalate to mcp-mysql — it uses the mcp__mysql__* MCP tools instead, which
+# the supervisor runs as mcp-mysql.
 #
 # Usage:
 #   mysql-query <<< "SELECT * FROM agents LIMIT 10"
@@ -23,24 +26,27 @@
 
 set -euo pipefail
 
-# === Re-exec as mcp-mysql via sudo ===
-# When invoked by node (or any non-mcp-mysql user), sudo back to ourselves
-# under the mcp-mysql uid. NOPASSWD configured in /etc/sudoers.d/mcp-isolation.
-if [ "$(id -un)" != "mcp-mysql" ]; then
-    exec sudo -n -u mcp-mysql "$0" "$@"
-fi
+case "${1:-}" in
+    -h|--help)
+        sed -n '2,/^# Multi-statement/p' "$0" | sed 's/^# //;s/^#$//;s/^#//'
+        exit 0
+        ;;
+esac
 
-# === Running as mcp-mysql below ===
 ISOLATED_ENV="/etc/mcp-secrets/mysql.env"
-if [ ! -f "$ISOLATED_ENV" ]; then
-    echo "mysql-query: $ISOLATED_ENV not found (uid isolation not configured?)" >&2
+if [ -r "$ISOLATED_ENV" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$ISOLATED_ENV"
+    set +a
+elif [ -e "$ISOLATED_ENV" ]; then
+    echo "mysql-query: MySQL credentials are isolated to the mcp-mysql user and this" >&2
+    echo "mysql-query: container has no sudo. Use the mcp__mysql__* tools instead." >&2
+    exit 1
+elif [ -z "${MYSQL_HOST:-}" ] || [ -z "${MYSQL_USER:-}" ]; then
+    echo "mysql-query: no credentials ($ISOLATED_ENV absent and MYSQL_HOST/MYSQL_USER unset)" >&2
     exit 1
 fi
-
-set -a
-# shellcheck source=/dev/null
-. "$ISOLATED_ENV"
-set +a
 
 PY=/opt/mysql-tools/bin/python
 SCRIPT=/opt/mysql-tools/lib/mysql_query.py

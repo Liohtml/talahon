@@ -1,3 +1,52 @@
 //! # talon-container — hardened container runtime
 //!
-//! **Owner: agent A08.** See `docs/RUST_ARCHITECTURE.md` §A08.
+//! **Owner: agent A08.** See `docs/RUST_ARCHITECTURE.md` §A08 and §3.3.
+//!
+//! Host-side launcher for the per-run agent container:
+//!
+//! - [`runtime`]: docker/podman detection, `ensure_running`, orphan cleanup
+//!   by the `talon.managed=true` label, `stop` / `kill`, host-gateway args and
+//!   [`runtime::detect_gateway_bind_addr`] for the LLM gateway.
+//! - [`mounts`]: bind-mount construction (group rw, global ro, project ro
+//!   with `.env` shadowed, sessions at `/home/agent/.talon`, IPC, allowlisted
+//!   extras, per-MCP secret staging + shadowing, read-only `.mcp.json`).
+//! - [`args`]: the hardened `run` argument vector of §3.3 (capabilities,
+//!   read-only rootfs, tmpfs, limits, env overlay without secrets, blocked
+//!   hosts).
+//! - [`parser`]: incremental, injection-proof stdout frame parser.
+//! - [`process`]: injectable process-spawn layer (fakes in tests).
+//! - [`runner`]: [`runner::ContainerRunner`] — spawn, stdin input, frame
+//!   streaming, timeouts, graceful stop / kill, exit mapping, audit, run logs
+//!   and the [`runner::ContainerHandle`] for the group queue.
+//! - [`snapshot`]: atomic `current_tasks.json` / `available_groups.json`.
+//! - [`policy`]: narrow seams over `talon-security` (mount validator,
+//!   redactor).
+//!
+//! The image side (`container/Dockerfile`, `container/entrypoint.sh`,
+//! `container/build.sh`) and the MCP wrapper scripts implement the other half
+//! of the §3.3 contract.
+
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
+pub mod args;
+pub mod mounts;
+pub mod parser;
+pub mod policy;
+pub mod process;
+pub mod runner;
+pub mod runtime;
+pub mod snapshot;
+
+pub use args::{ResourceLimits, RunAs, build_run_args, container_name};
+pub use mounts::{
+    ISOLATED_MCPS, MountLayout, MountOptions, MountRequest, VolumeMount, build_mounts,
+};
+pub use parser::{OutputParser, ParseEvent};
+pub use policy::{DenyAllMounts, LogRedactor, MountPolicy};
+pub use process::{ProcessSpawner, TokioProcessSpawner};
+pub use runner::{
+    ContainerHandle, ContainerRunner, OutputHandler, PreparedRun, RunOutcome, RunResult, RunSpec,
+    RunnerConfig, StartError, StartedContainer, noop_handler,
+};
+pub use runtime::{ContainerRuntime, HostPlatform, RuntimeKind, detect_gateway_bind_addr};
+pub use snapshot::{write_groups_snapshot, write_tasks_snapshot};
