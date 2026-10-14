@@ -25,3 +25,22 @@ available, so containment matters more than detection); the raw `opensearch`
 MCP is exposed next to `opensearch_anon`; the audit chain is unkeyed and its
 tail can be truncated by someone with host DB write access; no global vLLM
 fairness between lanes.
+
+## Round 2 — verification and new findings
+
+Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
+-12 fixed with low residuals; MYTH-03, -05, -06, -09, -11 partially fixed
+(remaining parts tracked below as N-1…N-4). Round-2 work order:
+
+| ID | Sev | Finding | Owners |
+|---|---|---|---|
+| N-1 | medium | Scheduler `resolve_group` falls back to the smallest JID of the same folder when a task's lane is unregistered (every host restart for per-user lanes), so an analyst's own task runs as the anonymous base lane with its session and IPC namespace | G1 (talon-scheduler) |
+| N-2 | medium | Shared `groups/copilot` folder: any lane can overwrite `reports/<job_id>.json` (forged verdicts, poisoned IOC sightings), rewrite `prompts/*.txt` that investigations follow, and forge `evals/` | G3 (prompts read-only bind), G5 (reports in lane-private state dir), G7 (host reads verdicts from the investigation lane's state dir), G6 (evals from the investigation lane's state dir), lead (CLAUDE.md paths) |
+| N-3 | medium | Unbounded task creation from one lane (320 every-minute cron tasks × 250 KiB in <1 s; applied ops bypass the audit rate limit; snapshots load all tasks) | G2 (per-lane quotas, prompt cap, min interval, rate limit, filtered task query), G7 (filtered snapshot query) |
+| N-4 | medium | HTTP/2 prior-knowledge connections are never timed out → connection slots exhausted without auth | lead (talon-net: HTTP/1 only, idle timeouts, lower per-IP cap) |
+| N-5 | low | Oversized `newSessionId` bypasses the session-id cap (DB/memory/log bloat) | G3 (runner), G7 (host) |
+| N-6 | low | Gateway forwards JSON-schema contents verbatim (regex/huge bounds → possible vLLM DoS); cache salt per folder, not per lane | G4 (schema keyword allowlist + bounds), G7 (token label = lane ipc key) |
+| N-7 | low | Entrypoint palace lock-down walks an `mcp-palace`-owned tree as root after staging secrets (TOCTOU); host secret scan cannot list the 0700 palace dir and refuses the mount (functional regression) | G3 |
+| N-8 | low | Lane-key hash only 32 bits → collisions for ids > 40 chars | G6 |
+| N-9 | low | Secret scan depth 3, skips `.git` (deep `.env`, `.git/config` exposed); agents can make rw-mount scans fail | G3 |
+| N-10 | info | Read-only is not immutable: main's `/workspace/project` view includes agent-writable `groups/`, `data/`, `store/` | G5 (supervisor refuses commands there) |
