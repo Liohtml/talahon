@@ -27,9 +27,13 @@ chrono-tz = { workspace = true }
 uuid = { workspace = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Safe wrappers for geteuid(2) and kill(2)/killpg(2) in the supervisor
+# (same version talon-mcp already pulls in).
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = { workspace = true }
 
 [lints]
 workspace = true
