@@ -5,7 +5,7 @@
 //! {"type":"session","version":1,"id":"<uuid>","createdAt":"..."}
 //! {"type":"message","ts":"...","message":{"role":"user","content":"..."}}
 //! {"type":"message","ts":"...","message":{"role":"assistant","content":null,"tool_calls":[...]}}
-//! {"type":"compaction","ts":"...","archivedTo":"/workspace/group/conversations/..."}
+//! {"type":"compaction","ts":"...","archivedTo":"/home/agent/.talon/conversations/..."}
 //! ```
 //!
 //! Messages are appended as they happen; compaction rewrites the file
@@ -227,7 +227,9 @@ fn encode(record: &Record) -> std::io::Result<String> {
     Ok(s)
 }
 
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+/// Make sure `dir` is a real directory (never a symlink), creating it and
+/// missing parents with mode 0700.
+pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     match fs::symlink_metadata(dir) {
         Ok(m) if m.is_dir() => Ok(()),
         Ok(_) => Err(std::io::Error::other(format!(

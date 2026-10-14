@@ -43,7 +43,8 @@ pub struct AgentPaths {
     pub extra: PathBuf,
     /// IPC namespace root (`input/`, `messages/`, `tasks/`, snapshots).
     pub ipc: PathBuf,
-    /// Per-lane persistent agent state (`sessions/` lives here).
+    /// Per-lane persistent agent state (`sessions/` and `conversations/`
+    /// live here).
     pub state: PathBuf,
     /// The group's MCP server definitions.
     pub mcp_config: PathBuf,
@@ -89,9 +90,17 @@ impl AgentPaths {
         self.ipc.join("input")
     }
 
-    /// `<group>/conversations` — Markdown archives written before compaction.
+    /// `<state>/conversations` — Markdown archives written before
+    /// compaction. Lives in the per-lane state mount (never the group
+    /// folder, which every lane on the folder shares), mode 0700.
     pub fn conversations(&self) -> PathBuf {
-        self.group.join("conversations")
+        self.state.join("conversations")
+    }
+
+    /// `<group>/MEMORY.md` — the agent-writable group notes (loaded fenced
+    /// into the first user message of each run).
+    pub fn memory(&self) -> PathBuf {
+        self.group.join(crate::prompt::MEMORY_FILE)
     }
 }
 
@@ -175,7 +184,7 @@ pub struct RunArgs {
     /// IPC namespace root.
     #[arg(long, env = "TALON_AGENT_IPC_DIR", default_value = container_paths::IPC)]
     pub ipc_dir: PathBuf,
-    /// Persistent agent state (sessions).
+    /// Persistent per-lane agent state (sessions, conversation archives).
     #[arg(long, env = "TALON_AGENT_STATE_DIR", default_value = container_paths::AGENT_STATE)]
     pub state_dir: PathBuf,
     /// MCP server definitions (default `<group-dir>/.mcp.json`).
@@ -261,8 +270,9 @@ mod tests {
         assert_eq!(p.ipc_input(), PathBuf::from("/workspace/ipc/input"));
         assert_eq!(
             p.conversations(),
-            PathBuf::from("/workspace/group/conversations")
+            PathBuf::from("/home/agent/.talon/conversations")
         );
+        assert_eq!(p.memory(), PathBuf::from("/workspace/group/MEMORY.md"));
         assert_eq!(p.mcp_config, PathBuf::from("/workspace/group/.mcp.json"));
     }
 

@@ -23,15 +23,18 @@
 //! - [`model`]    — model settings + request builders over `ChatBackend`
 //! - [`session`]  — JSONL transcripts under `<state>/sessions/<uuid>.jsonl`
 //! - [`ipc`]      — follow-up input files and the `_close` sentinel
-//! - [`prompt`]   — system prompt (byte-stable) and turn messages
+//! - [`prompt`]   — system prompt (byte-stable, read-only `CLAUDE.md`) and
+//!   turn messages (fenced `MEMORY.md`, run notes)
 //! - [`tools`]    — tool registry, parallel execution, truncation, loop guard,
 //!   untrusted-output fencing
 //! - [`mcp`]      — `.mcp.json` loading and MCP manager setup
-//! - [`compact`]  — compaction cut points, summaries, Markdown archives
+//! - [`compact`]  — compaction cut points, summaries, lane-private Markdown
+//!   archives under `<state>/conversations/`
 //! - [`script`]   — scheduled-task pre-flight scripts
 //! - [`agent`]    — the turn / session loop
 //! - [`run`]      — `talon-agent run`
 //! - [`supervise`]— `talon-agent supervise`
+//! - [`mountinfo`]— read-only mount check for privileged MCP commands
 //! - [`error`]    — [`AgentError`]
 //!
 //! ## Testing the loop without HTTP
@@ -76,6 +79,7 @@ pub mod ipc;
 pub mod logging;
 pub mod mcp;
 pub mod model;
+pub mod mountinfo;
 pub mod prompt;
 pub mod run;
 pub mod script;

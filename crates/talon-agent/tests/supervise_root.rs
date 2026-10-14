@@ -1,6 +1,7 @@
 //! End-to-end test of `talon-agent supervise` (privileged path): the agent
 //! runs as `nobody`, an MCP server runs as a fake `mcp-echo` account behind
-//! the supervisor's unix socket, the model is a wiremock fake vLLM.
+//! the supervisor's unix socket, the model is a wiremock fake vLLM. The
+//! mount table is injected (read-only rootfs, writable `/usr/bin/env`).
 //!
 //! Needs root (setuid/setgid, chown) and `/usr/bin/python3`; skipped
 //! otherwise.
@@ -129,9 +130,23 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
         root.join("group/.mcp.json"),
         json!({"mcpServers": {
             "echo": {"command": "/usr/bin/python3", "args": [root.join("echo_mcp.py")], "runAs": "mcp-echo"},
-            "evil": {"command": root.join("echo_mcp.py"), "runAs": "mcp-echo"}
+            "evil": {"command": root.join("echo_mcp.py"), "runAs": "mcp-echo"},
+            "rwbin": {"command": "/usr/bin/env", "args": ["python3", root.join("echo_mcp.py")], "runAs": "mcp-echo"}
         }})
         .to_string(),
+    )
+    .unwrap();
+    // The supervisor only launches commands on read-only mounts. This
+    // sandbox's rootfs is writable, so hand it a table shaped like a
+    // `--read-only` container: read-only rootfs, with a writable file bind
+    // mount over `/usr/bin/env` (refused although under an allowed root).
+    let env_bin = std::fs::canonicalize("/usr/bin/env").unwrap_or_else(|_| "/usr/bin/env".into());
+    std::fs::write(
+        root.join("mountinfo"),
+        format!(
+            "1 0 0:1 / / ro,relatime - overlay overlay rw\n2 1 0:2 / /proc rw,nosuid - proc proc rw\n3 1 8:1 /x {} rw,relatime - ext4 /dev/sda1 rw\n",
+            env_bin.display()
+        ),
     )
     .unwrap();
 
@@ -159,6 +174,8 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
         .arg(&home_root)
         .arg("--passwd-file")
         .arg(root.join("passwd"))
+        .arg("--mountinfo-file")
+        .arg(root.join("mountinfo"))
         .env("RUN_UID", NOBODY.to_string())
         .env("RUN_GID", NOBODY.to_string())
         .env("TALON_LOG", "debug")
@@ -213,6 +230,7 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
     // The socket was consumed (unlinked after the single accept).
     assert!(std::fs::symlink_metadata(socket_dir.join("echo.sock")).is_err());
     assert!(std::fs::symlink_metadata(socket_dir.join("evil.sock")).is_err());
+    assert!(std::fs::symlink_metadata(socket_dir.join("rwbin.sock")).is_err());
     let meta = std::fs::metadata(&socket_dir).unwrap();
     assert_eq!(meta.mode() & 0o777, 0o750);
     assert_eq!((meta.uid(), meta.gid()), (0, NOBODY));
@@ -230,6 +248,7 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
     stderr.read_to_string(&mut logs).await.unwrap();
     assert!(status.success(), "{status:?}\n{logs}");
     assert!(logs.contains("refusing MCP server"), "{logs}");
+    assert!(logs.contains("is not on a read-only mount"), "{logs}");
     assert!(!logs.contains("tlgw-root-test-token-abcdef0123"));
 
     // The agent ran as nobody.
@@ -249,6 +268,7 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
         .collect();
     assert!(tools.contains(&"mcp__echo__echo"));
     assert!(!tools.iter().any(|t| t.starts_with("mcp__evil")));
+    assert!(!tools.iter().any(|t| t.starts_with("mcp__rwbin")));
     // Per-run notes travel in the first user message, keeping the system
     // prompt byte-stable across runs (vLLM prefix caching).
     let system = first["messages"][0]["content"].as_str().unwrap();

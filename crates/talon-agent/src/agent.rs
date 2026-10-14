@@ -47,7 +47,9 @@ use crate::wire::OutputSink;
 /// Where compaction archives go and how they are labelled.
 #[derive(Debug, Clone)]
 pub struct ArchiveOptions {
-    /// `<group>/conversations`; `None` disables archiving.
+    /// Lane-private archive directory (`<state>/conversations`, see
+    /// [`crate::config::AgentPaths::conversations`]); `None` disables
+    /// archiving.
     pub dir: Option<std::path::PathBuf>,
     /// Name used for assistant lines in the archive.
     pub assistant_name: String,

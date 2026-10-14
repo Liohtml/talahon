@@ -9,8 +9,11 @@
 //! 3. Parse `<group>/.mcp.json` (read-only mount; missing/empty = no
 //!    servers). For each server: `runAs` must be a valid, existing `mcp-*`
 //!    account (else `mcp-default`); the command must pass
-//!    `check_privileged_launch` under [`ALLOWED_MCP_ROOTS`] (else the server
-//!    is refused); it runs as that account with the minimal environment,
+//!    `check_privileged_launch` under [`ALLOWED_MCP_ROOTS`] **and** the
+//!    canonical command and its directory must be on a read-only mount of
+//!    this container (`/proc/self/mountinfo`, see [`crate::mountinfo`] and
+//!    [`CommandPolicy`]) — else the server is refused; it runs as that
+//!    account with the minimal environment,
 //!    `HOME=/run/talon/home/<server>` (0700, owned by the account),
 //!    `PYTHONSAFEPATH=1`, `PYTHONDONTWRITEBYTECODE=1`, in its own process
 //!    group, with the **command's directory** as cwd (never the
@@ -49,6 +52,7 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
 use crate::config::{RunArgs, RunConfig};
+use crate::mountinfo::{DEFAULT_MOUNTINFO, MountTable};
 use crate::wire::{OutputSink, StdoutSink, parse_input, read_capped};
 use crate::{logging, mcp, run};
 
@@ -59,8 +63,13 @@ pub const DEFAULT_HOME_ROOT: &str = "/run/talon/home";
 /// The agent's home (tmpfs; sessions are bind-mounted at `.talon`).
 pub const AGENT_HOME: &str = "/home/agent";
 /// Directories a privileged MCP command must live in (read-only mounts and
-/// image directories; never the agent-writable workspace).
-pub const ALLOWED_MCP_ROOTS: [&str; 5] = [
+/// image directories; never the agent-writable workspace). Being under one
+/// of them is not enough: [`CommandPolicy`] also requires the command to be
+/// on a read-only mount (the image rootfs is mounted read-only, so the check
+/// holds for the image directories too). `/workspace/project` is main's
+/// read-only project mount (`groups/main/.mcp.json` points there).
+pub const ALLOWED_MCP_ROOTS: [&str; 6] = [
+    "/workspace/project",
     "/workspace/extra",
     "/opt",
     "/usr/local/bin",
@@ -101,6 +110,9 @@ pub struct SuperviseArgs {
     /// Account database used to resolve `runAs` (tests only).
     #[arg(long, hide = true, default_value = "/etc/passwd")]
     pub passwd_file: PathBuf,
+    /// Mount table used for the read-only command check (tests only).
+    #[arg(long, hide = true, default_value = DEFAULT_MOUNTINFO)]
+    pub mountinfo_file: PathBuf,
 }
 
 /// Resolved supervisor configuration.
@@ -116,6 +128,8 @@ pub struct SuperviseConfig {
     pub agent_bin: Option<PathBuf>,
     /// Account database (`/etc/passwd`).
     pub passwd_file: PathBuf,
+    /// Mount table (`/proc/self/mountinfo`).
+    pub mountinfo_file: PathBuf,
 }
 
 impl SuperviseArgs {
@@ -127,6 +141,7 @@ impl SuperviseArgs {
             home_root: self.mcp_home_root,
             agent_bin: self.agent_bin,
             passwd_file: self.passwd_file,
+            mountinfo_file: self.mountinfo_file,
         }
     }
 }
@@ -270,13 +285,53 @@ pub struct LaunchPlan {
     pub note: Option<String>,
 }
 
+/// Where a privileged MCP command may come from.
+#[derive(Debug, Clone)]
+pub struct CommandPolicy {
+    /// The command must resolve under one of these ([`ALLOWED_MCP_ROOTS`]).
+    pub roots: Vec<PathBuf>,
+    /// The container's mount table: the canonical command and its
+    /// directory must be on read-only mounts.
+    pub mounts: MountTable,
+}
+
+impl CommandPolicy {
+    /// [`ALLOWED_MCP_ROOTS`] with `mounts`.
+    pub fn container(mounts: MountTable) -> Self {
+        Self {
+            roots: ALLOWED_MCP_ROOTS.iter().map(PathBuf::from).collect(),
+            mounts,
+        }
+    }
+
+    /// Validate `cfg` for a privileged launch and return the canonical
+    /// command path.
+    pub fn check(&self, name: &str, cfg: &ServerConfig) -> Result<PathBuf, String> {
+        let command = cfg
+            .check_privileged_launch(name, &self.roots)
+            .map_err(|e| e.to_string())?;
+        let dir = command
+            .parent()
+            .ok_or_else(|| "command has no parent directory".to_string())?;
+        for path in [command.as_path(), dir] {
+            if !self.mounts.is_read_only(path) {
+                return Err(format!(
+                    "server '{name}': {} is not on a read-only mount",
+                    path.display()
+                ));
+            }
+        }
+        Ok(command)
+    }
+}
+
 /// Decide whether and how to launch `name` (pure apart from resolving the
 /// command path). `Err` explains why the server is refused.
 pub fn plan_server(
     name: &str,
     cfg: &ServerConfig,
     passwd: &str,
-    allowed_roots: &[PathBuf],
+    policy: &CommandPolicy,
     socket_dir: &Path,
     home_root: &Path,
     agent: AgentIds,
@@ -305,9 +360,7 @@ pub fn plan_server(
     }
     let mut checked = cfg.clone();
     checked.run_as = Some(user.clone());
-    let command = checked
-        .check_privileged_launch(name, allowed_roots)
-        .map_err(|e| e.to_string())?;
+    let command = policy.check(name, &checked)?;
     let cwd = command
         .parent()
         .map(Path::to_path_buf)
@@ -647,6 +700,15 @@ pub async fn supervise_main(cfg: SuperviseConfig) -> i32 {
     for (name, error) in &mcp_config.invalid {
         tracing::warn!(server = %name, %error, "invalid MCP server entry ignored");
     }
+    let mounts = MountTable::load(&cfg.mountinfo_file).unwrap_or_else(|e| {
+        tracing::error!(
+            path = %cfg.mountinfo_file.display(),
+            error = %e,
+            "cannot read the mount table; every MCP server will be refused"
+        );
+        MountTable::default()
+    });
+    let policy = CommandPolicy::container(mounts);
     let dirs_ready = prepare_dir(&cfg.socket_dir, 0o750, 0, ids.gid)
         .and_then(|()| prepare_dir(&cfg.home_root, 0o711, 0, 0));
     match dirs_ready {
@@ -654,13 +716,12 @@ pub async fn supervise_main(cfg: SuperviseConfig) -> i32 {
             tracing::error!(error = %e, "cannot prepare MCP runtime directories; starting without MCP servers")
         }
         Ok(()) => {
-            let roots: Vec<PathBuf> = ALLOWED_MCP_ROOTS.iter().map(PathBuf::from).collect();
             for (name, server) in mcp_config.servers() {
                 let plan = match plan_server(
                     name,
                     server,
                     &passwd,
-                    &roots,
+                    &policy,
                     &cfg.socket_dir,
                     &cfg.home_root,
                     ids,
@@ -860,17 +921,38 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
         script
     }
 
+    /// A mount table with a writable rootfs and `ro_dir` (canonical)
+    /// mounted read-only on top.
+    fn table_with_ro(ro_dir: &Path) -> MountTable {
+        MountTable::parse(&format!(
+            "1 0 0:1 / / rw,relatime - ext4 /dev/a rw\n2 1 0:2 / {} ro,relatime - ext4 /dev/b rw\n",
+            mount_point(ro_dir)
+        ))
+    }
+
+    fn mount_point(p: &Path) -> String {
+        std::fs::canonicalize(p)
+            .unwrap()
+            .display()
+            .to_string()
+            .replace('\\', "\\134")
+            .replace(' ', "\\040")
+    }
+
     #[test]
     fn server_plans_enforce_policy() {
         let dir = tempfile::tempdir().unwrap();
         let script = script_in(dir.path());
-        let roots = vec![dir.path().join("bin")];
+        let policy = CommandPolicy {
+            roots: vec![dir.path().join("bin")],
+            mounts: table_with_ro(dir.path()),
+        };
         let sock = Path::new("/run/talon/mcp");
         let home = Path::new("/run/talon/home");
         let mut cfg = ServerConfig::new(script.display().to_string(), ["--x"]);
         cfg.run_as = Some("mcp-siem".into());
         cfg.cwd = Some(PathBuf::from("/workspace/group"));
-        let plan = plan_server("siem", &cfg, PASSWD, &roots, sock, home, agent()).unwrap();
+        let plan = plan_server("siem", &cfg, PASSWD, &policy, sock, home, agent()).unwrap();
         assert_eq!(plan.user, "mcp-siem");
         assert_eq!((plan.uid, plan.gid), (61001, 61001));
         assert_eq!(plan.socket, PathBuf::from("/run/talon/mcp/siem.sock"));
@@ -883,19 +965,19 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
 
         // Unknown / invalid runAs -> mcp-default with a note.
         cfg.run_as = Some("mcp-nobody".into());
-        let plan = plan_server("siem", &cfg, PASSWD, &roots, sock, home, agent()).unwrap();
+        let plan = plan_server("siem", &cfg, PASSWD, &policy, sock, home, agent()).unwrap();
         assert_eq!(plan.user, "mcp-default");
         assert!(plan.note.is_some());
         cfg.run_as = Some("root".into());
         assert_eq!(
-            plan_server("siem", &cfg, PASSWD, &roots, sock, home, agent())
+            plan_server("siem", &cfg, PASSWD, &policy, sock, home, agent())
                 .unwrap()
                 .user,
             "mcp-default"
         );
         cfg.run_as = None;
         assert_eq!(
-            plan_server("siem", &cfg, PASSWD, &roots, sock, home, agent())
+            plan_server("siem", &cfg, PASSWD, &policy, sock, home, agent())
                 .unwrap()
                 .user,
             "mcp-default"
@@ -903,11 +985,11 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
 
         // Privileged account refused.
         cfg.run_as = Some("mcp-evil".into());
-        assert!(plan_server("siem", &cfg, PASSWD, &roots, sock, home, agent()).is_err());
+        assert!(plan_server("siem", &cfg, PASSWD, &policy, sock, home, agent()).is_err());
         // Account sharing the agent's ids refused.
         cfg.run_as = Some("mcp-siem".into());
         let clash = AgentIds { uid: 61001, gid: 5 };
-        assert!(plan_server("siem", &cfg, PASSWD, &roots, sock, home, clash).is_err());
+        assert!(plan_server("siem", &cfg, PASSWD, &policy, sock, home, clash).is_err());
         // No mcp-default account at all.
         cfg.run_as = None;
         assert!(
@@ -915,7 +997,7 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
                 "siem",
                 &cfg,
                 "root:x:0:0::/:/bin/sh\n",
-                &roots,
+                &policy,
                 sock,
                 home,
                 agent()
@@ -931,7 +1013,10 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
                 "siem",
                 &cfg,
                 PASSWD,
-                &[other.path().to_path_buf()],
+                &CommandPolicy {
+                    roots: vec![other.path().to_path_buf()],
+                    mounts: table_with_ro(dir.path()),
+                },
                 sock,
                 home,
                 agent()
@@ -940,18 +1025,110 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
         );
         let mut rel = cfg.clone();
         rel.command = "server.sh".into();
-        assert!(plan_server("siem", &rel, PASSWD, &roots, sock, home, agent()).is_err());
+        assert!(plan_server("siem", &rel, PASSWD, &policy, sock, home, agent()).is_err());
         let mut bad_env = cfg.clone();
         bad_env.env.insert("LD_PRELOAD".into(), "/tmp/x.so".into());
-        assert!(plan_server("siem", &bad_env, PASSWD, &roots, sock, home, agent()).is_err());
+        assert!(plan_server("siem", &bad_env, PASSWD, &policy, sock, home, agent()).is_err());
         // Symlink escaping the root is resolved and refused.
         let link = dir.path().join("bin").join("link.sh");
         std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
         let mut linked = cfg.clone();
         linked.command = link.display().to_string();
-        assert!(plan_server("siem", &linked, PASSWD, &roots, sock, home, agent()).is_err());
+        assert!(plan_server("siem", &linked, PASSWD, &policy, sock, home, agent()).is_err());
         // Bad server name.
-        assert!(plan_server("../x", &cfg, PASSWD, &roots, sock, home, agent()).is_err());
+        assert!(plan_server("../x", &cfg, PASSWD, &policy, sock, home, agent()).is_err());
+    }
+
+    #[test]
+    fn commands_must_be_on_read_only_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = script_in(dir.path());
+        let canonical = std::fs::canonicalize(&script).unwrap();
+        let sock = Path::new("/run/talon/mcp");
+        let home = Path::new("/run/talon/home");
+        let mut cfg = ServerConfig::new(script.display().to_string(), ["--x"]);
+        cfg.run_as = Some("mcp-siem".into());
+        let roots = vec![dir.path().join("bin")];
+        let plan = |mounts: MountTable| {
+            plan_server(
+                "siem",
+                &cfg,
+                PASSWD,
+                &CommandPolicy {
+                    roots: roots.clone(),
+                    mounts,
+                },
+                sock,
+                home,
+                agent(),
+            )
+        };
+
+        // Read-only mount: allowed.
+        assert!(plan(table_with_ro(dir.path())).is_ok());
+        // Under an allowed root but on a writable mount: refused.
+        let rw = MountTable::parse(&format!(
+            "1 0 0:1 / / ro - ext4 /dev/a ro\n2 1 0:2 / {} rw,relatime - ext4 /dev/b rw\n",
+            mount_point(dir.path())
+        ));
+        let err = plan(rw).unwrap_err();
+        assert!(err.contains("is not on a read-only mount"), "{err}");
+        // A writable file bind-mounted over the command: refused.
+        let file_rw = MountTable::parse(&format!(
+            "1 0 0:1 / / ro - ext4 /dev/a ro\n2 1 0:2 / {} rw - ext4 /dev/b rw\n",
+            mount_point(&canonical)
+        ));
+        assert!(plan(file_rw).is_err());
+        // A writable directory with a read-only command file bound into it
+        // (the cwd would be writable): refused.
+        let dir_rw = MountTable::parse(&format!(
+            "1 0 0:1 / / rw - ext4 /dev/a rw\n2 1 0:2 / {} ro - ext4 /dev/b ro\n",
+            mount_point(&canonical)
+        ));
+        assert!(plan(dir_rw).is_err());
+        // No usable mount table: everything is refused (fail closed).
+        assert!(plan(MountTable::default()).is_err());
+    }
+
+    #[test]
+    fn container_policy_allows_main_project_mount() {
+        let policy = CommandPolicy::container(MountTable::default());
+        assert!(policy.roots.contains(&PathBuf::from("/workspace/project")));
+        assert!(policy.roots.contains(&PathBuf::from("/workspace/extra")));
+        assert!(
+            !policy
+                .roots
+                .iter()
+                .any(|r| r.starts_with("/workspace/group") || r.starts_with("/tmp"))
+        );
+        // Shaped like main's container: the project is a read-only bind
+        // mount, the group folder is writable.
+        let mounts = MountTable::parse(
+            "10 1 0:1 / / ro,relatime - overlay overlay rw\n\
+             11 10 8:1 /srv/talon /workspace/project ro,relatime - ext4 /dev/sda1 rw\n\
+             12 10 8:1 /srv/talon/groups/main /workspace/group rw,relatime - ext4 /dev/sda1 rw\n",
+        );
+        assert!(mounts.is_read_only(Path::new("/workspace/project/mysql/mysql-mcp.sh")));
+        assert!(mounts.is_read_only(Path::new("/workspace/project/mysql")));
+        assert!(mounts.is_read_only(Path::new("/usr/bin/python3")));
+        assert!(!mounts.is_read_only(Path::new("/workspace/group/evil.sh")));
+    }
+
+    #[test]
+    fn supervise_args_take_a_mountinfo_override() {
+        use clap::Parser;
+        #[derive(Debug, Parser)]
+        struct Cli {
+            #[command(flatten)]
+            supervise: SuperviseArgs,
+        }
+        let cfg = Cli::try_parse_from(["t"]).unwrap().supervise.into_config();
+        assert_eq!(cfg.mountinfo_file, PathBuf::from(DEFAULT_MOUNTINFO));
+        let cfg = Cli::try_parse_from(["t", "--mountinfo-file", "/x/mi"])
+            .unwrap()
+            .supervise
+            .into_config();
+        assert_eq!(cfg.mountinfo_file, PathBuf::from("/x/mi"));
     }
 
     #[test]

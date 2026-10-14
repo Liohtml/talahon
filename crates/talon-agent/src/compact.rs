@@ -8,13 +8,16 @@
 //! 2. summarizes the head with the fast model ([`summary_request`],
 //!    [`parse_summary`]), falling back to a mechanical digest
 //!    ([`fallback_summary`]) if the model call fails;
-//! 3. archives the full pre-compaction transcript as Markdown into
-//!    `<group>/conversations/` ([`archive_markdown`], [`write_archive`]) —
-//!    the port of the TypeScript PreCompact hook;
+//! 3. archives the full pre-compaction transcript as Markdown into the
+//!    lane-private `<state>/conversations/` (dir 0700, files 0600;
+//!    [`archive_markdown`], [`write_archive`]) — the port of the TypeScript
+//!    PreCompact hook. Unlike the TypeScript runtime, archives never go to
+//!    the group folder: every lane on a folder shares it (MYTH-03);
 //! 4. replaces the head with [`summary_messages`].
 
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -308,14 +311,23 @@ pub fn archive_markdown(
 
 /// Write an archive as `<dir>/<YYYY-MM-DD>-<name>.md` without overwriting
 /// an existing file (`-2`, `-3`, ... suffixes). `name` falls back to
-/// `conversation-HHMM`.
+/// `conversation-HHMM`. `dir` is created private (0700; a symlink or
+/// non-directory is refused) and the file is created 0600.
 pub fn write_archive(
     dir: &Path,
     now: DateTime<chrono_tz::Tz>,
     title: Option<&str>,
     content: &str,
 ) -> std::io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
+    crate::session::ensure_private_dir(dir)?;
+    // Tighten a directory left with looser modes (best effort: the
+    // directory is this lane's own).
+    let loose = std::fs::symlink_metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
+    if loose {
+        if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+            tracing::debug!(dir = %dir.display(), error = %e, "cannot tighten the archive directory");
+        }
+    }
     let name = title
         .map(sanitize_filename)
         .filter(|n| !n.is_empty())
@@ -328,7 +340,12 @@ pub fn write_archive(
             format!("{date}-{name}-{n}.md")
         };
         let path = dir.join(file);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
             Ok(mut f) => {
                 f.write_all(content.as_bytes())?;
                 return Ok(path);
@@ -471,12 +488,42 @@ mod tests {
         assert!(md.contains(&format!("**Andy**: {}...", "y".repeat(2_000))));
         assert!(!md.contains("hidden"));
 
-        let p1 = write_archive(dir.path(), now, Some("Alert triage"), &md).unwrap();
-        let p2 = write_archive(dir.path(), now, Some("Alert triage"), &md).unwrap();
+        let archives = dir.path().join("state").join("conversations");
+        let p1 = write_archive(&archives, now, Some("Alert triage"), &md).unwrap();
+        let p2 = write_archive(&archives, now, Some("Alert triage"), &md).unwrap();
         assert!(p1.ends_with("2026-10-14-alert-triage.md"));
         assert!(p2.ends_with("2026-10-14-alert-triage-2.md"));
-        let p3 = write_archive(dir.path(), now, None, "x").unwrap();
+        let p3 = write_archive(&archives, now, None, "x").unwrap();
         assert!(p3.ends_with("2026-10-14-conversation-0947.md"));
         let _ = now_in(tz);
+    }
+
+    #[test]
+    fn archives_are_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now().with_timezone(&chrono_tz::UTC);
+        let archives = dir.path().join("state").join("conversations");
+        let p = write_archive(&archives, now, Some("t"), "secret transcript").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&archives), 0o700);
+        assert_eq!(mode(&p), 0o600);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "secret transcript");
+        // A pre-existing, looser directory is tightened.
+        std::fs::set_permissions(&archives, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_archive(&archives, now, Some("t"), "again").unwrap();
+        assert_eq!(mode(&archives), 0o700);
+
+        // A symlinked archive directory (e.g. planted to redirect archives
+        // into a shared folder) is refused.
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let link = dir.path().join("linked");
+        std::os::unix::fs::symlink(&shared, &link).unwrap();
+        assert!(write_archive(&link, now, Some("t"), "x").is_err());
+        assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 0);
+        // So is a file in its place.
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(write_archive(&file, now, Some("t"), "x").is_err());
     }
 }
