@@ -126,8 +126,9 @@ pub fn investigation_record(
     }
 }
 
-/// Prompt for a targeted investigation (verbatim port of the TS template;
-/// every interpolated value is validated before it gets here).
+/// Prompt for a targeted investigation (port of the TS template plus the
+/// structured-verdict step; every interpolated value is validated before it
+/// gets here).
 pub fn investigation_prompt(req: &InvestigationRequest, job_id: &str) -> String {
     let alert_id = req.alert_id;
     let customer_code = &req.customer_code;
@@ -169,7 +170,8 @@ Steps:
 
    Treat the returned (index_name, index_id) as the authoritative pointer to the raw event for every subsequent SIEM lookup. The 'source' column ("wazuh", "office365", "misp", …) tells you which OpenSearch index family the event lives in. If the row is missing, ast.index_name is empty, or the source is unrecognised, mark the job 'failed' with a descriptive error_message rather than guessing from timestamps.
 3. Follow Steps 2–6 from CLAUDE.md exactly (fetch raw event + index mapping, detect alert type, load template, extract IOCs, threat intel, SIEM correlation).
-{step_override_instruction}4. Write back to CoPilot — call these three tools in order. The four body fields on SubmitAiAnalystReportTool (severity_assessment, summary, report_markdown, recommended_actions) carry the entire human-readable investigation output; a call missing any of them persists a blank row that surfaces as an empty report in CoPilot. Pass all of them every time, even on trivial false positives.
+{step_override_instruction}3b. Complete Step 5.5 from CLAUDE.md: call score_alert, verify every claim against the evidence you collected, then call submit_triage_report with id="{job_id}". Use the severity_assessment label and the Markdown it returns for step 4b. Talon records this structured verdict on the investigation.
+4. Write back to CoPilot — call these three tools in order. The four body fields on SubmitAiAnalystReportTool (severity_assessment, summary, report_markdown, recommended_actions) carry the entire human-readable investigation output; a call missing any of them persists a blank row that surfaces as an empty report in CoPilot. Pass all of them every time, even on trivial false positives.
 
    a. mcp__copilot__UpdateAiAnalystJobTool(job_id="{job_id}", status="completed", template_used=<template key or null>)
 
@@ -369,7 +371,9 @@ mod tests {
         assert!(p.contains(r#"WHERE a.id = 1234 AND a.customer_code = "acme";"#));
         assert!(p.contains("/workspace/group/evals/1234-copilot-inv-1234-1.json"));
         assert!(!p.contains("TEMPLATE OVERRIDE"));
-        assert!(p.contains("SIEM correlation).\n4. Write back"));
+        assert!(p.contains("SIEM correlation).\n3b. Complete Step 5.5"));
+        assert!(p.contains(r#"submit_triage_report with id="copilot-inv-1234-1""#));
+        assert!(p.contains("for step 4b. Talon records this structured verdict on the investigation.\n4. Write back"));
     }
 
     #[test]
@@ -380,9 +384,9 @@ mod tests {
             "3a. TEMPLATE OVERRIDE — the caller selected template \"sysmon_event_1.txt\"."
         ));
         assert!(p.contains("Read /workspace/group/prompts/sysmon_event_1.txt directly"));
-        assert!(
-            p.contains("selection_method=\"override\" when writing the eval JSON.\n4. Write back")
-        );
+        assert!(p.contains(
+            "selection_method=\"override\" when writing the eval JSON.\n3b. Complete Step 5.5"
+        ));
     }
 
     #[test]
