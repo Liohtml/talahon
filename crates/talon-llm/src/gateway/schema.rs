@@ -102,7 +102,9 @@ pub const SCHEMA_ALLOWED_FORMATS: [&str; 9] = [
 ];
 
 /// Upper bound for `minLength`, `maxLength`, `minItems` and `maxItems`.
-pub const MAX_SCHEMA_LENGTH_BOUND: u64 = 65_536;
+/// Kept small (the agent's own schemas stay below 2 000) because nested
+/// bounds multiply in grammar-based guided decoding (Mythos round 3).
+pub const MAX_SCHEMA_LENGTH_BOUND: u64 = 4_096;
 
 /// Cap on the values of one `enum`.
 pub const MAX_SCHEMA_ENUM_VALUES: usize = 512;

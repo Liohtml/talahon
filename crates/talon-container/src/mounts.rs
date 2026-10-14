@@ -106,6 +106,14 @@ pub const GROUP_INSTRUCTIONS_FILE: &str = "CLAUDE.md";
 /// operator instructions (a Markdown comment, invisible to readers).
 const EMPTY_INSTRUCTIONS_PLACEHOLDER: &str =
     "<!-- Operator-maintained group instructions (read-only inside containers). -->\n";
+/// Further operator files the trusted `CLAUDE.md` tells the model to read
+/// and follow (e.g. CoPilot's notification fan-out guide). Bound read-only,
+/// with a placeholder created when missing, for the same reason as
+/// `CLAUDE.md` (R3-1).
+pub const GROUP_OPERATOR_FILES: &[&str] = &["notifications.md"];
+/// Content of host-created placeholders for missing operator files.
+const EMPTY_OPERATOR_FILE_PLACEHOLDER: &str =
+    "<!-- Operator-maintained file (read-only inside containers). -->\n";
 /// Agent-writable memory file (stays writable; loaded as untrusted data).
 pub const GROUP_MEMORY_FILE: &str = "MEMORY.md";
 /// Investigation templates the model follows as instructions: always
@@ -136,12 +144,31 @@ const SECRET_FILE_NAMES: &[&str] = &[
     "private_key",
     ".secret",
     ".secrets",
+    ".my.cnf",
+    ".mylogin.cnf",
+    "kubeconfig",
+    ".kubeconfig",
+    ".vault-token",
+    "terraform.tfstate",
+    "terraform.tfstate.backup",
+    "service-account.json",
+    "service_account.json",
+    "application_default_credentials.json",
+    "client_secret.json",
+    "client_secrets.json",
+    ".htpasswd",
+    "htpasswd",
+    "shadow",
 ];
 /// Lower-case file name prefixes treated as credentials.
 const SECRET_FILE_PREFIXES: &[&str] = &[".env.", "credentials"];
 /// Lower-case file name suffixes treated as credentials.
 const SECRET_FILE_SUFFIXES: &[&str] = &[
     ".env",
+    ".tfstate",
+    "-sa.json",
+    "-service-account.json",
+    ".ovpn",
     ".pem",
     ".key",
     ".p12",
@@ -160,6 +187,8 @@ const SECRET_DIR_NAMES: &[&str] = &[
     ".gcloud",
     ".kube",
     ".password-store",
+    ".docker",
+    ".vault",
 ];
 /// Large generated trees the scan of a **read-only** mount does not descend
 /// into. Writable mounts are walked completely: the agent could otherwise
@@ -1321,6 +1350,14 @@ pub fn build_mounts(req: &MountRequest<'_>) -> Result<Vec<VolumeMount>> {
     )? {
         mounts.push(instructions);
     }
+    // R3-1: other operator files CLAUDE.md tells the model to follow.
+    for file in GROUP_OPERATOR_FILES {
+        if let Some(m) =
+            bind_group_file(req, &group_dir, file, Some(EMPTY_OPERATOR_FILE_PLACEHOLDER))?
+        {
+            mounts.push(m);
+        }
+    }
     // N-2: investigation templates the model follows as instructions.
     mounts.push(bind_group_dir(req, &group_dir, GROUP_PROMPTS_DIR)?);
 
@@ -2198,6 +2235,59 @@ mod tests {
     }
 
     // --- MYTH-09: CLAUDE.md read-only ---
+
+    #[test]
+    fn operator_files_are_bound_read_only_with_placeholders() {
+        let fx = fixture();
+        let dir = fx.root.join("groups/team");
+        fs::create_dir_all(&dir).unwrap();
+        // Missing: a host placeholder is created and bound read-only, so an
+        // agent cannot plant instructions that CLAUDE.md tells the model to follow.
+        let mounts = build(&fx, &group("team", false), false, &DenyAllMounts, None).unwrap();
+        let m = find(&mounts, "/workspace/group/notifications.md").unwrap();
+        assert!(m.readonly);
+        assert_eq!(
+            fs::read_to_string(dir.join("notifications.md")).unwrap(),
+            EMPTY_OPERATOR_FILE_PLACEHOLDER
+        );
+        // Operator content stays as is and is still read-only.
+        fs::write(dir.join("notifications.md"), "operator guide").unwrap();
+        let mounts = build(&fx, &group("team", false), false, &DenyAllMounts, None).unwrap();
+        assert!(
+            find(&mounts, "/workspace/group/notifications.md")
+                .unwrap()
+                .readonly
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("notifications.md")).unwrap(),
+            "operator guide"
+        );
+        // A symlinked operator file refuses the launch.
+        fs::remove_file(dir.join("notifications.md")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("notifications.md")).unwrap();
+        assert!(build(&fx, &group("team", false), false, &DenyAllMounts, None).is_err());
+    }
+
+    #[test]
+    fn more_credential_file_names_are_recognized() {
+        for name in [
+            ".my.cnf",
+            "kubeconfig",
+            ".vault-token",
+            "terraform.tfstate",
+            "prod.tfstate",
+            "deploy-sa.json",
+            "client_secret.json",
+            "service-account.json",
+            "vpn.ovpn",
+        ] {
+            assert!(is_secret_file_name(name), "{name}");
+        }
+        assert!(is_secret_dir_name(".docker"));
+        for name in ["README.md", "settings.json", "package.json", "state.json"] {
+            assert!(!is_secret_file_name(name), "{name}");
+        }
+    }
 
     #[test]
     fn group_claude_md_is_bound_read_only() {

@@ -393,6 +393,10 @@ impl LlmGateway {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(SWEEP_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick of an interval fires immediately; nothing can
+            // have expired at start-up, so skip it (it would otherwise race
+            // with the first tokens issued).
+            tick.tick().await;
             loop {
                 tokio::select! {
                     () = sweep_cancel.cancelled() => break,

@@ -97,6 +97,24 @@ impl Drop for PeerGuard {
     }
 }
 
+/// `Connection: close` for unauthenticated requests and error responses.
+async fn close_unauthenticated(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let has_credentials = req.headers().contains_key(http::header::AUTHORIZATION)
+        || req.headers().contains_key("x-api-key");
+    let mut res = next.run(req).await;
+    let status = res.status();
+    if !has_credentials || status.is_client_error() || status.is_server_error() {
+        res.headers_mut().insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+    }
+    res
+}
+
 /// Serve `router` on `listener` until `shutdown` is cancelled.
 ///
 /// Returns once the listener has stopped and open connections have drained
@@ -127,6 +145,11 @@ pub async fn serve(
         .header_read_timeout(limits.header_read_timeout)
         .keep_alive(true);
     let builder = Arc::new(builder);
+    // R3-2: a client may keep a connection slot only while it authenticates.
+    // Responses to requests without credentials, and every client/server
+    // error, close the connection, so an unauthenticated client cannot hold
+    // slots forever by repeating cheap requests on a kept-alive connection.
+    let router = router.layer(axum::middleware::from_fn(close_unauthenticated));
 
     loop {
         let accepted = tokio::select! {
@@ -301,6 +324,47 @@ mod tests {
         let mut rest = Vec::new();
         let read = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut rest)).await;
         assert!(read.is_ok(), "idle keep-alive connection must be closed");
+        token.cancel();
+    }
+
+    async fn keep_alive_status(addr: SocketAddr, request: &[u8]) -> (String, bool) {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(request).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = s.read(&mut buf).await.unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+        // Closed by the server right after the response?
+        let mut rest = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_millis(500), s.read_to_end(&mut rest))
+            .await
+            .is_ok();
+        (head, closed)
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_requests_do_not_keep_connections_alive() {
+        let (addr, token) = start(ServerLimits::default()).await;
+        let (head, closed) = keep_alive_status(addr, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        assert!(head.starts_with("http/1.1 200"));
+        assert!(head.contains("connection: close"));
+        assert!(closed, "unauthenticated connection must be closed");
+        // Errors close even with credentials.
+        let (head, closed) = keep_alive_status(
+            addr,
+            b"GET /missing HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n\r\n",
+        )
+        .await;
+        assert!(head.starts_with("http/1.1 404"));
+        assert!(closed);
+        // Authenticated successful requests keep the connection.
+        let (head, closed) = keep_alive_status(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\n\r\n",
+        )
+        .await;
+        assert!(head.starts_with("http/1.1 200"));
+        assert!(!head.contains("connection: close"));
+        assert!(!closed);
         token.cancel();
     }
 

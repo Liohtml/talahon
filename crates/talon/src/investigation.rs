@@ -97,9 +97,14 @@ pub fn alert_report_id(alert_id: &str) -> Option<String> {
     (!derived.is_empty() && is_safe_report_id(derived)).then(|| derived.to_string())
 }
 
+/// Clock-skew allowance for report modification times.
+const MAX_REPORT_CLOCK_SKEW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Read one report file from the open `reports/` directory. `not_before`:
-/// ignore files last modified before this time (stale reports of an
-/// earlier run).
+/// accept only files last modified between this time and now (+ a small
+/// clock-skew allowance). Older files are stale reports of an earlier run;
+/// files dated in the future were planted ahead of time by an earlier
+/// investigation in the same lane (R3-3).
 fn read_report_at(
     reports: BorrowedFd<'_>,
     id: &str,
@@ -117,8 +122,13 @@ fn read_report_at(
             return None;
         }
     };
-    if let (Some(limit), Ok(modified)) = (not_before, meta.modified()) {
-        if modified < limit {
+    if let Some(limit) = not_before {
+        let Ok(modified) = meta.modified() else {
+            return None;
+        };
+        let latest = SystemTime::now() + MAX_REPORT_CLOCK_SKEW;
+        if modified < limit || modified > latest {
+            tracing::warn!(report = %name, "ignoring investigation report outside the run's time window");
             return None;
         }
     }
@@ -399,6 +409,23 @@ mod tests {
         assert!(load_verdict(&data, "copilot-u-alice", "job-1", "42", past()).is_none());
         // No sessions dir at all.
         assert!(load_verdict(&data.join("nowhere"), LANE, "job-1", "42", past()).is_none());
+    }
+
+    #[test]
+    fn alert_reports_dated_in_the_future_are_rejected() {
+        // R3-3: an earlier investigation in the same lane plants a verdict
+        // for a later alert with a future mtime.
+        let (_dir, data, reports) = layout();
+        let path = reports.join("101.json");
+        std::fs::write(&path, r#"{"verdict":"false_positive"}"#).unwrap();
+        let in_a_year = SystemTime::now() + std::time::Duration::from_secs(365 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(in_a_year)
+            .unwrap();
+        assert!(load_verdict(&data, LANE, "job-9", "101", past()).is_none());
     }
 
     #[test]
