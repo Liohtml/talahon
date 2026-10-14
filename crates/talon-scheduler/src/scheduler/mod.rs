@@ -11,6 +11,16 @@
 //! lane) runs **once** and is then rescheduled from the time it finished —
 //! cron tasks to the next occurrence after now, interval tasks to the next
 //! grid point after now. Missed runs are never replayed in a burst.
+//!
+//! Lane policy (N-1): a task only ever runs in the lane it was created for —
+//! the group registered at its own `chat_jid` with its own folder. Lanes of
+//! the same folder are *not* interchangeable: each carries its own session
+//! key, IPC namespace and output stream (per-user CoPilot lanes all share
+//! the `copilot` folder). When the task's lane is not registered (in-memory
+//! lanes after a host restart or an idle sweep) or is registered for another
+//! folder, the run is deferred with capped backoff and never completed, so it
+//! runs in its own lane once that lane is registered again. Unlike the TS
+//! port there is no fallback to another JID of the same folder.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -225,6 +235,9 @@ pub enum SkipReason {
     NotActive,
     /// Rescheduled into the future while queued.
     NotDue,
+    /// The host handed the task to a lane other than its own `chat_jid`.
+    /// Nothing is changed, so the next poll enqueues it in its own lane.
+    WrongLane,
     /// The store could not be read.
     StoreError(String),
 }
@@ -264,7 +277,8 @@ pub enum TaskRunOutcome {
         /// Logged error.
         error: String,
     },
-    /// The group is not registered (yet); retried later with backoff.
+    /// The task's own lane is not registered (yet) for its folder; retried
+    /// later with backoff. The task never runs in another lane meanwhile.
     Deferred {
         /// Logged error.
         error: String,
@@ -413,7 +427,10 @@ impl TaskScheduler {
 
     /// Run one task now (called from the host's `LaneProcessor::run_task`
     /// while the lane is held). Re-reads the task, so tasks paused,
-    /// deleted or rescheduled while queued are skipped.
+    /// deleted or rescheduled while queued are skipped. The task only runs
+    /// in its own lane (`chat_jid == task.chat_jid`, registered for the
+    /// task's folder); otherwise it is skipped or deferred, never run in
+    /// another lane of the same folder (see the module docs).
     pub async fn run_task(&self, chat_jid: &str, task_id: &str) -> TaskRunOutcome {
         let started = Instant::now();
         let now = self.clock.now();
@@ -457,9 +474,27 @@ impl TaskScheduler {
             return TaskRunOutcome::Paused { error };
         }
 
+        // The lane the queue holds must be the task's own: the container is
+        // registered under `chat_jid` while the group (session, IPC
+        // namespace) comes from `task.chat_jid`. Never mix two lanes.
+        if chat_jid != task.chat_jid {
+            warn!(
+                task_id,
+                lane = chat_jid,
+                task_lane = %task.chat_jid,
+                "task was handed to a lane other than its own; skipping"
+            );
+            return skipped(SkipReason::WrongLane);
+        }
+
         let groups = self.groups.registered_groups();
-        let Some(group) = resolve_group(&groups, &task) else {
-            return self.defer_missing_group(&task, now, started).await;
+        let group = match resolve_group(&groups, &task) {
+            Ok(group) => group,
+            Err(unresolved) => {
+                return self
+                    .defer_unresolved_lane(&task, &unresolved, now, started)
+                    .await;
+            }
         };
 
         let attempt = self.failure_count(&task.id);
@@ -474,7 +509,7 @@ impl TaskScheduler {
             );
         }
         let ctx = TaskRunContext {
-            chat_jid: chat_jid.to_string(),
+            chat_jid: task.chat_jid.clone(),
             is_main: group.is_main,
             context_mode: task.context_mode,
             timeout: self.run_timeout_for(&group),
@@ -584,17 +619,45 @@ impl TaskScheduler {
         })
     }
 
-    /// The task's group is not registered: log, then retry later with
-    /// backoff (capped) instead of re-running it on every poll. Never
-    /// completes the task, so it runs once the lane is registered again.
-    async fn defer_missing_group(
+    /// The task's own lane is not registered for its folder: log, then retry
+    /// later with backoff (capped) instead of re-running it on every poll.
+    /// Never completes the task and never runs it in another lane, so it runs
+    /// in its own lane once that lane is registered again.
+    async fn defer_unresolved_lane(
         &self,
         task: &ScheduledTask,
+        unresolved: &UnresolvedLane,
         now: DateTime<Utc>,
         started: Instant,
     ) -> TaskRunOutcome {
-        let error = format!("Group not found: {}", task.group_folder);
-        error!(task_id = %task.id, group_folder = %task.group_folder, "group not found for task");
+        let error = match unresolved {
+            UnresolvedLane::FolderMismatch { registered_folder } => {
+                error!(
+                    task_id = %task.id,
+                    lane = %task.chat_jid,
+                    group_folder = %task.group_folder,
+                    registered_folder = %registered_folder,
+                    "task's lane is registered for another folder; deferring"
+                );
+                format!(
+                    "Group not found: {} (lane {:?} is registered for folder {:?})",
+                    task.group_folder, task.chat_jid, registered_folder
+                )
+            }
+            UnresolvedLane::NotRegistered => {
+                // Expected for in-memory lanes after a restart or idle sweep.
+                warn!(
+                    task_id = %task.id,
+                    lane = %task.chat_jid,
+                    group_folder = %task.group_folder,
+                    "task's lane is not registered; deferring"
+                );
+                format!(
+                    "Group not found: {} (lane {:?} is not registered)",
+                    task.group_folder, task.chat_jid
+                )
+            }
+        };
         self.log_run(&task.id, now, started.elapsed(), None, Some(error.clone()))
             .await;
         let failures = self.record_failure(&task.id);
@@ -747,24 +810,37 @@ fn skipped(reason: SkipReason) -> TaskRunOutcome {
     TaskRunOutcome::Skipped { reason }
 }
 
-/// The group the task runs in: the group registered at the task's JID if
-/// its folder matches, else (TS behaviour) a group with the task's folder —
-/// the lexicographically smallest JID, for determinism.
+/// Why a task's own lane could not be resolved (the run is deferred).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnresolvedLane {
+    /// Nothing is registered at the task's `chat_jid`.
+    NotRegistered,
+    /// The task's `chat_jid` is registered, but for another folder.
+    FolderMismatch {
+        /// The folder the JID is registered for.
+        registered_folder: String,
+    },
+}
+
+/// The group the task runs in: the group registered at the task's own JID,
+/// and only if its folder matches the task's.
+///
+/// Deliberately no fallback to another JID with the same folder (the TS
+/// `find(g => g.folder === task.group_folder)`, N-1): lanes sharing a folder
+/// have distinct session keys, IPC namespaces and output streams, so running
+/// a per-user lane's task in, e.g., the base lane would hand it that lane's
+/// session and IPC identity.
 pub(crate) fn resolve_group(
     groups: &HashMap<String, RegisteredGroup>,
     task: &ScheduledTask,
-) -> Option<RegisteredGroup> {
-    if let Some(group) = groups
-        .get(&task.chat_jid)
-        .filter(|g| g.folder == task.group_folder)
-    {
-        return Some(group.clone());
+) -> Result<RegisteredGroup, UnresolvedLane> {
+    match groups.get(&task.chat_jid) {
+        Some(group) if group.folder == task.group_folder => Ok(group.clone()),
+        Some(group) => Err(UnresolvedLane::FolderMismatch {
+            registered_folder: group.folder.clone(),
+        }),
+        None => Err(UnresolvedLane::NotRegistered),
     }
-    groups
-        .iter()
-        .filter(|(_, g)| g.folder == task.group_folder)
-        .min_by(|(a, _), (b, _)| a.cmp(b))
-        .map(|(_, g)| g.clone())
 }
 
 /// Keep `next` strictly after `now` (defensive; schedules already are).

@@ -590,10 +590,11 @@ async fn missing_group_defers_with_backoff_instead_of_spinning() {
     ));
 
     let outcome = h.scheduler.run_task(MAIN_JID, "orphan").await;
+    let not_found = format!("Group not found: main (lane {MAIN_JID:?} is not registered)");
     assert_eq!(
         outcome,
         TaskRunOutcome::Deferred {
-            error: "Group not found: main".into(),
+            error: not_found.clone(),
             next_run: at(60),
         }
     );
@@ -605,7 +606,7 @@ async fn missing_group_defers_with_backoff_instead_of_spinning() {
     );
     assert_eq!(task.last_run, None);
     let logs = h.store.run_logs("orphan");
-    assert_eq!(logs[0].error.as_deref(), Some("Group not found: main"));
+    assert_eq!(logs[0].error.as_deref(), Some(not_found.as_str()));
 
     // Second attempt backs off further (120 s).
     sleep(Duration::from_secs(60)).await;
@@ -623,8 +624,8 @@ async fn missing_group_defers_with_backoff_instead_of_spinning() {
     assert_eq!(h.task("orphan").status, TaskStatus::Completed);
 }
 
-#[tokio::test(start_paused = true)]
-async fn group_is_resolved_by_jid_then_folder() {
+#[test]
+fn group_is_resolved_only_by_the_tasks_own_jid() {
     let mut groups = HashMap::new();
     let mut a = group("A", "shared", false);
     a.ipc_key = Some("lane-a".into());
@@ -637,15 +638,276 @@ async fn group_is_resolved_by_jid_then_folder() {
 
     task.chat_jid = "b@x".into();
     assert_eq!(resolve_group(&groups, &task).unwrap().name, "B");
-    // Unknown JID: deterministic folder fallback.
-    task.chat_jid = "zzz@x".into();
+    task.chat_jid = "a@x".into();
     assert_eq!(resolve_group(&groups, &task).unwrap().name, "A");
-    // JID registered with another folder: fall back to the folder.
+    // Unknown JID: no fallback to another lane of the same folder (N-1).
+    task.chat_jid = "zzz@x".into();
+    assert_eq!(
+        resolve_group(&groups, &task),
+        Err(UnresolvedLane::NotRegistered)
+    );
+    // JID registered with another folder: not run there, not elsewhere.
     groups.insert("c@x".to_string(), group("C", "other", false));
     task.chat_jid = "c@x".into();
-    assert_eq!(resolve_group(&groups, &task).unwrap().name, "A");
+    assert_eq!(
+        resolve_group(&groups, &task),
+        Err(UnresolvedLane::FolderMismatch {
+            registered_folder: "other".into()
+        })
+    );
     task.group_folder = "nope".into();
-    assert!(resolve_group(&groups, &task).is_none());
+    task.chat_jid = "a@x".into();
+    assert!(resolve_group(&groups, &task).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// N-1: a task never runs in another lane of its folder
+// ---------------------------------------------------------------------------
+
+const BASE_JID: &str = "http:copilot";
+const INVESTIGATE_JID: &str = "http:copilot:investigate";
+const ALICE_JID: &str = "http:copilot:u:alice";
+const BOB_JID: &str = "http:copilot:u:bob";
+
+/// A CoPilot lane: shared `copilot` folder, own session/IPC keys unless
+/// `key` is `None` (the anonymous base lane keys off the folder).
+fn copilot_lane(name: &str, key: Option<&str>) -> RegisteredGroup {
+    RegisteredGroup {
+        session_key: key.map(Into::into),
+        ipc_key: key.map(Into::into),
+        trusted_session_commands: true,
+        ..group(name, "copilot", false)
+    }
+}
+
+/// The persisted lanes that survive a host restart.
+fn persisted_copilot_lanes() -> [(String, RegisteredGroup); 2] {
+    [
+        (BASE_JID.into(), copilot_lane("CoPilot", None)),
+        (
+            INVESTIGATE_JID.into(),
+            copilot_lane("CoPilot Investigations", Some("copilot-investigate")),
+        ),
+    ]
+}
+
+fn alice_lane() -> RegisteredGroup {
+    copilot_lane("CoPilot — alice", Some("u-alice"))
+}
+
+fn lane_task(id: &str, jid: &str, schedule_type: ScheduleType, value: &str) -> ScheduledTask {
+    ScheduledTask {
+        group_folder: "copilot".into(),
+        chat_jid: jid.into(),
+        ..new_task(id, schedule_type, value, &at(0))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unregistered_user_lane_task_is_deferred_and_never_runs_in_the_base_lane() {
+    let h = ok_harness();
+    // After a restart only the persisted lanes are registered; alice's
+    // in-memory lane is gone. `http:copilot` sorts before her JID.
+    h.groups.lock().unwrap().extend(persisted_copilot_lanes());
+    let mut grouped = lane_task("alice-grouped", ALICE_JID, ScheduleType::Cron, "0 9 * * *");
+    grouped.context_mode = ContextMode::Group;
+    h.store.insert(grouped);
+    // Isolated, once: the "legacy" shape gets no folder fallback either.
+    h.store.insert(lane_task(
+        "alice-once",
+        ALICE_JID,
+        ScheduleType::Once,
+        "2026-06-01T08:00:00",
+    ));
+
+    let not_registered = format!("Group not found: copilot (lane {ALICE_JID:?} is not registered)");
+    // The reviewer's PoC path: the host's LaneProcessor calls run_task.
+    for id in ["alice-grouped", "alice-once"] {
+        let outcome = h.scheduler.run_task(ALICE_JID, id).await;
+        assert_eq!(
+            outcome,
+            TaskRunOutcome::Deferred {
+                error: not_registered.clone(),
+                next_run: at(60),
+            }
+        );
+    }
+    assert!(h.calls().is_empty(), "must not run in any other lane");
+
+    // Through the poll loop and the queue as well, after the backoff.
+    sleep(Duration::from_secs(60)).await;
+    assert_eq!(h.scheduler.poll_once().await.enqueued, 2);
+    settle().await;
+    assert!(h.calls().is_empty(), "must not run in any other lane");
+    let outcomes = h.outcomes();
+    assert_eq!(outcomes.len(), 2);
+    assert!(
+        outcomes.iter().all(
+            |o| matches!(o, TaskRunOutcome::Deferred { next_run, .. } if *next_run == at(180))
+        )
+    );
+    assert!(!h.queue.is_active(BASE_JID));
+
+    for id in ["alice-grouped", "alice-once"] {
+        let task = h.task(id);
+        assert_eq!(
+            task.status,
+            TaskStatus::Active,
+            "never completed while orphaned"
+        );
+        assert_eq!(task.chat_jid, ALICE_JID);
+        assert_eq!(task.last_run, None);
+        assert_eq!(task.last_result, None);
+        assert_eq!(task.next_run.as_deref(), Some(at(180).as_str()));
+        let logs = h.store.run_logs(id);
+        assert_eq!(logs.len(), 2);
+        assert!(logs.iter().all(|l| l.status == TaskRunStatus::Error
+            && l.error.as_deref() == Some(not_registered.as_str())));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferred_lane_task_runs_in_its_own_lane_once_registered_again() {
+    let h = ok_harness();
+    h.groups.lock().unwrap().extend(persisted_copilot_lanes());
+    let mut task = lane_task(
+        "alice-once",
+        ALICE_JID,
+        ScheduleType::Once,
+        "2026-06-01T08:00:00",
+    );
+    task.context_mode = ContextMode::Group;
+    h.store.insert(task);
+
+    let outcome = h.scheduler.run_task(ALICE_JID, "alice-once").await;
+    assert!(
+        matches!(outcome, TaskRunOutcome::Deferred { ref next_run, .. } if *next_run == at(60))
+    );
+    assert!(h.calls().is_empty());
+
+    // The analyst comes back: her lane is registered again under her JID.
+    h.groups
+        .lock()
+        .unwrap()
+        .insert(ALICE_JID.to_string(), alice_lane());
+    sleep(Duration::from_secs(60)).await;
+    assert_eq!(h.scheduler.poll_once().await.enqueued, 1);
+    settle().await;
+
+    let calls = h.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.ctx.chat_jid, ALICE_JID);
+    assert_eq!(call.group, alice_lane());
+    assert_eq!(call.group.session_key(), "u-alice");
+    assert_eq!(call.group.ipc_key(), "u-alice");
+    assert!(call.ctx.uses_group_session());
+    assert!(!call.ctx.is_main);
+    let task = h.task("alice-once");
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!(task.last_result.as_deref(), Some("done"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn registered_lane_tasks_run_in_their_own_lane_next_to_same_folder_lanes() {
+    let h = ok_harness();
+    let bob = copilot_lane("CoPilot — bob", Some("u-bob"));
+    {
+        let mut groups = h.groups.lock().unwrap();
+        groups.extend(persisted_copilot_lanes());
+        groups.insert(ALICE_JID.to_string(), alice_lane());
+        groups.insert(BOB_JID.to_string(), bob.clone());
+    }
+    for (id, jid) in [
+        ("base", BASE_JID),
+        ("investigate", INVESTIGATE_JID),
+        ("alice", ALICE_JID),
+        ("bob", BOB_JID),
+        ("main", MAIN_JID),
+    ] {
+        let mut task = lane_task(id, jid, ScheduleType::Cron, "*/5 * * * *");
+        if jid == MAIN_JID {
+            task.group_folder = "main".into();
+        }
+        h.store.insert(task);
+    }
+
+    assert_eq!(h.scheduler.poll_once().await.enqueued, 5);
+    settle().await;
+
+    let groups = h.groups.lock().unwrap().clone();
+    let calls = h.calls();
+    assert_eq!(calls.len(), 5);
+    for call in &calls {
+        assert_eq!(call.ctx.chat_jid, call.task.chat_jid);
+        assert_eq!(&call.group, &groups[&call.task.chat_jid]);
+    }
+    let by_id = |id: &str| calls.iter().find(|c| c.task.id == id).unwrap().clone();
+    assert_eq!(by_id("base").group.session_key(), "copilot");
+    assert_eq!(by_id("investigate").group.ipc_key(), "copilot-investigate");
+    assert_eq!(by_id("alice").group.ipc_key(), "u-alice");
+    assert_eq!(by_id("bob").group, bob);
+    assert!(by_id("main").ctx.is_main);
+    for id in ["base", "investigate", "alice", "bob", "main"] {
+        assert_eq!(h.task(id).next_run.as_deref(), Some(at(300).as_str()));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn task_whose_jid_is_registered_for_another_folder_is_deferred() {
+    let h = ok_harness();
+    h.groups.lock().unwrap().extend(persisted_copilot_lanes());
+    // A `copilot` task whose JID now belongs to the `ops` group: neither
+    // `ops@g.us` (wrong folder) nor `http:copilot` (wrong lane) may run it.
+    h.store
+        .insert(lane_task("moved", OPS_JID, ScheduleType::Cron, "0 9 * * *"));
+
+    let outcome = h.scheduler.run_task(OPS_JID, "moved").await;
+    assert_eq!(
+        outcome,
+        TaskRunOutcome::Deferred {
+            error: format!(
+                "Group not found: copilot (lane {OPS_JID:?} is registered for folder \"ops\")"
+            ),
+            next_run: at(60),
+        }
+    );
+    assert!(h.calls().is_empty());
+    assert_eq!(h.task("moved").status, TaskStatus::Active);
+}
+
+#[tokio::test(start_paused = true)]
+async fn task_handed_to_another_lane_is_skipped_untouched() {
+    let h = ok_harness();
+    {
+        let mut groups = h.groups.lock().unwrap();
+        groups.extend(persisted_copilot_lanes());
+        groups.insert(ALICE_JID.to_string(), alice_lane());
+    }
+    h.store.insert(lane_task(
+        "alice",
+        ALICE_JID,
+        ScheduleType::Cron,
+        "*/5 * * * *",
+    ));
+
+    assert_eq!(
+        h.scheduler.run_task(BASE_JID, "alice").await,
+        TaskRunOutcome::Skipped {
+            reason: SkipReason::WrongLane
+        }
+    );
+    assert!(h.calls().is_empty());
+    assert!(h.store.run_logs("alice").is_empty());
+    assert_eq!(h.task("alice").next_run.as_deref(), Some(at(0).as_str()));
+
+    // The next poll enqueues it in its own lane, where it runs.
+    assert_eq!(h.scheduler.poll_once().await.enqueued, 1);
+    settle().await;
+    let calls = h.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].ctx.chat_jid, ALICE_JID);
+    assert_eq!(calls[0].group, alice_lane());
 }
 
 struct StopSignal {
