@@ -108,6 +108,10 @@ pub async fn serve(
     let global = Arc::new(Semaphore::new(limits.max_connections.max(1)));
     let peers = Arc::new(PeerCounts::default());
     let graceful = GracefulShutdown::new();
+    // Connection tasks are tracked so they can be aborted when the grace
+    // period runs out (long-lived SSE streams would otherwise outlive the
+    // server).
+    let mut connections = tokio::task::JoinSet::new();
 
     let mut builder = Builder::new(TokioExecutor::new());
     builder
@@ -162,7 +166,9 @@ pub async fn serve(
             .serve_connection_with_upgrades(TokioIo::new(stream), hyper_svc)
             .into_owned();
         let conn = graceful.watch(conn);
-        tokio::spawn(async move {
+        // Reap finished connections so the set stays small.
+        while connections.try_join_next().is_some() {}
+        connections.spawn(async move {
             if let Err(e) = conn.await {
                 tracing::debug!(%peer, error = %e, "connection ended with error");
             }
@@ -178,6 +184,8 @@ pub async fn serve(
             tracing::warn!("graceful shutdown timed out; dropping open connections");
         }
     }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
 }
 
 /// Convenience: bind `addr`, spawn [`serve`] on it and return the bound
@@ -269,6 +277,45 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(n, 0);
         token.cancel();
+    }
+
+    #[tokio::test]
+    async fn connections_outliving_the_grace_period_are_aborted() {
+        let token = CancellationToken::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/hang",
+            get(|| async {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                "never"
+            }),
+        );
+        let server = tokio::spawn(serve(
+            listener,
+            app,
+            ServerLimits {
+                shutdown_grace: Duration::from_millis(200),
+                ..ServerLimits::default()
+            },
+            token.clone(),
+        ));
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /hang HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("serve must return after the grace period")
+            .unwrap();
+        let mut buf = Vec::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf))
+            .await
+            .expect("hanging connection must be closed")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
     }
 
     #[tokio::test]
