@@ -21,10 +21,16 @@ axum = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 wiremock = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [lints]
 workspace = true
