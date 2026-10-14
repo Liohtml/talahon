@@ -17,13 +17,15 @@
 //!   mutex; a poisoned mutex surfaces as [`Error::Db`], never a panic).
 //! - New tables: `audit_log` (append-only, **hash-chained**: each row stores
 //!   `prev_hash` and `hash = sha256_hex(prev_hash || canonical_json(event))`,
-//!   with [`Db::verify_audit_chain`]), `investigations`, `ioc_sightings`.
+//!   with [`Db::verify_audit_chain`]), `investigations`, `ioc_sightings`,
+//!   `task_owners` (who created a scheduled task over IPC, see
+//!   [`Db::set_task_owner`] / [`Db::get_task_owner`]).
 //! - Every query is parameterized; no SQL is ever built from user input.
 //!
 //! Module map (all of them add methods to [`Db`]):
 //! - `schema`         — base tables + idempotent migrations
 //! - `chats`          — chat metadata and messages
-//! - `tasks`          — scheduled tasks and run logs
+//! - `tasks`          — scheduled tasks, run logs and task owners
 //! - `state`          — router state and lane sessions
 //! - `groups`         — registered groups (TS column mapping + `lane_config`)
 //! - [`audit`]        — hash-chained audit log, [`audit::DbAuditSink`]
@@ -56,6 +58,7 @@ pub use audit::{AUDIT_GENESIS_HASH, DbAuditSink, audit_event_hash, canonical_jso
 pub use investigations::INVESTIGATION_STATUSES;
 pub use iocs::{MAX_IOC_TYPE_LEN, MAX_IOC_VALUE_LEN};
 pub use json_migration::JsonMigrationReport;
+pub use tasks::MAX_TASK_OWNER_LEN;
 
 // Re-exported so callers can name every type of this API through talon-db.
 pub use talon_core::types::{

@@ -33,10 +33,12 @@ impl SourceIdentity {
         }
     }
 
-    /// Borrowed view for the policy engine.
+    /// Borrowed view for the policy engine. The IPC key is the principal
+    /// of every per-lane rule.
     pub fn as_ipc_identity(&self) -> IpcIdentity<'_> {
         IpcIdentity {
             source_folder: &self.folder,
+            ipc_key: &self.ipc_key,
             is_main: self.is_main,
         }
     }
@@ -112,6 +114,7 @@ mod tests {
         assert!(!id.is_main);
         let v = id.as_ipc_identity();
         assert_eq!(v.source_folder, "copilot");
+        assert_eq!(v.ipc_key, "copilot-u-7");
         assert!(!v.is_main);
     }
 

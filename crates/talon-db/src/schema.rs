@@ -12,7 +12,7 @@
 //! - `messages.thread_id`, `registered_groups.lane_config` (nullable)
 //! - `idx_messages_chat_ts` (per-chat message queries)
 //! - tables `audit_log` (+ append-only triggers), `investigations`,
-//!   `ioc_sightings`
+//!   `ioc_sightings`, `task_owners`
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use talon_core::Result;
@@ -144,6 +144,19 @@ const RUST_SCHEMA: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ioc_sightings_type_value
       ON ioc_sightings(ioc_type, value, source_ref);
     CREATE INDEX IF NOT EXISTS idx_ioc_sightings_seen_at ON ioc_sightings(seen_at);
+
+    -- Who created a scheduled task over IPC (the source lane's IPC key).
+    -- Tasks without a row were created by the host (investigations, seeded
+    -- tasks, rows that predate this table) and count as owned by `host`.
+    -- Kept in a side table so the TypeScript `scheduled_tasks` shape is
+    -- untouched; rows follow their task (ON DELETE CASCADE, and
+    -- `Db::delete_task` / `Db::create_task` clear them explicitly for
+    -- connections without foreign-key enforcement).
+    CREATE TABLE IF NOT EXISTS task_owners (
+      task_id TEXT PRIMARY KEY REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+      owner TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
 "#;
 
 /// A column added after a table's original `CREATE TABLE`.
@@ -485,6 +498,7 @@ mod tests {
             "audit_log",
             "investigations",
             "ioc_sightings",
+            "task_owners",
         ] {
             assert!(s.contains_key(t), "missing table {t}");
         }

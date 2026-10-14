@@ -13,6 +13,13 @@
 //! is set. Outcomes are `allowed`, `denied` or `error`; denials carry
 //! `details.stage = "authorization" | "validation"`. Message text and task
 //! prompts are never written to the audit log (only their lengths).
+//! Rows are subject to the per-namespace audit rate limit (see
+//! `ratelimit`); applied task operations are always written. Targets and
+//! reasons are passed through `sanitize_for_log` first.
+//!
+//! Task ownership (MYTH-03): every task created over IPC gets an owner
+//! record — the source namespace's IPC key — and pause/resume/cancel/update
+//! are authorized against that owner, not the task's folder.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -22,18 +29,15 @@ use talon_core::audit::event;
 use talon_core::protocol::{IpcOutbound, IpcTask};
 use talon_core::schedule::first_run;
 use talon_core::time::{now_iso, to_iso};
-use talon_core::types::{ContainerConfig, RegisteredGroup, ScheduledTask, TaskStatus, TaskUpdate};
-use talon_security::ipc_authz::IpcDecision;
+use talon_core::types::{RegisteredGroup, ScheduledTask, TaskStatus, TaskUpdate};
+use talon_security::ipc_authz::{IpcDecision, TaskOwner};
 
 use crate::authz::{decide_message, decide_task};
 use crate::host::SourceIdentity;
-use crate::json::{task_type_name, truncate_reason, validate_outbound_shape, validate_task_shape};
+use crate::json::{
+    sanitize_for_log, task_type_name, truncate_reason, validate_outbound_shape, validate_task_shape,
+};
 use crate::watcher::IpcWatcher;
-
-/// Smallest container timeout a `register_group` request may set (ms).
-pub const MIN_CONTAINER_TIMEOUT_MS: u64 = 10_000;
-/// Largest container timeout a `register_group` request may set (ms, 24 h).
-pub const MAX_CONTAINER_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Result of handling one IPC request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,23 +64,32 @@ struct Kinds {
     allowed: &'static str,
     denied: &'static str,
     failed: &'static str,
+    /// Applied requests of this family change state and are always
+    /// audited, regardless of the rate limit.
+    applied_is_priority: bool,
 }
 
 const MESSAGE_KINDS: Kinds = Kinds {
     allowed: "ipc.message.allowed",
     denied: "ipc.message.denied",
     failed: "ipc.message.failed",
+    applied_is_priority: false,
 };
 const TASK_KINDS: Kinds = Kinds {
     allowed: "ipc.task.allowed",
     denied: "ipc.task.denied",
     failed: "ipc.task.failed",
+    applied_is_priority: true,
 };
 const REGISTER_KINDS: Kinds = Kinds {
     allowed: "ipc.register_group",
     denied: "ipc.register_group",
     failed: "ipc.register_group",
+    applied_is_priority: true,
 };
+
+/// An existing task and its recorded owner.
+type OwnedTask = (ScheduledTask, Option<String>);
 
 #[derive(Debug, Clone, Copy)]
 enum StatusOp {
@@ -104,49 +117,6 @@ fn generate_task_id() -> String {
         .take(6)
         .collect();
     format!("task-{millis}-{rand}")
-}
-
-/// Only `additionalMounts` (validated against the mount allowlist at launch)
-/// and `timeout` may be changed over IPC; every other field (network, env,
-/// resource limits, provider, blocked hosts) stays operator-controlled.
-/// A non-empty `additionalMounts` replaces the list; an empty one leaves it
-/// unchanged.
-fn merge_container_config(
-    existing: Option<&ContainerConfig>,
-    requested: Option<&ContainerConfig>,
-) -> Result<Option<ContainerConfig>, String> {
-    let Some(req) = requested else {
-        return Ok(existing.cloned());
-    };
-    let permitted = ContainerConfig {
-        additional_mounts: req.additional_mounts.clone(),
-        timeout: req.timeout,
-        ..ContainerConfig::default()
-    };
-    if &permitted != req {
-        return Err(
-            "containerConfig may only set additionalMounts and timeout via IPC".to_string(),
-        );
-    }
-    if let Some(t) = req.timeout {
-        if !(MIN_CONTAINER_TIMEOUT_MS..=MAX_CONTAINER_TIMEOUT_MS).contains(&t) {
-            return Err(format!(
-                "containerConfig.timeout must be between {MIN_CONTAINER_TIMEOUT_MS} and {MAX_CONTAINER_TIMEOUT_MS} ms"
-            ));
-        }
-    }
-    let mut merged = existing.cloned().unwrap_or_default();
-    if !req.additional_mounts.is_empty() {
-        merged.additional_mounts = req.additional_mounts.clone();
-    }
-    if req.timeout.is_some() {
-        merged.timeout = req.timeout;
-    }
-    Ok(if merged == ContainerConfig::default() {
-        None
-    } else {
-        Some(merged)
-    })
 }
 
 impl IpcWatcher {
@@ -182,6 +152,26 @@ impl IpcWatcher {
             .and_then(Value::as_str)
             .unwrap_or("?")
             .to_string();
+        // JIDs may carry bidi / control characters: neutralize before they
+        // reach the audit log or a log line.
+        let target = target.map(sanitize_for_log);
+        let priority = kinds.applied_is_priority && outcome.is_applied();
+        let ev = event(
+            kind,
+            &source.folder,
+            target.as_deref(),
+            result,
+            Value::Object(details),
+        );
+        let written = self.audit_event(&source.ipc_key, &source.folder, ev, priority);
+        if !written {
+            // Over the namespace's audit budget: keep the logs quiet too.
+            tracing::debug!(
+                source = %source.folder, ipc_key = %source.ipc_key, kind = ty, target = ?target,
+                result, "IPC request (audit suppressed by rate limit)"
+            );
+            return;
+        }
         match outcome {
             IpcOutcome::Applied => tracing::info!(
                 source = %source.folder, ipc_key = %source.ipc_key, kind = ty, target = ?target,
@@ -196,13 +186,22 @@ impl IpcWatcher {
                 error = %truncate_reason(e), "IPC request failed"
             ),
         }
-        self.audit.record(event(
-            kind,
-            &source.folder,
-            target,
-            result,
-            Value::Object(details),
-        ));
+    }
+
+    /// Look up task `id` and its recorded owner.
+    fn lookup_task(&self, id: &str) -> Result<Option<OwnedTask>, String> {
+        let task = self
+            .store
+            .get_task_by_id(id)
+            .map_err(|e| format!("task lookup failed: {e}"))?;
+        let Some(task) = task else {
+            return Ok(None);
+        };
+        let owner = self
+            .store
+            .get_task_owner(id)
+            .map_err(|e| format!("task owner lookup failed: {e}"))?;
+        Ok(Some((task, owner)))
     }
 
     async fn host_call<T>(
@@ -270,7 +269,7 @@ impl IpcWatcher {
         if !outcome.is_applied() || self.config.audit_allowed_messages {
             self.record(&MESSAGE_KINDS, source, target, &outcome, details);
         } else {
-            tracing::info!(source = %source.folder, chat_jid = %chat_jid, "IPC message sent");
+            tracing::info!(source = %source.folder, chat_jid = %sanitize_for_log(chat_jid), "IPC message sent");
         }
         outcome
     }
@@ -373,12 +372,12 @@ impl IpcWatcher {
         };
 
         // A caller-chosen id may collide with an existing task (possibly of
-        // another group): the policy sees the owner, and duplicates are never
-        // upserted.
+        // another lane or the host): the policy sees the collision, and
+        // duplicates are never upserted.
         let existing = match task_id {
-            Some(id) => match self.store.get_task_by_id(id) {
+            Some(id) => match self.lookup_task(id) {
                 Ok(t) => t,
-                Err(e) => return IpcOutcome::Failed(format!("task lookup failed: {e}")),
+                Err(e) => return IpcOutcome::Failed(e),
             },
             None => None,
         };
@@ -390,7 +389,9 @@ impl IpcWatcher {
             source.as_ipc_identity(),
             task,
             groups,
-            existing.as_ref().map(|t| t.group_folder.as_str()),
+            existing
+                .as_ref()
+                .map(|(_, owner)| TaskOwner::from_record(owner.as_deref())),
         ) {
             return IpcOutcome::Denied(r);
         }
@@ -430,11 +431,55 @@ impl IpcWatcher {
         details.insert("nextRun".into(), json!(next_run));
         details.insert("promptLength".into(), json!(prompt.chars().count()));
         details.insert("hasScript".into(), json!(record.script.is_some()));
+        details.insert("owner".into(), json!(source.ipc_key));
         if let Err(e) = self.store.create_task(&record) {
             return IpcOutcome::Failed(format!("create task failed: {e}"));
         }
+        // The creating namespace owns the task (MYTH-03). Without the record
+        // the task would count as host-owned, so roll the creation back
+        // rather than leave a task its creator cannot manage.
+        if let Err(e) = self.store.set_task_owner(&id, &source.ipc_key) {
+            if let Err(del) = self.store.delete_task(&id) {
+                tracing::error!(task_id = %id, error = %del, "could not roll back IPC task without owner record");
+            }
+            return IpcOutcome::Failed(format!("recording task owner failed: {e}"));
+        }
         self.host.on_tasks_changed();
         IpcOutcome::Applied
+    }
+
+    /// Look up the task referenced by pause/resume/cancel/update and
+    /// authorize `task` against its recorded owner. Returns the task, or the
+    /// outcome to report.
+    fn authorize_existing(
+        &self,
+        source: &SourceIdentity,
+        task: &IpcTask,
+        task_id: &str,
+        groups: &HashMap<String, RegisteredGroup>,
+        details: &mut Map<String, Value>,
+    ) -> Result<ScheduledTask, IpcOutcome> {
+        let existing = self.lookup_task(task_id).map_err(IpcOutcome::Failed)?;
+        let owner = existing
+            .as_ref()
+            .map(|(_, owner)| TaskOwner::from_record(owner.as_deref()));
+        if let (Some((t, _)), Some(o)) = (&existing, owner) {
+            details.insert("taskFolder".into(), json!(t.group_folder));
+            details.insert("taskOwner".into(), json!(sanitize_for_log(o.as_str())));
+        }
+        if let IpcDecision::Deny(r) = decide_task(
+            self.authorizer.as_ref(),
+            source.as_ipc_identity(),
+            task,
+            groups,
+            owner,
+        ) {
+            return Err(IpcOutcome::Denied(r));
+        }
+        match existing {
+            Some((t, _)) => Ok(t),
+            None => Err(IpcOutcome::Rejected("task not found".into())),
+        }
     }
 
     fn status_op(
@@ -446,25 +491,8 @@ impl IpcWatcher {
         groups: &HashMap<String, RegisteredGroup>,
         details: &mut Map<String, Value>,
     ) -> IpcOutcome {
-        let existing = match self.store.get_task_by_id(task_id) {
-            Ok(t) => t,
-            Err(e) => return IpcOutcome::Failed(format!("task lookup failed: {e}")),
-        };
-        let existing_folder = existing.as_ref().map(|t| t.group_folder.as_str());
-        if let Some(f) = existing_folder {
-            details.insert("taskFolder".into(), json!(f));
-        }
-        if let IpcDecision::Deny(r) = decide_task(
-            self.authorizer.as_ref(),
-            source.as_ipc_identity(),
-            task,
-            groups,
-            existing_folder,
-        ) {
-            return IpcOutcome::Denied(r);
-        }
-        if existing.is_none() {
-            return IpcOutcome::Rejected("task not found".into());
+        if let Err(outcome) = self.authorize_existing(source, task, task_id, groups, details) {
+            return outcome;
         }
         let result = match op {
             StatusOp::Pause => self.store.update_task(
@@ -508,25 +536,9 @@ impl IpcWatcher {
         else {
             return IpcOutcome::Failed("internal: request variant mismatch".into());
         };
-        let existing = match self.store.get_task_by_id(task_id) {
+        let current = match self.authorize_existing(source, task, task_id, groups, details) {
             Ok(t) => t,
-            Err(e) => return IpcOutcome::Failed(format!("task lookup failed: {e}")),
-        };
-        let existing_folder = existing.as_ref().map(|t| t.group_folder.as_str());
-        if let Some(f) = existing_folder {
-            details.insert("taskFolder".into(), json!(f));
-        }
-        if let IpcDecision::Deny(r) = decide_task(
-            self.authorizer.as_ref(),
-            source.as_ipc_identity(),
-            task,
-            groups,
-            existing_folder,
-        ) {
-            return IpcOutcome::Denied(r);
-        }
-        let Some(current) = existing else {
-            return IpcOutcome::Rejected("task not found".into());
+            Err(outcome) => return outcome,
         };
 
         let mut update = TaskUpdate::default();
@@ -639,6 +651,12 @@ impl IpcWatcher {
             return IpcOutcome::Failed("internal: request variant mismatch".into());
         };
         details.insert("folder".into(), json!(truncate_reason(folder)));
+        // Container options (additional mounts, env, network, limits) are
+        // operator-only (MYTH-04): a requested `containerConfig` is never
+        // applied; the existing configuration of the JID is kept as is.
+        if container_config.is_some() {
+            details.insert("containerConfigIgnored".into(), json!(true));
+        }
         if let IpcDecision::Deny(r) = decide_task(
             self.authorizer.as_ref(),
             source.as_ipc_identity(),
@@ -647,6 +665,13 @@ impl IpcWatcher {
             None,
         ) {
             return IpcOutcome::Denied(r);
+        }
+        if container_config.is_some() {
+            tracing::warn!(
+                source = %source.folder,
+                ipc_key = %source.ipc_key,
+                "register_group: containerConfig is operator-only and was ignored"
+            );
         }
         // Defense in depth on top of the policy: never create, modify or
         // impersonate the main group through IPC.
@@ -674,19 +699,13 @@ impl IpcWatcher {
                 "IPC namespace already used by a lane of another folder".into(),
             );
         }
-        let merged = match merge_container_config(
-            existing.and_then(|g| g.container_config.as_ref()),
-            container_config.as_ref(),
-        ) {
-            Ok(c) => c,
-            Err(r) => return IpcOutcome::Rejected(r),
-        };
         let group = RegisteredGroup {
             name: name.clone(),
             folder: folder.clone(),
             trigger: trigger.clone(),
             added_at: existing.map_or_else(now_iso, |g| g.added_at.clone()),
-            container_config: merged,
+            // Never taken from the request (see above).
+            container_config: existing.and_then(|g| g.container_config.clone()),
             requires_trigger: requires_trigger.or(existing.and_then(|g| g.requires_trigger)),
             // Forced: IPC can never grant main privileges.
             is_main: false,
@@ -708,64 +727,6 @@ impl IpcWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use talon_core::types::AdditionalMount;
-
-    #[test]
-    fn container_config_merge_rules() {
-        let mount = AdditionalMount {
-            host_path: "/srv/logs".into(),
-            container_path: None,
-            readonly: true,
-        };
-        let existing = ContainerConfig {
-            network: Some("talon-net".into()),
-            timeout: Some(60_000),
-            ..ContainerConfig::default()
-        };
-        // absent -> existing preserved
-        assert_eq!(
-            merge_container_config(Some(&existing), None).unwrap(),
-            Some(existing.clone())
-        );
-        // mounts + timeout accepted, operator fields preserved
-        let req = ContainerConfig {
-            additional_mounts: vec![mount.clone()],
-            timeout: Some(120_000),
-            ..ContainerConfig::default()
-        };
-        let merged = merge_container_config(Some(&existing), Some(&req))
-            .unwrap()
-            .unwrap();
-        assert_eq!(merged.network.as_deref(), Some("talon-net"));
-        assert_eq!(merged.timeout, Some(120_000));
-        assert_eq!(merged.additional_mounts, vec![mount]);
-        // privileged fields refused
-        for bad in [
-            ContainerConfig {
-                network: Some("host".into()),
-                ..ContainerConfig::default()
-            },
-            ContainerConfig {
-                env: [("HTTP_PROXY".to_string(), "x".to_string())].into(),
-                ..ContainerConfig::default()
-            },
-            ContainerConfig {
-                memory: Some("64g".into()),
-                ..ContainerConfig::default()
-            },
-            ContainerConfig {
-                timeout: Some(1),
-                ..ContainerConfig::default()
-            },
-        ] {
-            assert!(merge_container_config(None, Some(&bad)).is_err(), "{bad:?}");
-        }
-        // empty request on a fresh group yields no config at all
-        assert_eq!(
-            merge_container_config(None, Some(&ContainerConfig::default())).unwrap(),
-            None
-        );
-    }
 
     #[test]
     fn generated_task_ids_are_valid() {

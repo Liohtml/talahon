@@ -23,14 +23,51 @@ pub const MAX_ADDITIONAL_MOUNTS: usize = 32;
 /// Reasons (which may echo attacker-controlled text) are truncated to this.
 pub const MAX_REASON_LEN: usize = 300;
 
-/// Truncate a human-readable reason on a char boundary.
-pub(crate) fn truncate_reason(s: &str) -> String {
-    if s.len() <= MAX_REASON_LEN {
-        return s.to_string();
+/// Replacement for characters that must not reach a log line or audit row.
+pub(crate) const LOG_REPLACEMENT_CHAR: char = '\u{FFFD}';
+
+/// Characters that can forge or disguise log lines: C0/C1 controls
+/// (including `\n`, `\r`, `\t`, ESC, DEL, NEL), the Unicode
+/// bidirectional controls (ALM, LRM, RLM, LRE/RLE/PDF/LRO/RLO,
+/// LRI/RLI/FSI/PDI) and the line/paragraph separators.
+fn is_log_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
+/// Make container-influenced text (file names, JIDs, reasons that echo
+/// input) safe for logs and audit rows: every control / bidi character is
+/// replaced by [`LOG_REPLACEMENT_CHAR`] and the result is truncated to
+/// [`MAX_REASON_LEN`] characters (plus `…`).
+pub(crate) fn sanitize_for_log(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(MAX_REASON_LEN * 4));
+    let mut chars = s.chars();
+    for c in chars.by_ref().take(MAX_REASON_LEN) {
+        out.push(if is_log_unsafe(c) {
+            LOG_REPLACEMENT_CHAR
+        } else {
+            c
+        });
     }
-    let mut out: String = s.chars().take(MAX_REASON_LEN).collect();
-    out.push('…');
+    if chars.next().is_some() {
+        out.push('…');
+    }
     out
+}
+
+/// Truncate a human-readable reason on a char boundary and neutralize
+/// control / bidi characters (see [`sanitize_for_log`]).
+pub(crate) fn truncate_reason(s: &str) -> String {
+    sanitize_for_log(s)
 }
 
 /// Returns true when `bytes` nests arrays/objects deeper than `max_depth`.
@@ -436,6 +473,35 @@ mod tests {
         let raw = format!(r#"{{"type":"{long}"}}"#);
         let err = parse_task(raw.as_bytes(), 16).unwrap_err();
         assert!(err.len() < 1_000);
+    }
+
+    #[test]
+    fn log_text_is_sanitized() {
+        let forged = "x.json\n2026-01-01T00:00:00Z INFO fake line\r\u{1b}[31m";
+        let s = sanitize_for_log(forged);
+        assert!(!s.contains('\n') && !s.contains('\r') && !s.contains('\u{1b}'));
+        assert!(s.starts_with("x.json\u{FFFD}2026"));
+        for bidi in [
+            '\u{202E}', '\u{202A}', '\u{2066}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}',
+            '\u{2028}', '\u{2029}', '\u{85}', '\u{7f}', '\t',
+        ] {
+            let s = truncate_reason(&format!("evil{bidi}gpj.exe"));
+            assert!(!s.contains(bidi), "{bidi:?}");
+            assert_eq!(s, "evil\u{FFFD}gpj.exe");
+        }
+        // ordinary non-ASCII text is preserved
+        assert_eq!(sanitize_for_log("Grüße — 日本"), "Grüße — 日本");
+        // truncation still applies
+        let long = "\n".repeat(10_000);
+        let s = sanitize_for_log(&long);
+        assert_eq!(s.chars().count(), MAX_REASON_LEN + 1);
+        assert!(s.ends_with('…'));
+        assert_eq!(
+            sanitize_for_log(&"y".repeat(MAX_REASON_LEN))
+                .chars()
+                .count(),
+            MAX_REASON_LEN
+        );
     }
 
     #[test]

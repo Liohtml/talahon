@@ -35,6 +35,37 @@ pub(crate) fn group(folder: &str, ipc_key: Option<&str>, is_main: bool) -> Regis
     }
 }
 
+/// A per-lane registration (`ipc_key` doubles as session key), like the
+/// CoPilot channel creates them.
+pub(crate) fn lane(folder: &str, ipc_key: &str) -> RegisteredGroup {
+    RegisteredGroup {
+        session_key: Some(ipc_key.into()),
+        ..group(folder, Some(ipc_key), false)
+    }
+}
+
+/// [`groups_fixture`] plus the CoPilot lanes, which all share the folder
+/// `copilot`: analysts alice and bob, the investigation lane, the base lane
+/// (key = folder) and the outbound webhook lane.
+pub(crate) fn copilot_groups() -> HashMap<String, RegisteredGroup> {
+    let mut g = groups_fixture();
+    g.insert(
+        "http:copilot:u:alice".into(),
+        lane("copilot", "copilot-u-alice"),
+    );
+    g.insert(
+        "http:copilot:u:bob".into(),
+        lane("copilot", "copilot-u-bob"),
+    );
+    g.insert(
+        "http:copilot:investigate".into(),
+        lane("copilot", "copilot-investigate"),
+    );
+    g.insert("http:copilot".into(), group("copilot", None, false));
+    g.insert("webhook:copilot".into(), lane("copilot", "copilot-webhook"));
+    g
+}
+
 /// The three groups of `ipc-auth.test.ts`.
 pub(crate) fn groups_fixture() -> HashMap<String, RegisteredGroup> {
     let mut main = group("whatsapp_main", None, true);
@@ -69,10 +100,13 @@ pub(crate) fn task(id: &str, folder: &str, jid: &str, status: TaskStatus) -> Sch
     }
 }
 
+/// In-memory store with the same owner semantics as `talon_db::Db`.
 #[derive(Debug, Default)]
 pub(crate) struct MemoryTaskStore {
     pub tasks: Mutex<BTreeMap<String, ScheduledTask>>,
+    pub owners: Mutex<BTreeMap<String, String>>,
     pub fail: AtomicBool,
+    pub fail_owner: AtomicBool,
 }
 
 impl MemoryTaskStore {
@@ -82,8 +116,21 @@ impl MemoryTaskStore {
     pub fn get(&self, id: &str) -> Option<ScheduledTask> {
         self.tasks.lock().unwrap().get(id).cloned()
     }
+    /// Insert a host-owned task (no owner record).
     pub fn insert(&self, t: ScheduledTask) {
+        self.owners.lock().unwrap().remove(&t.id);
         self.tasks.lock().unwrap().insert(t.id.clone(), t);
+    }
+    /// Insert a task created over IPC by namespace `owner`.
+    pub fn insert_owned(&self, t: ScheduledTask, owner: &str) {
+        self.owners
+            .lock()
+            .unwrap()
+            .insert(t.id.clone(), owner.to_string());
+        self.tasks.lock().unwrap().insert(t.id.clone(), t);
+    }
+    pub fn owner(&self, id: &str) -> Option<String> {
+        self.owners.lock().unwrap().get(id).cloned()
     }
     fn check(&self) -> Result<()> {
         if self.fail.load(Ordering::SeqCst) {
@@ -102,6 +149,7 @@ impl TaskStore for MemoryTaskStore {
             return Err(Error::Db("UNIQUE constraint failed".into()));
         }
         m.insert(task.id.clone(), task.clone());
+        self.owners.lock().unwrap().remove(&task.id);
         Ok(())
     }
     fn get_task_by_id(&self, id: &str) -> Result<Option<ScheduledTask>> {
@@ -140,7 +188,29 @@ impl TaskStore for MemoryTaskStore {
     fn delete_task(&self, id: &str) -> Result<()> {
         self.check()?;
         self.tasks.lock().unwrap().remove(id);
+        self.owners.lock().unwrap().remove(id);
         Ok(())
+    }
+    fn set_task_owner(&self, id: &str, owner: &str) -> Result<()> {
+        self.check()?;
+        if self.fail_owner.load(Ordering::SeqCst) {
+            return Err(Error::Db("owner table locked".into()));
+        }
+        if !self.tasks.lock().unwrap().contains_key(id) {
+            return Err(Error::NotFound(format!("scheduled task {id:?}")));
+        }
+        self.owners
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), owner.to_string());
+        Ok(())
+    }
+    fn get_task_owner(&self, id: &str) -> Result<Option<String>> {
+        self.check()?;
+        if !self.tasks.lock().unwrap().contains_key(id) {
+            return Ok(None);
+        }
+        Ok(self.owner(id))
     }
 }
 
@@ -287,5 +357,45 @@ pub(crate) fn third_id() -> SourceIdentity {
         ipc_key: "third-group".into(),
         folder: "third-group".into(),
         is_main: false,
+    }
+}
+
+/// Identity of a CoPilot lane (folder `copilot`) with IPC key `key`.
+pub(crate) fn copilot_id(key: &str) -> SourceIdentity {
+    SourceIdentity {
+        ipc_key: key.into(),
+        folder: "copilot".into(),
+        is_main: false,
+    }
+}
+
+/// [`harness`] with the CoPilot lanes registered and the *production*
+/// policy (`talon_security::ipc_authz`) installed, so both layers are
+/// exercised.
+pub(crate) fn copilot_harness() -> Harness {
+    copilot_harness_with(|_| {})
+}
+
+/// [`copilot_harness`] with a tuned configuration.
+pub(crate) fn copilot_harness_with(tune: impl FnOnce(&mut IpcWatcherConfig)) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = IpcWatcherConfig::new(dir.path(), chrono_tz::UTC);
+    cfg.poll_interval = Duration::from_millis(20);
+    tune(&mut cfg);
+    let host = Arc::new(FakeHost::with_groups(copilot_groups()));
+    let store = Arc::new(MemoryTaskStore::default());
+    let audit = MemoryAuditSink::default();
+    let watcher = IpcWatcher::new(
+        cfg,
+        Arc::clone(&store),
+        host.clone(),
+        Arc::new(audit.clone()),
+    );
+    Harness {
+        watcher,
+        host,
+        store,
+        audit,
+        dir,
     }
 }

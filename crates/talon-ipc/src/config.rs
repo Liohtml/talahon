@@ -26,6 +26,12 @@ pub const DEFAULT_MAX_ERROR_CONTENT_BYTES: usize = 32 * 1024;
 pub const DEFAULT_HOST_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default poll interval (matches the TypeScript `IPC_POLL_INTERVAL`).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(1_000);
+/// Default number of audit rows one IPC namespace may produce per
+/// [`DEFAULT_AUDIT_WINDOW`] before further rows are suppressed (counted
+/// and summarized).
+pub const DEFAULT_AUDIT_MAX_PER_WINDOW: usize = 60;
+/// Default audit rate-limit window.
+pub const DEFAULT_AUDIT_WINDOW: Duration = Duration::from_secs(60);
 
 /// Configuration for [`crate::IpcWatcher`].
 ///
@@ -62,8 +68,17 @@ pub struct IpcWatcherConfig {
     /// channel cannot wedge the watcher.
     pub host_call_timeout: Duration,
     /// Also audit *allowed* outbound messages (`ipc.message.allowed`).
-    /// Denials and failures are always audited.
+    /// Denials and failures are always audited (subject to the rate limit).
     pub audit_allowed_messages: bool,
+    /// Per-namespace audit budget: at most this many audit rows per
+    /// [`audit_window`](Self::audit_window); further rows are suppressed
+    /// and reported as one `ipc.audit.suppressed` summary row
+    /// (`suppressed_since_last`) once the window has passed. Applied
+    /// (state-changing) task operations are always audited. `0` disables
+    /// the limit.
+    pub audit_max_per_window: usize,
+    /// Length of the audit rate-limit window.
+    pub audit_window: Duration,
 }
 
 impl IpcWatcherConfig {
@@ -82,6 +97,8 @@ impl IpcWatcherConfig {
             max_error_content_bytes: DEFAULT_MAX_ERROR_CONTENT_BYTES,
             host_call_timeout: DEFAULT_HOST_CALL_TIMEOUT,
             audit_allowed_messages: true,
+            audit_max_per_window: DEFAULT_AUDIT_MAX_PER_WINDOW,
+            audit_window: DEFAULT_AUDIT_WINDOW,
         }
     }
 
@@ -117,6 +134,8 @@ mod tests {
         assert_eq!(c.max_file_bytes, 256 * 1024);
         assert!(c.max_json_depth >= 4);
         assert!(c.max_messages_per_scan > 0 && c.max_tasks_per_scan > 0);
+        assert_eq!(c.audit_max_per_window, 60);
+        assert_eq!(c.audit_window, Duration::from_secs(60));
     }
 
     #[test]

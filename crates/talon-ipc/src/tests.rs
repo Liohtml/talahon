@@ -129,18 +129,24 @@ async fn rejects_schedule_task_for_unregistered_target_jid() {
 // ---------------------------------------------------------------------------
 
 fn seed_pause_fixture(h: &Harness) {
-    h.store.insert(task(
-        "task-main",
+    h.store.insert_owned(
+        task(
+            "task-main",
+            "whatsapp_main",
+            "main@g.us",
+            TaskStatus::Active,
+        ),
         "whatsapp_main",
-        "main@g.us",
-        TaskStatus::Active,
-    ));
-    h.store.insert(task(
-        "task-other",
+    );
+    h.store.insert_owned(
+        task(
+            "task-other",
+            "other-group",
+            "other@g.us",
+            TaskStatus::Active,
+        ),
         "other-group",
-        "other@g.us",
-        TaskStatus::Active,
-    ));
+    );
 }
 
 #[tokio::test]
@@ -197,12 +203,15 @@ async fn pausing_a_missing_task_is_denied() {
 #[tokio::test]
 async fn resume_rules() {
     let h = harness();
-    h.store.insert(task(
-        "task-paused",
+    h.store.insert_owned(
+        task(
+            "task-paused",
+            "other-group",
+            "other@g.us",
+            TaskStatus::Paused,
+        ),
         "other-group",
-        "other@g.us",
-        TaskStatus::Paused,
-    ));
+    );
     // third group cannot
     let o = h
         .watcher
@@ -225,12 +234,15 @@ async fn resume_rules() {
         TaskStatus::Active
     );
     // main can
-    h.store.insert(task(
-        "task-paused",
+    h.store.insert_owned(
+        task(
+            "task-paused",
+            "other-group",
+            "other@g.us",
+            TaskStatus::Paused,
+        ),
         "other-group",
-        "other@g.us",
-        TaskStatus::Paused,
-    ));
+    );
     assert!(
         h.watcher
             .process_task(&main_id(), resume("task-paused"))
@@ -246,12 +258,15 @@ async fn resume_rules() {
 #[tokio::test]
 async fn cancel_rules() {
     let h = harness();
-    h.store.insert(task(
-        "task-to-cancel",
+    h.store.insert_owned(
+        task(
+            "task-to-cancel",
+            "other-group",
+            "other@g.us",
+            TaskStatus::Active,
+        ),
         "other-group",
-        "other@g.us",
-        TaskStatus::Active,
-    ));
+    );
     assert!(
         h.watcher
             .process_task(&main_id(), cancel("task-to-cancel"))
@@ -260,12 +275,10 @@ async fn cancel_rules() {
     );
     assert!(h.store.get("task-to-cancel").is_none());
 
-    h.store.insert(task(
-        "task-own",
+    h.store.insert_owned(
+        task("task-own", "other-group", "other@g.us", TaskStatus::Active),
         "other-group",
-        "other@g.us",
-        TaskStatus::Active,
-    ));
+    );
     assert!(
         h.watcher
             .process_task(&other_id(), cancel("task-own"))
@@ -274,12 +287,15 @@ async fn cancel_rules() {
     );
     assert!(h.store.get("task-own").is_none());
 
-    h.store.insert(task(
-        "task-foreign",
+    h.store.insert_owned(
+        task(
+            "task-foreign",
+            "whatsapp_main",
+            "main@g.us",
+            TaskStatus::Active,
+        ),
         "whatsapp_main",
-        "main@g.us",
-        TaskStatus::Active,
-    ));
+    );
     let o = h
         .watcher
         .process_task(&other_id(), cancel("task-foreign"))
@@ -360,15 +376,16 @@ async fn register_group_never_touches_the_main_group() {
 }
 
 #[tokio::test]
-async fn register_group_preserves_lane_fields_and_limits_container_config() {
+async fn register_group_preserves_lane_fields_and_strips_container_config() {
     let h = harness();
+    let operator_cfg = ContainerConfig {
+        network: Some("talon-net".into()),
+        ..ContainerConfig::default()
+    };
     {
         let mut groups = h.host.groups.lock().unwrap();
         let other = groups.get_mut("other@g.us").unwrap();
-        other.container_config = Some(ContainerConfig {
-            network: Some("talon-net".into()),
-            ..ContainerConfig::default()
-        });
+        other.container_config = Some(operator_cfg.clone());
         other.trusted_session_commands = true;
     }
     let req = |cfg: ContainerConfig| IpcTask::RegisterGroup {
@@ -380,47 +397,91 @@ async fn register_group_preserves_lane_fields_and_limits_container_config() {
         container_config: Some(cfg),
         timestamp: None,
     };
-    // privileged container option refused
-    let o = h
-        .watcher
-        .process_task(
-            &main_id(),
-            req(ContainerConfig {
-                network: Some("host".into()),
-                ..ContainerConfig::default()
-            }),
-        )
-        .await;
-    assert!(matches!(o, IpcOutcome::Rejected(_)));
-    // mounts accepted; operator fields preserved
     let mount = AdditionalMount {
-        host_path: "/srv/logs".into(),
-        container_path: None,
-        readonly: true,
+        host_path: "/srv/talon".into(),
+        container_path: Some("project".into()),
+        readonly: false,
     };
+    for cfg in [
+        ContainerConfig {
+            network: Some("host".into()),
+            ..ContainerConfig::default()
+        },
+        ContainerConfig {
+            additional_mounts: vec![mount.clone()],
+            timeout: Some(120_000),
+            ..ContainerConfig::default()
+        },
+        ContainerConfig {
+            env: [("HTTP_PROXY".to_string(), "x".to_string())].into(),
+            ..ContainerConfig::default()
+        },
+    ] {
+        let o = h.watcher.process_task(&main_id(), req(cfg)).await;
+        assert_eq!(o, IpcOutcome::Applied);
+        let g = h
+            .host
+            .registered_groups_snapshot()
+            .remove("other@g.us")
+            .unwrap();
+        assert_eq!(g.name, "Other renamed");
+        assert_eq!(g.added_at, "2024-01-01T00:00:00.000Z");
+        assert!(g.trusted_session_commands);
+        assert_eq!(g.requires_trigger, Some(true));
+        // the operator's configuration is kept verbatim
+        assert_eq!(g.container_config.as_ref(), Some(&operator_cfg));
+    }
+    let ev = h.audit.snapshot();
+    let regs: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == "ipc.register_group")
+        .collect();
+    assert_eq!(regs.len(), 3);
+    assert!(
+        regs.iter()
+            .all(|e| e.outcome == "allowed" && e.details["containerConfigIgnored"] == true)
+    );
+}
+
+#[tokio::test]
+async fn register_group_never_applies_container_config_to_new_groups() {
+    let h = harness();
     let o = h
         .watcher
         .process_task(
             &main_id(),
-            req(ContainerConfig {
-                additional_mounts: vec![mount.clone()],
-                ..ContainerConfig::default()
-            }),
+            IpcTask::RegisterGroup {
+                jid: "new@g.us".into(),
+                name: "New".into(),
+                folder: "new-group".into(),
+                trigger: "@Andy".into(),
+                requires_trigger: None,
+                container_config: Some(ContainerConfig {
+                    additional_mounts: vec![AdditionalMount {
+                        host_path: "/".into(),
+                        container_path: Some("root".into()),
+                        readonly: false,
+                    }],
+                    ..ContainerConfig::default()
+                }),
+                timestamp: None,
+            },
         )
         .await;
     assert_eq!(o, IpcOutcome::Applied);
     let g = h
         .host
         .registered_groups_snapshot()
-        .remove("other@g.us")
+        .remove("new@g.us")
         .unwrap();
-    assert_eq!(g.name, "Other renamed");
-    assert_eq!(g.added_at, "2024-01-01T00:00:00.000Z");
-    assert!(g.trusted_session_commands);
-    assert_eq!(g.requires_trigger, Some(true));
-    let cfg = g.container_config.unwrap();
-    assert_eq!(cfg.network.as_deref(), Some("talon-net"));
-    assert_eq!(cfg.additional_mounts, vec![mount]);
+    assert_eq!(g.container_config, None);
+    // without a containerConfig there is no note
+    h.watcher
+        .process_task(&main_id(), register("new2@g.us", "new-group-2"))
+        .await;
+    let ev = h.audit.snapshot();
+    let last = ev.last().unwrap();
+    assert!(last.details.get("containerConfigIgnored").is_none());
 }
 
 #[tokio::test]
@@ -721,13 +782,11 @@ async fn update_task_rules() {
     let h = harness();
     let mut t = task("t-other", "other-group", "other@g.us", TaskStatus::Active);
     t.script = Some("echo hi".into());
-    h.store.insert(t);
-    h.store.insert(task(
-        "t-main",
+    h.store.insert_owned(t, "other-group");
+    h.store.insert_owned(
+        task("t-main", "whatsapp_main", "main@g.us", TaskStatus::Active),
         "whatsapp_main",
-        "main@g.us",
-        TaskStatus::Active,
-    ));
+    );
 
     // non-main cannot touch main's task
     let mut u = update("t-main");
@@ -920,7 +979,7 @@ async fn unknown_namespaces_are_ignored() {
 }
 
 #[tokio::test]
-async fn lanes_with_custom_ipc_keys_map_to_their_folder() {
+async fn lanes_with_custom_ipc_keys_are_their_own_principal() {
     let h = harness();
     h.host.groups.lock().unwrap().insert(
         "http:copilot:u:7".into(),
@@ -935,17 +994,33 @@ async fn lanes_with_custom_ipc_keys_map_to_their_folder() {
     write(
         &m,
         "1.json",
-        r#"{"type":"message","chatJid":"http:copilot","text":"same folder"}"#,
+        r#"{"type":"message","chatJid":"http:copilot:u:7","text":"own lane"}"#,
     );
     write(
         &m,
         "2.json",
+        r#"{"type":"message","chatJid":"http:copilot","text":"same folder, other lane"}"#,
+    );
+    write(
+        &m,
+        "3.json",
         r#"{"type":"message","chatJid":"other@g.us","text":"other folder"}"#,
     );
     let stats = h.watcher.scan_once().await;
     assert_eq!(stats.messages_sent, 1);
-    assert_eq!(stats.denied, 1);
-    assert_eq!(h.host.sent()[0].0, "http:copilot");
+    assert_eq!(stats.denied, 2);
+    assert_eq!(h.host.sent()[0].0, "http:copilot:u:7");
+    let denied: Vec<_> = h
+        .audit
+        .snapshot()
+        .into_iter()
+        .filter(|e| e.kind == "ipc.message.denied")
+        .collect();
+    assert!(
+        denied
+            .iter()
+            .all(|e| e.actor == "copilot" && e.details["ipcKey"] == "copilot-u-7")
+    );
 }
 
 #[tokio::test]
@@ -1240,4 +1315,512 @@ async fn panicking_policy_denies_everything() {
     assert!(matches!(o, IpcOutcome::Denied(_)));
     assert!(h.store.all().is_empty());
     assert!(h.host.sent().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// MYTH-03: lanes sharing a folder (all CoPilot lanes live in `copilot`).
+// Driven through the production policy *and* the baseline.
+// ---------------------------------------------------------------------------
+
+const ALICE_JID: &str = "http:copilot:u:alice";
+const BOB_JID: &str = "http:copilot:u:bob";
+const WEBHOOK_JID: &str = "webhook:copilot";
+const INVESTIGATE_JID: &str = "http:copilot:investigate";
+const DIGEST_ID: &str = "copilot-alert-digest-15m";
+
+fn alice() -> crate::host::SourceIdentity {
+    copilot_id("copilot-u-alice")
+}
+
+fn bob() -> crate::host::SourceIdentity {
+    copilot_id("copilot-u-bob")
+}
+
+fn with_task_id(mut t: IpcTask, id: &str) -> IpcTask {
+    if let IpcTask::ScheduleTask { task_id, .. } = &mut t {
+        *task_id = Some(id.into());
+    }
+    t
+}
+
+fn with_script(mut t: IpcTask, s: &str) -> IpcTask {
+    match &mut t {
+        IpcTask::ScheduleTask { script, .. } | IpcTask::UpdateTask { script, .. } => {
+            *script = Some(s.into());
+        }
+        _ => {}
+    }
+    t
+}
+
+fn with_prompt(mut t: IpcTask, p: &str) -> IpcTask {
+    if let IpcTask::UpdateTask { prompt, .. } = &mut t {
+        *prompt = Some(p.into());
+    }
+    t
+}
+
+/// The host-seeded, paused digest task and a running investigation.
+fn seed_host_tasks(h: &Harness) {
+    let mut digest = task(DIGEST_ID, "copilot", WEBHOOK_JID, TaskStatus::Paused);
+    digest.schedule_type = ScheduleType::Cron;
+    digest.schedule_value = "*/15 * * * *".into();
+    h.store.insert(digest);
+    h.store.insert(task(
+        "copilot-inv-42-1700000000000",
+        "copilot",
+        INVESTIGATE_JID,
+        TaskStatus::Active,
+    ));
+}
+
+#[tokio::test]
+async fn alice_cannot_message_bobs_lane() {
+    let h = copilot_harness();
+    let o = h
+        .watcher
+        .process_message(&alice(), message(BOB_JID, "phish"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    for jid in [INVESTIGATE_JID, "http:copilot"] {
+        let o = h.watcher.process_message(&alice(), message(jid, "x")).await;
+        assert!(matches!(o, IpcOutcome::Denied(_)), "{jid}");
+    }
+    // own lane still works
+    assert!(
+        h.watcher
+            .process_message(&alice(), message(ALICE_JID, "hi"))
+            .await
+            .is_applied()
+    );
+    assert_eq!(h.host.sent(), [(ALICE_JID.to_string(), "hi".to_string())]);
+}
+
+#[tokio::test]
+async fn alice_cannot_message_the_webhook() {
+    let h = copilot_harness();
+    let o = h
+        .watcher
+        .process_message(&alice(), message(WEBHOOK_JID, "forged alert digest"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    let o = h
+        .watcher
+        .process_message(
+            &copilot_id("copilot-investigate"),
+            message(WEBHOOK_JID, "x"),
+        )
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert!(h.host.sent().is_empty());
+    // main keeps full power
+    assert!(
+        h.watcher
+            .process_message(&main_id(), message(WEBHOOK_JID, "ok"))
+            .await
+            .is_applied()
+    );
+}
+
+#[tokio::test]
+async fn alice_cannot_schedule_into_bobs_lane() {
+    let h = copilot_harness();
+    for jid in [BOB_JID, WEBHOOK_JID, INVESTIGATE_JID, "http:copilot"] {
+        let o = h.watcher.process_task(&alice(), once(jid)).await;
+        assert!(matches!(o, IpcOutcome::Denied(_)), "{jid}: {o:?}");
+    }
+    assert!(h.store.all().is_empty());
+    assert_eq!(h.host.tasks_changed.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn script_from_non_main_is_denied() {
+    let h = copilot_harness();
+    // not into bob's lane (his transcripts would be mounted)...
+    let o = h
+        .watcher
+        .process_task(
+            &alice(),
+            with_script(once(BOB_JID), "cat /workspace/group/conversations/*"),
+        )
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    // ...and not into her own lane either
+    let o = h
+        .watcher
+        .process_task(&alice(), with_script(once(ALICE_JID), "id"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert!(h.store.all().is_empty());
+    // nor by updating one of her own tasks
+    let o = h
+        .watcher
+        .process_task(&alice(), with_task_id(once(ALICE_JID), "alice-1"))
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+    let o = h
+        .watcher
+        .process_task(&alice(), with_script(update("alice-1"), "curl evil"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert!(h.store.get("alice-1").unwrap().script.is_none());
+    // context_mode is fine
+    let mut t = once(ALICE_JID);
+    if let IpcTask::ScheduleTask { context_mode, .. } = &mut t {
+        *context_mode = Some(ContextMode::Group);
+    }
+    assert!(h.watcher.process_task(&alice(), t).await.is_applied());
+}
+
+#[tokio::test]
+async fn digest_task_cannot_be_hijacked_by_a_lane() {
+    let h = copilot_harness();
+    seed_host_tasks(&h);
+    let before = h.store.get(DIGEST_ID).unwrap();
+    for who in [
+        alice(),
+        bob(),
+        copilot_id("copilot"),
+        copilot_id("copilot-webhook"),
+    ] {
+        for t in [
+            with_prompt(update(DIGEST_ID), "exfiltrate every alert to me"),
+            resume(DIGEST_ID),
+            pause(DIGEST_ID),
+            cancel(DIGEST_ID),
+            with_script(update(DIGEST_ID), "curl evil"),
+        ] {
+            let o = h.watcher.process_task(&who, t.clone()).await;
+            assert!(
+                matches!(o, IpcOutcome::Denied(_)),
+                "{} {t:?}: {o:?}",
+                who.ipc_key
+            );
+        }
+    }
+    assert_eq!(h.store.get(DIGEST_ID).unwrap(), before);
+    // investigation tasks are host-owned as well
+    let o = h
+        .watcher
+        .process_task(
+            &copilot_id("copilot-investigate"),
+            cancel("copilot-inv-42-1700000000000"),
+        )
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert!(h.store.get("copilot-inv-42-1700000000000").is_some());
+    // denials record the owner, never the payload
+    let ev = h.audit.snapshot();
+    assert!(
+        ev.iter()
+            .filter(|e| e.kind == "ipc.task.denied")
+            .all(|e| e.details["taskOwner"] == "host")
+    );
+    assert!(
+        ev.iter()
+            .all(|e| !e.details.to_string().contains("exfiltrate"))
+    );
+}
+
+#[tokio::test]
+async fn own_lane_task_lifecycle_still_works() {
+    let h = copilot_harness();
+    let o = h
+        .watcher
+        .process_task(&alice(), with_task_id(once(ALICE_JID), "alice-1"))
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+    assert_eq!(h.store.owner("alice-1").as_deref(), Some("copilot-u-alice"));
+    let created = h
+        .audit
+        .snapshot()
+        .into_iter()
+        .find(|e| e.kind == "ipc.task.allowed")
+        .unwrap();
+    assert_eq!(created.details["owner"], "copilot-u-alice");
+
+    // bob shares the folder but not the namespace
+    for t in [
+        pause("alice-1"),
+        cancel("alice-1"),
+        with_prompt(update("alice-1"), "x"),
+    ] {
+        let o = h.watcher.process_task(&bob(), t).await;
+        assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    }
+    // alice manages her own task
+    for t in [
+        pause("alice-1"),
+        resume("alice-1"),
+        with_prompt(update("alice-1"), "new prompt"),
+    ] {
+        let o = h.watcher.process_task(&alice(), t).await;
+        assert!(o.is_applied(), "{o:?}");
+    }
+    assert_eq!(h.store.get("alice-1").unwrap().prompt, "new prompt");
+    assert!(
+        h.watcher
+            .process_task(&alice(), cancel("alice-1"))
+            .await
+            .is_applied()
+    );
+    assert!(h.store.get("alice-1").is_none());
+    assert!(h.store.owner("alice-1").is_none());
+}
+
+#[tokio::test]
+async fn main_can_still_manage_tasks() {
+    let h = copilot_harness();
+    seed_host_tasks(&h);
+    // host-owned tasks: status and prompt changes are fine...
+    for t in [
+        resume(DIGEST_ID),
+        pause(DIGEST_ID),
+        with_prompt(update(DIGEST_ID), "summarize"),
+    ] {
+        let o = h.watcher.process_task(&main_id(), t).await;
+        assert!(o.is_applied(), "{o:?}");
+    }
+    assert_eq!(h.store.get(DIGEST_ID).unwrap().prompt, "summarize");
+    // ...but script injection into a host task is operator-only
+    let o = h
+        .watcher
+        .process_task(&main_id(), with_script(update(DIGEST_ID), "echo hi"))
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert!(h.store.get(DIGEST_ID).unwrap().script.is_none());
+
+    // main may schedule (with a script) into any lane; it owns the result
+    let o = h
+        .watcher
+        .process_task(
+            &main_id(),
+            with_task_id(with_script(once(BOB_JID), "echo check"), "main-1"),
+        )
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+    assert_eq!(h.store.owner("main-1").as_deref(), Some("whatsapp_main"));
+    assert_eq!(
+        h.store.get("main-1").unwrap().script.as_deref(),
+        Some("echo check")
+    );
+    // ...which bob cannot touch
+    let o = h.watcher.process_task(&bob(), cancel("main-1")).await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    // main manages lane-owned tasks, scripts included
+    h.store.insert_owned(
+        task("bob-1", "copilot", BOB_JID, TaskStatus::Active),
+        "copilot-u-bob",
+    );
+    let o = h
+        .watcher
+        .process_task(&main_id(), with_script(update("bob-1"), "echo ok"))
+        .await;
+    assert!(o.is_applied(), "{o:?}");
+    assert!(
+        h.watcher
+            .process_task(&main_id(), cancel("bob-1"))
+            .await
+            .is_applied()
+    );
+    assert!(
+        h.watcher
+            .process_task(&main_id(), cancel(DIGEST_ID))
+            .await
+            .is_applied()
+    );
+}
+
+#[tokio::test]
+async fn task_id_of_a_host_task_cannot_be_reused() {
+    let h = copilot_harness();
+    seed_host_tasks(&h);
+    let o = h
+        .watcher
+        .process_task(&alice(), with_task_id(once(ALICE_JID), DIGEST_ID))
+        .await;
+    assert!(matches!(o, IpcOutcome::Denied(_)), "{o:?}");
+    assert_eq!(h.store.get(DIGEST_ID).unwrap().chat_jid, WEBHOOK_JID);
+    assert!(h.store.owner(DIGEST_ID).is_none());
+}
+
+#[tokio::test]
+async fn owner_recording_failure_rolls_back_the_task() {
+    let h = copilot_harness();
+    h.store.fail_owner.store(true, Ordering::SeqCst);
+    let o = h
+        .watcher
+        .process_task(&alice(), with_task_id(once(ALICE_JID), "alice-1"))
+        .await;
+    assert!(
+        matches!(o, IpcOutcome::Failed(ref e) if e.contains("owner")),
+        "{o:?}"
+    );
+    assert!(h.store.all().is_empty());
+    assert_eq!(h.host.tasks_changed.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn scan_enforces_lanes_by_directory() {
+    let h = copilot_harness();
+    seed_host_tasks(&h);
+    let m = ns_dir(&h, "copilot-u-alice", "messages");
+    write(
+        &m,
+        "1.json",
+        r#"{"type":"message","chatJid":"http:copilot:u:bob","text":"x","groupFolder":"copilot"}"#,
+    );
+    write(
+        &m,
+        "2.json",
+        r#"{"type":"message","chatJid":"http:copilot:u:alice","text":"mine"}"#,
+    );
+    let t = ns_dir(&h, "copilot-u-alice", "tasks");
+    write(
+        &t,
+        "1.json",
+        r#"{"type":"schedule_task","prompt":"p","script":"cat ~/.ssh/*","schedule_type":"interval","schedule_value":"60000","targetJid":"http:copilot:u:bob"}"#,
+    );
+    write(
+        &t,
+        "2.json",
+        r#"{"type":"update_task","taskId":"copilot-alert-digest-15m","prompt":"backdoor"}"#,
+    );
+    write(
+        &t,
+        "3.json",
+        r#"{"type":"resume_task","taskId":"copilot-alert-digest-15m"}"#,
+    );
+    let stats = h.watcher.scan_once().await;
+    assert_eq!(stats.messages_sent, 1);
+    assert_eq!(stats.tasks_applied, 0);
+    assert_eq!(stats.denied, 4);
+    assert_eq!(h.host.sent()[0].0, ALICE_JID);
+    let digest = h.store.get(DIGEST_ID).unwrap();
+    assert_eq!(digest.status, TaskStatus::Paused);
+    assert_eq!(digest.prompt, "p");
+}
+
+// ---------------------------------------------------------------------------
+// MYTH-11: audit rate limit and log hygiene
+// ---------------------------------------------------------------------------
+
+fn count_kind(h: &Harness, kind: &str, ipc_key: &str) -> usize {
+    h.audit
+        .snapshot()
+        .iter()
+        .filter(|e| e.kind == kind && e.details["ipcKey"] == ipc_key)
+        .count()
+}
+
+#[tokio::test]
+async fn audit_rows_are_rate_limited_per_namespace() {
+    let h = copilot_harness_with(|c| {
+        c.audit_max_per_window = 5;
+        c.audit_window = Duration::from_millis(800);
+    });
+    for i in 0..20 {
+        let o = h
+            .watcher
+            .process_message(&alice(), message(BOB_JID, &format!("{i}")))
+            .await;
+        assert!(matches!(o, IpcOutcome::Denied(_)));
+    }
+    assert_eq!(count_kind(&h, "ipc.message.denied", "copilot-u-alice"), 5);
+    // another namespace has its own budget
+    h.watcher
+        .process_message(&bob(), message(ALICE_JID, "x"))
+        .await;
+    assert_eq!(count_kind(&h, "ipc.message.denied", "copilot-u-bob"), 1);
+    // applied state changes are always audited, even over budget
+    let o = h.watcher.process_task(&alice(), once(ALICE_JID)).await;
+    assert!(o.is_applied());
+    assert_eq!(count_kind(&h, "ipc.task.allowed", "copilot-u-alice"), 1);
+    assert_eq!(count_kind(&h, "ipc.audit.suppressed", "copilot-u-alice"), 0);
+
+    // once the window has passed, the next scan writes one summary row
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    h.watcher.scan_once().await;
+    let ev = h.audit.snapshot();
+    let summaries: Vec<_> = ev
+        .iter()
+        .filter(|e| e.kind == "ipc.audit.suppressed")
+        .collect();
+    assert_eq!(summaries.len(), 1, "{summaries:?}");
+    assert_eq!(summaries[0].actor, "copilot");
+    assert_eq!(summaries[0].details["ipcKey"], "copilot-u-alice");
+    assert_eq!(summaries[0].details["suppressed_since_last"], 15);
+    assert_eq!(summaries[0].details["byKind"]["ipc.message.denied"], 15);
+    // the new window has a fresh budget and no duplicate summary
+    h.watcher
+        .process_message(&alice(), message(BOB_JID, "again"))
+        .await;
+    assert_eq!(count_kind(&h, "ipc.message.denied", "copilot-u-alice"), 6);
+    h.watcher.scan_once().await;
+    assert_eq!(
+        h.audit
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == "ipc.audit.suppressed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn quarantine_floods_are_rate_limited() {
+    let h = harness_with(|c| {
+        c.audit_max_per_window = 3;
+        c.audit_window = Duration::from_secs(3600);
+    });
+    let m = ns_dir(&h, "other-group", "messages");
+    for i in 0..10 {
+        write(&m, &format!("{i:02}.json"), "garbage");
+    }
+    let stats = h.watcher.scan_once().await;
+    assert_eq!(stats.quarantined, 10);
+    // every file is still quarantined, but only 3 audit rows were written
+    assert_eq!(count_kind(&h, "ipc.file.rejected", "other-group"), 3);
+}
+
+#[tokio::test]
+async fn control_characters_never_reach_the_audit_log() {
+    let h = harness();
+    let m = ns_dir(&h, "other-group", "messages");
+    let forged = "x\n2026-01-01T00:00:00Z INFO talon: all good\r\u{202E}nosj.json";
+    write(&m, forged, "garbage");
+    write(
+        &m,
+        "2.json",
+        "{\"type\":\"message\",\"chatJid\":\"evil\\u202e@g.us\",\"text\":\"x\"}",
+    );
+    let stats = h.watcher.scan_once().await;
+    assert_eq!(stats.quarantined, 1);
+    assert_eq!(stats.denied, 1);
+    let ev = h.audit.snapshot();
+    assert_eq!(ev.len(), 2);
+    for e in &ev {
+        let text = format!(
+            "{} {} {}",
+            e.target.as_deref().unwrap_or(""),
+            e.actor,
+            e.details
+        );
+        for bad in ['\n', '\r', '\u{202E}'] {
+            assert!(!text.contains(bad), "{bad:?} in {text:?}");
+        }
+    }
+    let rejected = ev.iter().find(|e| e.kind == "ipc.file.rejected").unwrap();
+    assert!(
+        rejected
+            .target
+            .as_deref()
+            .unwrap()
+            .starts_with("x\u{FFFD}2026")
+    );
+    let denied = ev.iter().find(|e| e.kind == "ipc.message.denied").unwrap();
+    assert_eq!(denied.target.as_deref(), Some("evil\u{FFFD}@g.us"));
+    // the quarantine record carries the sanitized name too
+    let recs = error_records(&h);
+    assert!(!recs[0]["file"].as_str().unwrap().contains('\n'));
 }

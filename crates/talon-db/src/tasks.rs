@@ -10,6 +10,9 @@ use talon_core::{Error, Result};
 
 use crate::{Db, SqlResultExt, col, sql_limit};
 
+/// Maximum length of a recorded task owner (an IPC key or `host`).
+pub const MAX_TASK_OWNER_LEN: usize = 128;
+
 const TASK_COLUMNS: &str = "id, group_folder, chat_jid, prompt, script, schedule_type, \
      schedule_value, context_mode, next_run, last_run, last_result, status, created_at";
 
@@ -90,14 +93,24 @@ impl Db {
 
     /// Insert a new task. Fails if the id already exists or the group folder
     /// is not a valid folder name. An empty `script` is stored as NULL.
+    ///
+    /// The new task has no owner record (it is host-owned, see
+    /// [`Db::get_task_owner`]); a stale owner row left behind for the same id
+    /// (a deletion by a connection without foreign-key enforcement) is
+    /// cleared in the same transaction, so a re-created task never inherits
+    /// a previous owner.
     pub fn create_task(&self, task: &ScheduledTask) -> Result<()> {
         if task.id.is_empty() {
             return Err(Error::invalid("task id must not be empty"));
         }
         assert_valid_group_folder(&task.group_folder)?;
         let script = task.script.as_deref().filter(|s| !s.is_empty());
-        self.with_conn(|conn| {
-            conn.prepare_cached(
+        self.with_tx(false, |tx| {
+            tx.prepare_cached("DELETE FROM task_owners WHERE task_id = ?1")
+                .db()?
+                .execute([&task.id])
+                .db()?;
+            tx.prepare_cached(
                 "INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script,
                    schedule_type, schedule_value, context_mode, next_run, last_run, last_result,
                    status, created_at)
@@ -214,10 +227,14 @@ impl Db {
         })
     }
 
-    /// Deletes the task and its run logs (atomically).
+    /// Deletes the task, its run logs and its owner record (atomically).
     pub fn delete_task(&self, id: &str) -> Result<()> {
         self.with_tx(false, |tx| {
             tx.prepare_cached("DELETE FROM task_run_logs WHERE task_id = ?1")
+                .db()?
+                .execute([id])
+                .db()?;
+            tx.prepare_cached("DELETE FROM task_owners WHERE task_id = ?1")
                 .db()?
                 .execute([id])
                 .db()?;
@@ -226,6 +243,66 @@ impl Db {
                 .execute([id])
                 .db()?;
             Ok(())
+        })
+    }
+
+    /// Record who created task `task_id` (normally the IPC key of the lane
+    /// that scheduled it over IPC). Replaces an existing record.
+    ///
+    /// Fails with [`Error::NotFound`] when the task does not exist and with
+    /// [`Error::InvalidInput`] when `owner` is empty, longer than
+    /// [`MAX_TASK_OWNER_LEN`] bytes, padded with whitespace or contains
+    /// control characters.
+    pub fn set_task_owner(&self, task_id: &str, owner: &str) -> Result<()> {
+        if task_id.is_empty() {
+            return Err(Error::invalid("task id must not be empty"));
+        }
+        if owner.is_empty()
+            || owner.len() > MAX_TASK_OWNER_LEN
+            || owner.trim() != owner
+            || owner.chars().any(char::is_control)
+        {
+            return Err(Error::invalid("invalid task owner"));
+        }
+        let created_at = now_iso();
+        self.with_tx(true, |tx| {
+            let exists = tx
+                .prepare_cached("SELECT 1 FROM scheduled_tasks WHERE id = ?1")
+                .db()?
+                .exists([task_id])
+                .db()?;
+            if !exists {
+                return Err(Error::NotFound(format!("scheduled task {task_id:?}")));
+            }
+            tx.prepare_cached(
+                "INSERT INTO task_owners (task_id, owner, created_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(task_id) DO UPDATE
+                   SET owner = excluded.owner, created_at = excluded.created_at",
+            )
+            .db()?
+            .execute(params![task_id, owner, created_at])
+            .db()?;
+            Ok(())
+        })
+    }
+
+    /// Recorded owner of task `task_id`. `None` when the task has no owner
+    /// record — i.e. it was created by the host (HTTP investigations, seeded
+    /// tasks, rows that predate ownership records) — or does not exist.
+    /// Orphaned records (whose task is gone) are ignored.
+    pub fn get_task_owner(&self, task_id: &str) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT o.owner FROM task_owners o
+                     JOIN scheduled_tasks t ON t.id = o.task_id
+                     WHERE o.task_id = ?1",
+                )
+                .db()?;
+            let mut rows = stmt
+                .query_map([task_id], |row| col::opt_text(row, "owner"))
+                .db()?;
+            Ok(rows.next().transpose().db()?.flatten())
         })
     }
 
@@ -633,6 +710,147 @@ mod tests {
         assert_eq!(db.get_all_tasks().unwrap().len(), 1);
         assert_eq!(db.get_due_tasks("2099").unwrap().len(), 1);
         assert!(matches!(db.get_task_by_id("bad"), Err(Error::Db(_))));
+    }
+
+    // --- task owners ---
+
+    #[test]
+    fn task_owner_roundtrip_and_upsert() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("t")).unwrap();
+        // freshly created tasks are host-owned (no record)
+        assert_eq!(db.get_task_owner("t").unwrap(), None);
+        db.set_task_owner("t", "copilot-u-alice").unwrap();
+        assert_eq!(
+            db.get_task_owner("t").unwrap().as_deref(),
+            Some("copilot-u-alice")
+        );
+        db.set_task_owner("t", "whatsapp_main").unwrap();
+        assert_eq!(
+            db.get_task_owner("t").unwrap().as_deref(),
+            Some("whatsapp_main")
+        );
+        // unknown task
+        assert_eq!(db.get_task_owner("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn set_task_owner_validates_input() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("t")).unwrap();
+        assert!(matches!(
+            db.set_task_owner("missing", "copilot-u-alice"),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            db.set_task_owner("", "x"),
+            Err(Error::InvalidInput(_))
+        ));
+        let long = "a".repeat(MAX_TASK_OWNER_LEN + 1);
+        for bad in ["", " x", "x ", "a\nb", "a\u{0}b", long.as_str()] {
+            assert!(
+                matches!(db.set_task_owner("t", bad), Err(Error::InvalidInput(_))),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(db.get_task_owner("t").unwrap(), None);
+    }
+
+    #[test]
+    fn delete_task_removes_the_owner_and_recreated_tasks_are_host_owned() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("t")).unwrap();
+        db.set_task_owner("t", "copilot-u-alice").unwrap();
+        db.delete_task("t").unwrap();
+        let rows: i64 = db
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM task_owners", [], |r| r.get(0))
+                    .db()
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
+        db.create_task(&task("t")).unwrap();
+        assert_eq!(db.get_task_owner("t").unwrap(), None);
+    }
+
+    #[test]
+    fn duplicate_create_keeps_the_existing_owner() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("t")).unwrap();
+        db.set_task_owner("t", "copilot-u-alice").unwrap();
+        assert!(db.create_task(&task("t")).is_err());
+        assert_eq!(
+            db.get_task_owner("t").unwrap().as_deref(),
+            Some("copilot-u-alice")
+        );
+    }
+
+    #[test]
+    fn stale_owner_rows_are_never_inherited() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("copilot-alert-digest-15m")).unwrap();
+        db.set_task_owner("copilot-alert-digest-15m", "copilot-u-alice")
+            .unwrap();
+        // A connection without foreign-key enforcement (e.g. an older
+        // release) deletes the task and leaves the owner row behind.
+        db.with_conn(|c| {
+            c.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DELETE FROM scheduled_tasks WHERE id = 'copilot-alert-digest-15m';
+                 PRAGMA foreign_keys = ON;",
+            )
+            .db()
+        })
+        .unwrap();
+        // the orphan is ignored by lookups...
+        assert_eq!(db.get_task_owner("copilot-alert-digest-15m").unwrap(), None);
+        // ...and cleared when the host re-creates the task
+        db.create_task(&task("copilot-alert-digest-15m")).unwrap();
+        assert_eq!(db.get_task_owner("copilot-alert-digest-15m").unwrap(), None);
+        let rows: i64 = db
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM task_owners", [], |r| r.get(0))
+                    .db()
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn deleting_a_task_row_directly_cascades_to_its_owner() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("t")).unwrap();
+        db.set_task_owner("t", "other-group").unwrap();
+        db.with_conn(|c| {
+            c.execute("DELETE FROM scheduled_tasks WHERE id = 't'", [])
+                .db()
+        })
+        .unwrap();
+        let rows: i64 = db
+            .with_conn(|c| {
+                c.query_row("SELECT COUNT(*) FROM task_owners", [], |r| r.get(0))
+                    .db()
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn task_owners_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(crate::DB_FILE_NAME);
+        {
+            let db = Db::open(&path).unwrap();
+            db.create_task(&task("t")).unwrap();
+            db.set_task_owner("t", "copilot-u-bob").unwrap();
+        }
+        for _ in 0..2 {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(
+                db.get_task_owner("t").unwrap().as_deref(),
+                Some("copilot-u-bob")
+            );
+        }
     }
 
     #[test]

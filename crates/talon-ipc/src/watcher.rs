@@ -23,6 +23,7 @@ use crate::fsio::{
 use crate::host::{IpcHost, SourceIdentity};
 use crate::json::{parse_outbound, parse_task, truncate_reason};
 use crate::process::IpcOutcome;
+use crate::ratelimit::AuditLimiter;
 use crate::store::TaskStore;
 
 /// Counters for one scan (observability and tests).
@@ -206,6 +207,7 @@ pub struct IpcWatcher {
     pub(crate) host: Arc<dyn IpcHost>,
     pub(crate) audit: SharedAuditSink,
     pub(crate) authorizer: Arc<dyn IpcAuthorizer>,
+    pub(crate) audit_limiter: AuditLimiter,
     running: AtomicBool,
     scan: tokio::sync::Mutex<ScanState>,
     seq: AtomicU64,
@@ -238,12 +240,14 @@ impl IpcWatcher {
         host: Arc<dyn IpcHost>,
         audit: SharedAuditSink,
     ) -> Self {
+        let audit_limiter = AuditLimiter::new(config.audit_max_per_window, config.audit_window);
         Self {
             config,
             store: Arc::new(db),
             host,
             audit,
             authorizer: Arc::new(FnAuthorizer::security_policy()),
+            audit_limiter,
             running: AtomicBool::new(false),
             scan: tokio::sync::Mutex::new(ScanState::default()),
             seq: AtomicU64::new(0),
@@ -295,6 +299,9 @@ impl IpcWatcher {
 
     async fn scan_inner(&self, cancel: Option<&CancellationToken>) -> ScanStats {
         let mut state = self.scan.lock().await;
+        // Report audit rows suppressed in windows that have ended since the
+        // last scan (MYTH-11).
+        self.flush_audit_summaries();
         let groups = self.host.registered_groups();
         let ns = resolve_namespaces(&groups);
         let mut ctx = ScanCtx {
@@ -353,14 +360,20 @@ impl IpcWatcher {
                     Ok(Ok(BatchResult::Missing)) => {}
                     Ok(Ok(BatchResult::Unsafe(reason))) => {
                         if ctx.report_once(format!("unsafe:{key}/{}", kind.name())) {
+                            let reason = truncate_reason(&reason);
                             tracing::warn!(ipc_key = %key, dir = kind.name(), %reason, "refusing to process IPC directory");
-                            self.audit.record(event(
-                                "ipc.file.rejected",
+                            self.audit_event(
+                                key,
                                 &identity.folder,
-                                Some(kind.name()),
-                                "denied",
-                                json!({ "ipcKey": key, "dir": kind.name(), "reason": reason }),
-                            ));
+                                event(
+                                    "ipc.file.rejected",
+                                    &identity.folder,
+                                    Some(kind.name()),
+                                    "denied",
+                                    json!({ "ipcKey": key, "dir": kind.name(), "reason": reason }),
+                                ),
+                                false,
+                            );
                         }
                     }
                     Ok(Ok(BatchResult::Ready(batch))) => {
@@ -495,15 +508,26 @@ impl IpcWatcher {
         content: Option<Vec<u8>>,
         ctx: &mut ScanCtx<'_>,
     ) {
+        // `file` is already sanitized (see `process_batch`); reasons may echo
+        // container input (serde errors), so neutralize them as well.
         let reason = truncate_reason(&reason);
-        tracing::warn!(ipc_key = %identity.ipc_key, dir = kind.name(), file = %file, reason = %reason, "rejected IPC file quarantined");
-        self.audit.record(event(
-            "ipc.file.rejected",
+        let written = self.audit_event(
+            &identity.ipc_key,
             &identity.folder,
-            Some(&file),
-            "denied",
-            json!({ "ipcKey": identity.ipc_key, "dir": kind.name(), "reason": reason }),
-        ));
+            event(
+                "ipc.file.rejected",
+                &identity.folder,
+                Some(&file),
+                "denied",
+                json!({ "ipcKey": identity.ipc_key, "dir": kind.name(), "reason": reason }),
+            ),
+            false,
+        );
+        if written {
+            tracing::warn!(ipc_key = %identity.ipc_key, dir = kind.name(), file = %file, reason = %reason, "rejected IPC file quarantined");
+        } else {
+            tracing::debug!(ipc_key = %identity.ipc_key, dir = kind.name(), file = %file, reason = %reason, "rejected IPC file quarantined (audit suppressed)");
+        }
         ctx.stats.quarantined += 1;
         ctx.quarantine.push(QuarantineRecord {
             ipc_key: identity.ipc_key.clone(),
