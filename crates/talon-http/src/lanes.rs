@@ -20,19 +20,25 @@
 //! writer is promoted when the current turn completes.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
-/// Session/IPC key prefix of a per-user lane (`copilot-u-<id>`).
+/// Session/IPC key prefix of a per-user lane
+/// (`copilot-u-<id prefix>-<hash>`, see [`UserId::session_key`]).
 pub const USER_SESSION_KEY_PREFIX: &str = "copilot-u-";
 /// Session/IPC key of the investigation lane.
 pub const INVESTIGATE_SESSION_KEY: &str = "copilot-investigate";
-/// Max characters kept from a CoPilot user id. `copilot-u-<id>` must stay a
-/// valid (<= 64 character) group folder for the session/IPC resolvers.
+/// Max characters of a CoPilot user id (`^[A-Za-z0-9_-]{1,48}$`).
 pub const MAX_USER_ID_CHARS: usize = 48;
+/// Characters of the lowercased user id kept in a per-user session/IPC key.
+pub const USER_KEY_ID_CHARS: usize = 40;
+/// Hex digits of `sha256(exact user id)` appended to a per-user key.
+pub const USER_KEY_HASH_HEX: usize = 8;
 /// Frames buffered per SSE writer before chunks are dropped.
 pub(crate) const WRITER_BUFFER: usize = 256;
 
@@ -57,7 +63,7 @@ impl LaneIds {
         }
     }
 
-    /// JID of the lane owned by a (normalized) CoPilot user id.
+    /// JID of the lane owned by a CoPilot user id (the exact id).
     pub fn user_lane(&self, user_id: &str) -> String {
         format!("{}{user_id}", self.user_prefix)
     }
@@ -82,29 +88,88 @@ pub fn lane_jid_for_user(user_id: &str) -> String {
     LaneIds::new(crate::config::DEFAULT_BASE_JID).user_lane(user_id)
 }
 
-/// Reduce a CoPilot user id to something safe to embed in a JID, a session
-/// key and a filesystem path. Strings and numbers are accepted; anything
-/// else, or anything that is empty after stripping characters outside
-/// `[A-Za-z0-9_-]`, maps to `None` (the anonymous lane) rather than being
-/// silently mangled into a neighbouring user's key.
-pub fn normalize_user_id(raw: &Value) -> Option<String> {
-    let text = match raw {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        _ => return None,
-    };
-    normalize_user_id_str(&text)
+/// Whether `id` is an acceptable CoPilot user id: 1-48 characters from
+/// `[A-Za-z0-9_-]`.
+pub fn is_valid_user_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_USER_ID_CHARS
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// String form of [`normalize_user_id`].
-pub fn normalize_user_id_str(raw: &str) -> Option<String> {
-    let cleaned: String = raw
-        .trim()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .take(MAX_USER_ID_CHARS)
-        .collect();
-    (!cleaned.is_empty()).then_some(cleaned)
+/// A request named a `user_id` that is not acceptable. Ids are never
+/// "cleaned up": stripping characters would merge distinct users
+/// (`bob.smith` and `bobsmith`) into one lane (MYTH-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("user_id must be a string or integer matching ^[A-Za-z0-9_-]{{1,48}}$")]
+pub struct InvalidUserId;
+
+/// A validated CoPilot user id, kept exactly as sent (case included).
+///
+/// The lane JID embeds the exact id (`http:copilot:u:<id>`); the session and
+/// IPC key ([`Self::session_key`]) is derived so that ids differing only in
+/// case cannot share a directory on a case-insensitive filesystem.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserId(String);
+
+impl UserId {
+    /// Validate a user id string (no trimming, no stripping).
+    pub fn parse(raw: &str) -> Result<Self, InvalidUserId> {
+        if is_valid_user_id(raw) {
+            Ok(Self(raw.to_string()))
+        } else {
+            Err(InvalidUserId)
+        }
+    }
+
+    /// The `user_id` field of a request body: missing, `null` or `""` mean
+    /// "no user" (the shared anonymous lane); a valid string or integer is
+    /// accepted; anything else is rejected.
+    pub fn from_json(raw: Option<&Value>) -> Result<Option<Self>, InvalidUserId> {
+        match raw {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) if s.is_empty() => Ok(None),
+            Some(Value::String(s)) => Self::parse(s).map(Some),
+            Some(Value::Number(n)) if n.is_i64() || n.is_u64() => {
+                Self::parse(&n.to_string()).map(Some)
+            }
+            Some(_) => Err(InvalidUserId),
+        }
+    }
+
+    /// The exact id.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Session/IPC key of this user's lane:
+    /// `copilot-u-<lowercased id, first 40 chars>-<first 8 hex of sha256(exact id)>`.
+    ///
+    /// At most 59 characters of `[a-z0-9_-]`, so always a valid group
+    /// folder; the hash keeps `Bob` and `bob` (and ids sharing a 40-char
+    /// prefix) apart even where the filesystem folds case.
+    pub fn session_key(&self) -> String {
+        let prefix: String = self
+            .0
+            .chars()
+            .take(USER_KEY_ID_CHARS)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let digest = Sha256::digest(self.0.as_bytes());
+        let hash: String = digest
+            .iter()
+            .take(USER_KEY_HASH_HEX / 2)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("{USER_SESSION_KEY_PREFIX}{prefix}-{hash}")
+    }
+}
+
+impl fmt::Display for UserId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// One frame on an SSE stream.
@@ -622,7 +687,7 @@ mod tests {
         assert_eq!(SseFrame::Done.to_json(), r#"{"type":"done"}"#);
     }
 
-    // ---- ports of `HttpChannel lane ownership` + `normalizeUserId` ----------
+    // ---- ports of `HttpChannel lane ownership` + user id validation -------
 
     #[test]
     fn owns_the_chat_lane_and_every_sub_lane() {
@@ -641,54 +706,109 @@ mod tests {
         assert!(!l.owns("http:copilo"));
     }
 
+    fn parse(v: Value) -> Result<Option<String>, InvalidUserId> {
+        UserId::from_json(Some(&v)).map(|o| o.map(|u| u.as_str().to_string()))
+    }
+
     #[test]
     fn accepts_ids_copilot_actually_issues() {
-        assert_eq!(normalize_user_id(&json!(42)).as_deref(), Some("42"));
+        assert_eq!(parse(json!(42)).unwrap().as_deref(), Some("42"));
         assert_eq!(
-            normalize_user_id(&json!("analyst-7")).as_deref(),
+            parse(json!("analyst-7")).unwrap().as_deref(),
             Some("analyst-7")
         );
+        assert_eq!(parse(json!("a_b-C9")).unwrap().as_deref(), Some("a_b-C9"));
+        let max = "x".repeat(MAX_USER_ID_CHARS);
+        assert_eq!(parse(json!(max.clone())).unwrap(), Some(max));
+    }
+
+    #[test]
+    fn rejects_ids_instead_of_stripping_them_into_a_neighbour() {
+        // TS (and the first Rust port) stripped these, so `bob.smith` and
+        // `bobsmith` shared a lane.
+        for raw in [
+            "bob.smith",
+            "../../etc/passwd",
+            "a:b",
+            " bob",
+            "bob ",
+            "ünïcödé-1",
+            "a/b",
+            "///",
+        ] {
+            assert_eq!(parse(json!(raw)), Err(InvalidUserId), "{raw:?}");
+        }
         assert_eq!(
-            normalize_user_id(&json!("a_b-C9")).as_deref(),
-            Some("a_b-C9")
+            parse(json!("x".repeat(MAX_USER_ID_CHARS + 1))),
+            Err(InvalidUserId)
+        );
+        for v in [json!({ "id": 1 }), json!(true), json!(["1"]), json!(1.5)] {
+            assert_eq!(parse(v.clone()), Err(InvalidUserId), "{v}");
+        }
+        assert!(UserId::parse("bob.smith").is_err());
+        assert!(is_valid_user_id("bobsmith"));
+    }
+
+    #[test]
+    fn absent_ids_map_to_the_anon_lane() {
+        assert_eq!(UserId::from_json(None), Ok(None));
+        assert_eq!(parse(Value::Null), Ok(None));
+        assert_eq!(parse(json!("")), Ok(None));
+    }
+
+    #[test]
+    fn session_key_has_the_documented_format() {
+        let bob = UserId::parse("bob").unwrap();
+        // sha256("bob") = 81b637d8...
+        assert_eq!(bob.session_key(), "copilot-u-bob-81b637d8");
+        let upper = UserId::parse("Bob").unwrap();
+        // sha256("Bob") = cd9fb1e1...
+        assert_eq!(upper.session_key(), "copilot-u-bob-cd9fb1e1");
+        assert_eq!(
+            UserId::parse("42").unwrap().session_key(),
+            "copilot-u-42-73475cb4"
         );
     }
 
     #[test]
-    fn strips_characters_that_would_escape_the_key_or_path() {
-        assert_eq!(
-            normalize_user_id(&json!("../../etc/passwd")).as_deref(),
-            Some("etcpasswd")
-        );
-        assert_eq!(normalize_user_id(&json!("a:b")).as_deref(), Some("ab"));
+    fn session_keys_never_collide_on_case_insensitive_filesystems() {
+        let ids = [
+            "bob",
+            "Bob",
+            "BOB",
+            "bOb",
+            "bobsmith",
+            "bob_smith",
+            "bob-smith",
+        ];
+        let mut keys: Vec<String> = ids
+            .iter()
+            .map(|i| UserId::parse(i).unwrap().session_key().to_ascii_lowercase())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), ids.len(), "{keys:?}");
+        // Ids sharing the first 40 characters still get distinct keys.
+        let base = "a".repeat(USER_KEY_ID_CHARS);
+        let k1 = UserId::parse(&format!("{base}1")).unwrap().session_key();
+        let k2 = UserId::parse(&format!("{base}2")).unwrap().session_key();
+        assert_ne!(k1, k2);
     }
 
     #[test]
-    fn falls_back_to_the_anon_lane_rather_than_mangling_into_a_neighbour() {
-        assert_eq!(normalize_user_id(&json!("")), None);
-        assert_eq!(normalize_user_id(&json!("   ")), None);
-        assert_eq!(normalize_user_id(&json!("///")), None);
-        assert_eq!(normalize_user_id(&Value::Null), None);
-        assert_eq!(normalize_user_id(&json!({ "id": 1 })), None);
-        assert_eq!(normalize_user_id(&json!(true)), None);
-        assert_eq!(normalize_user_id(&json!(["1"])), None);
-    }
-
-    #[test]
-    fn bounds_the_length_so_the_derived_lane_key_stays_a_valid_folder() {
-        let id = normalize_user_id(&json!("x".repeat(200))).unwrap();
-        assert!(talon_core::paths::is_valid_group_folder(&format!(
-            "{USER_SESSION_KEY_PREFIX}{id}"
-        )));
-    }
-
-    #[test]
-    fn keeps_every_accepted_id_inside_a_valid_lane_key() {
-        for raw in ["42", "analyst-7", "a_b-C9", &"z".repeat(300), "ünïcödé-1"] {
-            let id = normalize_user_id(&json!(raw)).unwrap();
-            assert!(talon_core::paths::is_valid_group_folder(&format!(
-                "{USER_SESSION_KEY_PREFIX}{id}"
-            )));
+    fn every_accepted_id_yields_a_valid_lane_key() {
+        for raw in [
+            "42".to_string(),
+            "analyst-7".to_string(),
+            "-leading-dash".to_string(),
+            "Z".repeat(MAX_USER_ID_CHARS),
+            "_".repeat(MAX_USER_ID_CHARS),
+        ] {
+            let key = UserId::parse(&raw).unwrap().session_key();
+            assert!(key.len() <= 64, "{key}");
+            assert!(key.starts_with(USER_SESSION_KEY_PREFIX));
+            assert!(talon_core::paths::is_valid_group_folder(&key), "{key}");
+            assert_eq!(key, key.to_ascii_lowercase());
         }
     }
 

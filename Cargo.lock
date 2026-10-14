@@ -1947,6 +1947,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "talon-core",
+ "talon-net",
  "talon-security",
  "tempfile",
  "thiserror",

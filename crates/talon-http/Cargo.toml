@@ -17,6 +17,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 talon-db = { workspace = true }
 talon-security = { workspace = true }
+talon-net = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
@@ -28,6 +29,9 @@ tokio-util = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 uuid = { workspace = true }
+sha2 = { workspace = true }
+# Descriptor-relative, no-follow reads of agent-writable directories (MYTH-10).
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -42,13 +42,12 @@ use crate::investigate::{
     is_duplicate, job_id,
 };
 use crate::lanes::{
-    INVESTIGATE_SESSION_KEY, LaneIds, OpenError, StreamRegistry, USER_SESSION_KEY_PREFIX,
-    normalize_user_id,
+    INVESTIGATE_SESSION_KEY, LaneIds, OpenError, StreamRegistry, USER_SESSION_KEY_PREFIX, UserId,
 };
 use crate::metrics::{self, Gauges, Metrics};
 use crate::palace::{
-    PalaceError, PalaceRunner, ScriptPalaceRunner, add_lesson_request, forget_request,
-    search_request,
+    DisabledPalaceRunner, PalaceError, PalaceRunner, ScriptPalaceRunner, add_lesson_request,
+    forget_request, search_request,
 };
 use crate::sse::{WriterGuard, WriterStream};
 use crate::store::{HttpStore, run_blocking};
@@ -60,6 +59,10 @@ use crate::validate::{
 
 /// Mounts every CoPilot lane gets (`(directory under project root, read-only)`).
 /// The TS release also mounted `ollama/`; Talon 2.0 has no Ollama provider.
+/// `mempalace-data` stays read-write for the `mcp-palace` MCP server: the
+/// container entrypoint chowns it to `mcp-palace`, so the agent uid cannot
+/// reach it, and the host never runs palace code against it by default
+/// (MYTH-01, see [`crate::palace`]).
 const COPILOT_MOUNTS: &[(&str, bool)] = &[
     ("siem", true),
     ("mysql", true),
@@ -91,13 +94,20 @@ pub struct HttpDeps {
     pub audit: SharedAuditSink,
     /// API key verification backend.
     pub verifier: Arc<dyn KeyVerifier>,
-    /// MemPalace bridge.
+    /// MemPalace bridge ([`DisabledPalaceRunner`] unless one is supplied).
     pub palace: Arc<dyn PalaceRunner>,
 }
 
 impl HttpDeps {
-    /// Production wiring: the given store, [`SecurityKeyVerifier`] and a
-    /// [`ScriptPalaceRunner`] configured from `config`.
+    /// Production wiring: the given store and [`SecurityKeyVerifier`].
+    ///
+    /// The palace is **disabled** (`/palace/*` answers 503) until a runner is
+    /// supplied with [`Self::with_palace`] — normally a
+    /// [`crate::CommandPalaceRunner`] that runs the palace in a hardened
+    /// container. Only if the operator set `TALON_PALACE_HOST_EXEC=unsafe`
+    /// ([`HttpConfig::palace_host_exec`]) does the default become a
+    /// [`ScriptPalaceRunner`] executing `palace-call.sh` on the host
+    /// (dangerous, MYTH-01).
     pub fn new(
         config: &HttpConfig,
         host: Arc<dyn ChannelHost>,
@@ -109,14 +119,36 @@ impl HttpDeps {
             store,
             audit,
             verifier: Arc::new(SecurityKeyVerifier),
-            palace: Arc::new(ScriptPalaceRunner::new(
-                config.palace_script.clone(),
-                config.palace_timeout,
-                config.palace_max_output_bytes,
-                config.palace_max_concurrency,
-            )),
+            palace: default_palace_runner(config),
         }
     }
+
+    /// Use `palace` for the `/palace/*` endpoints (replaces the default,
+    /// including the `TALON_PALACE_HOST_EXEC=unsafe` script runner).
+    pub fn with_palace(mut self, palace: Arc<dyn PalaceRunner>) -> Self {
+        self.palace = palace;
+        self
+    }
+}
+
+/// [`DisabledPalaceRunner`], or the host script runner when the operator
+/// explicitly opted into host execution.
+fn default_palace_runner(config: &HttpConfig) -> Arc<dyn PalaceRunner> {
+    if !config.palace_host_exec {
+        return Arc::new(DisabledPalaceRunner);
+    }
+    tracing::warn!(
+        script = %config.palace_script.display(),
+        "TALON_PALACE_HOST_EXEC=unsafe: MemPalace calls run palace-call.sh ON THE HOST against \
+         agent-writable mempalace-data; a compromised agent can get code executed as this user. \
+         Use a containerized palace runner instead"
+    );
+    Arc::new(ScriptPalaceRunner::new(
+        config.palace_script.clone(),
+        config.palace_timeout,
+        config.palace_max_output_bytes,
+        config.palace_max_concurrency,
+    ))
 }
 
 impl fmt::Debug for HttpDeps {
@@ -231,11 +263,11 @@ impl HttpState {
         *lock(&self.0.base_group) = Some(group);
     }
 
-    /// Resolve (registering on first use) the lane for a normalized CoPilot
+    /// Resolve (registering on first use) the lane for a validated CoPilot
     /// user id. `None` maps to the shared base lane.
     pub async fn ensure_user_lane(
         &self,
-        user_id: Option<&str>,
+        user_id: Option<&UserId>,
         user_name: Option<&str>,
     ) -> Result<String, LaneLimitReached> {
         self.0.ensure_user_lane(user_id, user_name).await
@@ -323,6 +355,22 @@ impl Shared {
             .await;
     }
 
+    /// Session key -> exact user id of every registered per-user lane (the
+    /// key itself is one-way: lowercased, truncated and hashed).
+    fn user_ids_by_session_key(&self) -> HashMap<String, String> {
+        self.host
+            .registered_groups()
+            .into_iter()
+            .filter_map(|(jid, group)| {
+                let user = jid.strip_prefix(self.lanes.user_prefix.as_str())?;
+                if user.is_empty() {
+                    return None;
+                }
+                Some((group.session_key?, user.to_string()))
+            })
+            .collect()
+    }
+
     pub(crate) fn user_lane_jids(&self) -> Vec<String> {
         let mut jids: Vec<String> = self
             .host
@@ -336,13 +384,13 @@ impl Shared {
 
     async fn ensure_user_lane(
         &self,
-        user_id: Option<&str>,
+        user_id: Option<&UserId>,
         user_name: Option<&str>,
     ) -> Result<String, LaneLimitReached> {
         let Some(user_id) = user_id else {
             return Ok(self.lanes.base.clone());
         };
-        let jid = self.lanes.user_lane(user_id);
+        let jid = self.lanes.user_lane(user_id.as_str());
         let _guard = self.lane_lock.lock().await;
 
         if self.host.registered_groups().contains_key(&jid) {
@@ -367,7 +415,9 @@ impl Shared {
             .map(|n| sanitize_label(n, MAX_LABEL_CHARS))
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| user_id.to_string());
-        let key = format!("{USER_SESSION_KEY_PREFIX}{user_id}");
+        // Collision-proof on case-insensitive filesystems (MYTH-12); the JID
+        // keeps the exact id.
+        let key = user_id.session_key();
         let group = RegisteredGroup {
             name: format!("CoPilot — {label}"),
             session_key: Some(key.clone()),
@@ -377,7 +427,7 @@ impl Shared {
         };
         lock(&self.last_seen).insert(jid.clone(), Instant::now());
         self.register_lane(&jid, group, false).await;
-        tracing::info!(%jid, user_id, "HTTP channel: registered user lane");
+        tracing::info!(%jid, %user_id, "HTTP channel: registered user lane");
         Ok(jid)
     }
 
@@ -752,6 +802,7 @@ async fn status(State(st): State<HttpState>) -> ApiResult {
     // starts costing minutes per reply. The investigation lane is ephemeral
     // and so never has a stored session.
     let folder = &s.config.group_folder;
+    let user_ids = s.user_ids_by_session_key();
     let sessions: Vec<Value> = rows
         .into_iter()
         .filter(|r| {
@@ -759,10 +810,9 @@ async fn status(State(st): State<HttpState>) -> ApiResult {
                 || r.group_folder.starts_with(USER_SESSION_KEY_PREFIX)
         })
         .map(|r| {
-            let user_id = r
-                .group_folder
-                .strip_prefix(USER_SESSION_KEY_PREFIX)
-                .map(str::to_string);
+            // Only registered lanes can be mapped back to their exact id; a
+            // session left over from before a restart reports `null`.
+            let user_id = user_ids.get(&r.group_folder).cloned();
             json!({
                 "lane": r.group_folder,
                 "user_id": user_id,
@@ -856,7 +906,8 @@ async fn session_reset(
         Ok(v) => v.unwrap_or("chat"),
         Err(()) => "",
     };
-    let user_id = obj.get("user_id").and_then(normalize_user_id);
+    let user_id =
+        UserId::from_json(obj.get("user_id")).map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     // 'chat' resets the caller's own lane: an analyst clearing their
     // conversation must not clear a colleague's. Without a user_id it falls
@@ -870,8 +921,8 @@ async fn session_reset(
         "investigate" => vec![s.lanes.investigate.clone()],
         "chat" => vec![
             user_id
-                .as_deref()
-                .map_or_else(|| s.lanes.base.clone(), |u| s.lanes.user_lane(u)),
+                .as_ref()
+                .map_or_else(|| s.lanes.base.clone(), |u| s.lanes.user_lane(u.as_str())),
         ],
         _ => {
             return Err(ApiError::bad_request(
@@ -886,6 +937,7 @@ async fn session_reset(
             cleared.push(jid);
         }
     }
+    let user_id = user_id.as_ref().map(UserId::as_str);
     tracing::info!(scope, user_id = ?user_id, cleared = ?cleared, "HTTP channel: session reset");
     s.audit(
         "http.session.reset",
@@ -965,7 +1017,7 @@ async fn investigate_handler(
     // Validate the override against the on-disk prompts directory (regular
     // files only) before queuing anything.
     if let Some(template) = req.template_override.clone() {
-        let dir = s.config.prompts_dir();
+        let dir = s.config.group_dir();
         let exists = tokio::task::spawn_blocking(move || files::template_exists(&dir, &template))
             .await
             .unwrap_or(false);
@@ -1131,7 +1183,7 @@ async fn evals(State(st): State<HttpState>, Path(alert_id): Path<String>) -> Api
     let numeric: u64 = alert_id
         .parse()
         .map_err(|_| ApiError::bad_request("invalid alert_id"))?;
-    let dir = st.0.config.evals_dir();
+    let dir = st.0.config.group_dir();
     let evals = tokio::task::spawn_blocking(move || files::read_evals(&dir, &alert_id))
         .await
         .map_err(|_| ApiError::internal("failed to read evals"))?
@@ -1145,7 +1197,7 @@ async fn evals(State(st): State<HttpState>, Path(alert_id): Path<String>) -> Api
 /// `GET /templates` — template filenames + previews; bodies are never
 /// exposed (the agent is the only consumer of the full content).
 async fn templates(State(st): State<HttpState>) -> ApiResult {
-    let dir = st.0.config.prompts_dir();
+    let dir = st.0.config.group_dir();
     let templates = tokio::task::spawn_blocking(move || files::list_templates(&dir))
         .await
         .map_err(|_| ApiError::internal("failed to list templates"))?
@@ -1161,6 +1213,14 @@ fn palace_response(s: &Shared, op: &str, result: Result<Value, PalaceError>) -> 
         Ok(v) => {
             Metrics::inc(&s.metrics.palace_ok);
             Ok(Json(v).into_response())
+        }
+        Err(PalaceError::Disabled) => {
+            Metrics::inc(&s.metrics.palace_failed);
+            tracing::debug!(op, "palace call refused: no palace runner configured");
+            Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PalaceError::Disabled.to_string(),
+            ))
         }
         Err(e) => {
             Metrics::inc(&s.metrics.palace_failed);
@@ -1346,13 +1406,15 @@ async fn message(State(st): State<HttpState>, body: Result<Bytes, BytesRejection
         .map(|v| sanitize_label(v, MAX_LABEL_CHARS))
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "copilot".to_string());
-    let user_id = obj.get("user_id").and_then(normalize_user_id);
+    // Invalid ids are rejected, never stripped into a neighbour's lane.
+    let user_id =
+        UserId::from_json(obj.get("user_id")).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let user_name = obj.get("user_name").and_then(Value::as_str);
 
     // Resolve the caller's lane before opening the stream, so the writer is
     // queued against the same JID the reply will be written to.
     let lane = s
-        .ensure_user_lane(user_id.as_deref(), user_name)
+        .ensure_user_lane(user_id.as_ref(), user_name)
         .await
         .map_err(|_| {
             ApiError::new(

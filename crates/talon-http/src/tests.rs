@@ -13,7 +13,7 @@ use talon_core::types::{ScheduleType, SessionRow, TaskStatus};
 
 use crate::channel::HttpChannel;
 use crate::investigate::{DIGEST_TASK_ID, WEBHOOK_JID};
-use crate::lanes::lane_jid_for_user;
+use crate::lanes::{UserId, lane_jid_for_user};
 use crate::palace::PalaceError;
 use crate::testutil::*;
 
@@ -27,11 +27,15 @@ async fn connected_harness() -> Harness {
 }
 
 async fn lane_for(h: &Harness, user_id: Value, user_name: Option<&str>) -> String {
-    let id = crate::lanes::normalize_user_id(&user_id);
+    let id = UserId::from_json(Some(&user_id)).unwrap();
     h.state
-        .ensure_user_lane(id.as_deref(), user_name)
+        .ensure_user_lane(id.as_ref(), user_name)
         .await
         .unwrap()
+}
+
+fn key_of(id: &str) -> String {
+    UserId::parse(id).unwrap().session_key()
 }
 
 // ---------------------------------------------------------------------------
@@ -270,8 +274,8 @@ async fn registers_a_lane_per_user_cloned_from_the_base_group() {
     assert_eq!(jid, lane_jid_for_user("42"));
     let g = h.host.group(&jid).unwrap();
     assert_eq!(g.folder, "copilot");
-    assert_eq!(g.session_key.as_deref(), Some("copilot-u-42"));
-    assert_eq!(g.ipc_key.as_deref(), Some("copilot-u-42"));
+    assert_eq!(g.session_key.as_deref(), Some("copilot-u-42-73475cb4"));
+    assert_eq!(g.ipc_key.as_deref(), Some("copilot-u-42-73475cb4"));
     assert!(g.trusted_session_commands);
     assert!(!g.ephemeral_session);
     assert_eq!(g.name, "CoPilot — Dana");
@@ -313,8 +317,50 @@ async fn routes_a_request_with_no_user_id_to_the_shared_anon_lane() {
     let h = connected_harness().await;
     let before = h.host.registrations().len();
     assert_eq!(lane_for(&h, Value::Null, None).await, COPILOT_JID);
-    assert_eq!(lane_for(&h, json!("///"), None).await, COPILOT_JID);
+    assert_eq!(lane_for(&h, json!(""), None).await, COPILOT_JID);
     assert_eq!(h.host.registrations().len(), before);
+}
+
+#[tokio::test]
+async fn invalid_user_ids_are_rejected_not_merged_into_a_neighbour() {
+    let h = connected_harness().await;
+    let before = h.host.registrations().len();
+    for body in [
+        r#"{"message":"hi","user_id":"bob.smith"}"#,
+        r#"{"message":"hi","user_id":"///"}"#,
+        r#"{"message":"hi","user_id":"a b"}"#,
+        r#"{"message":"hi","user_id":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#,
+        r#"{"message":"hi","user_id":{"id":1}}"#,
+        r#"{"message":"hi","user_id":true}"#,
+        r#"{"message":"hi","user_id":1.5}"#,
+    ] {
+        let res = h.send(authed("POST", "/message", Some(body))).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+        let err = body_json(res).await["error"].as_str().unwrap().to_string();
+        assert!(err.starts_with("user_id must"), "{err}");
+    }
+    assert_eq!(h.host.registrations().len(), before);
+    assert!(h.host.messages().is_empty());
+    // 48 characters is still fine.
+    let ok = format!(r#"{{"message":"hi","user_id":"{}"}}"#, "x".repeat(48));
+    let res = h.send(authed("POST", "/message", Some(&ok))).await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn ids_differing_only_in_case_get_separate_lanes_and_keys() {
+    let h = connected_harness().await;
+    let lower = lane_for(&h, json!("bob"), None).await;
+    let upper = lane_for(&h, json!("Bob"), None).await;
+    assert_eq!(lower, "http:copilot:u:bob");
+    assert_eq!(upper, "http:copilot:u:Bob");
+    let (gl, gu) = (h.host.group(&lower).unwrap(), h.host.group(&upper).unwrap());
+    let (kl, ku) = (gl.session_key.unwrap(), gu.session_key.unwrap());
+    assert_eq!(kl, "copilot-u-bob-81b637d8");
+    assert_eq!(ku, "copilot-u-bob-cd9fb1e1");
+    assert!(!kl.eq_ignore_ascii_case(&ku));
+    assert_eq!(gl.ipc_key.as_deref(), Some(kl.as_str()));
+    assert_eq!(gu.ipc_key.as_deref(), Some(ku.as_str()));
 }
 
 #[tokio::test]
@@ -340,8 +386,8 @@ async fn user_lane_cap_is_enforced() {
     h.state.register_base_lanes().await;
     lane_for(&h, json!("1"), None).await;
     lane_for(&h, json!("2"), None).await;
-    let id = crate::lanes::normalize_user_id(&json!("3"));
-    assert!(h.state.ensure_user_lane(id.as_deref(), None).await.is_err());
+    let id = UserId::parse("3").unwrap();
+    assert!(h.state.ensure_user_lane(Some(&id), None).await.is_err());
     // Existing users keep working.
     assert_eq!(lane_for(&h, json!("1"), None).await, "http:copilot:u:1");
     let res = h
@@ -561,6 +607,33 @@ async fn reset_reports_only_lanes_that_were_cleared() {
         ))
         .await;
     assert_eq!(body_json(res).await["lanes"], json!([INVESTIGATE_JID]));
+}
+
+#[tokio::test]
+async fn reset_rejects_invalid_user_ids() {
+    let h = connected_harness().await;
+    lane_for(&h, json!("bobsmith"), None).await;
+    for body in [
+        r#"{"scope":"chat","user_id":"bob.smith"}"#,
+        r#"{"scope":"chat","user_id":"../x"}"#,
+        r#"{"scope":"chat","user_id":[1]}"#,
+    ] {
+        let res = h.send(authed("POST", "/session/reset", Some(body))).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    assert!(h.host.cleared().is_empty());
+    // The exact id resets exactly its own lane.
+    let res = h
+        .send(authed(
+            "POST",
+            "/session/reset",
+            Some(r#"{"scope":"chat","user_id":"bobsmith"}"#),
+        ))
+        .await;
+    assert_eq!(
+        body_json(res).await["lanes"],
+        json!(["http:copilot:u:bobsmith"])
+    );
 }
 
 #[tokio::test]
@@ -1040,9 +1113,17 @@ async fn investigations_can_be_listed_and_fetched() {
 #[tokio::test]
 async fn status_reports_lanes_sessions_and_tasks() {
     let h = connected_harness().await;
+    lane_for(&h, json!("42"), None).await;
+    let key42 = key_of("42");
+    let orphan = key_of("gone");
     {
         let mut s = h.store.sessions.lock().unwrap();
-        for (key, tokens) in [("copilot", 100), ("copilot-u-42", 2000), ("main", 5)] {
+        for (key, tokens) in [
+            ("copilot", 100),
+            (key42.as_str(), 2000),
+            ("main", 5),
+            (orphan.as_str(), 7),
+        ] {
             s.push(SessionRow {
                 group_folder: key.into(),
                 session_id: format!("sess-{key}"),
@@ -1062,11 +1143,16 @@ async fn status_reports_lanes_sessions_and_tasks() {
     assert_eq!(v["pending_queue_depth"], 1);
     assert_eq!(v["active_investigations"], 0);
     let sessions = v["sessions"].as_array().unwrap();
-    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions.len(), 3);
     assert_eq!(sessions[0]["lane"], "copilot");
     assert_eq!(sessions[0]["user_id"], Value::Null);
+    assert_eq!(sessions[1]["lane"], key42.as_str());
     assert_eq!(sessions[1]["user_id"], "42");
     assert_eq!(sessions[1]["input_tokens"], 2000);
+    // A session whose lane is not registered (e.g. after a restart) cannot be
+    // mapped back to its exact id.
+    assert_eq!(sessions[2]["lane"], orphan.as_str());
+    assert_eq!(sessions[2]["user_id"], Value::Null);
     let tasks = v["scheduled_tasks"].as_array().unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["id"], DIGEST_TASK_ID);
@@ -1339,8 +1425,131 @@ async fn palace_failures_map_to_http_errors() {
     assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
         body_json(res).await["error"],
-        "palace-call.sh exited with status 1"
+        "palace call exited with status 1"
     );
+    *h.palace.response.lock().unwrap() = Some(Err(PalaceError::Disabled));
+    let res = h
+        .send(authed(
+            "POST",
+            "/palace/forget",
+            Some(r#"{"drawer_id":"d"}"#),
+        ))
+        .await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body_json(res).await,
+        json!({"error": "palace not configured"})
+    );
+}
+
+/// Write an executable `<root>/mempalace/palace-call.sh` running `body`.
+fn write_palace_script(root: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let script_dir = root.join("mempalace");
+    std::fs::create_dir_all(&script_dir).unwrap();
+    let script = script_dir.join("palace-call.sh");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// State wired like production (`HttpDeps::new`), with the test verifier.
+fn production_like_state(
+    root: &std::path::Path,
+    configure: impl FnOnce(&mut crate::HttpConfig),
+    palace: Option<Arc<dyn crate::PalaceRunner>>,
+) -> crate::HttpState {
+    let mut cfg = config_in(root);
+    configure(&mut cfg);
+    let store: Arc<dyn crate::HttpStore> = Arc::new(MemoryStore::default());
+    let audit: talon_core::audit::SharedAuditSink =
+        Arc::new(talon_core::audit::MemoryAuditSink::default());
+    let mut deps = crate::HttpDeps::new(&cfg, Arc::new(FakeHost::default()), store, audit);
+    if let Some(p) = palace {
+        deps = deps.with_palace(p);
+    }
+    deps.verifier = Arc::new(crate::auth::test_support::LocalVerifier);
+    crate::HttpState::new(cfg, deps)
+}
+
+#[tokio::test]
+async fn palace_is_disabled_by_default_and_never_runs_the_host_script() {
+    let dir = tempfile::tempdir().unwrap();
+    // A palace-call.sh that would leave a marker if it were ever executed.
+    let marker = dir.path().join("executed");
+    write_palace_script(
+        dir.path(),
+        &format!(r#"touch '{}'; echo '{{"ran":true}}'"#, marker.display()),
+    );
+    let state = production_like_state(dir.path(), |_| {}, None);
+    assert!(!state.config().palace_host_exec);
+    let app = crate::router(state);
+    for req in [
+        authed(
+            "POST",
+            "/palace/lesson",
+            Some(r#"{"customer_code":"acme","lesson_type":"environment","lesson_text":"x"}"#),
+        ),
+        authed("GET", "/palace/search?customer_code=acme&query=q", None),
+        authed("POST", "/palace/forget", Some(r#"{"drawer_id":"d"}"#)),
+    ] {
+        let res = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body_json(res).await,
+            json!({"error": "palace not configured"})
+        );
+    }
+    assert!(
+        !marker.exists(),
+        "host palace script must never run by default"
+    );
+}
+
+#[tokio::test]
+async fn host_script_palace_requires_the_explicit_unsafe_opt_in() {
+    let dir = tempfile::tempdir().unwrap();
+    write_palace_script(dir.path(), r#"cat >/dev/null; echo '{"ran":"host"}'"#);
+    let state = production_like_state(dir.path(), |c| c.palace_host_exec = true, None);
+    let res = tower::ServiceExt::oneshot(
+        crate::router(state),
+        authed("POST", "/palace/forget", Some(r#"{"drawer_id":"d"}"#)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(body_json(res).await, json!({"ran": "host"}));
+}
+
+#[tokio::test]
+async fn supplied_command_palace_runner_serves_the_endpoints() {
+    let dir = tempfile::tempdir().unwrap();
+    // Stand-in for `docker run ... palace`: echo the op back.
+    let runner = crate::CommandPalaceRunner::new(
+        std::path::PathBuf::from("/bin/sh"),
+        vec![
+            "-c".into(),
+            r#"req=$(cat); printf '{"via":"command","req":%s}
+' "$req""#
+                .into(),
+        ],
+        Duration::from_secs(5),
+    );
+    // An explicit runner wins even over the unsafe opt-in.
+    let state = production_like_state(
+        dir.path(),
+        |c| c.palace_host_exec = true,
+        Some(Arc::new(runner)),
+    );
+    let res = tower::ServiceExt::oneshot(
+        crate::router(state),
+        authed("POST", "/palace/forget", Some(r#"{"drawer_id":"d-1"}"#)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = body_json(res).await;
+    assert_eq!(v["via"], "command");
+    assert_eq!(v["req"], json!({"op": "delete_drawer", "drawer_id": "d-1"}));
 }
 
 // ---------------------------------------------------------------------------
@@ -1422,6 +1631,136 @@ async fn connect_serves_registers_lanes_seeds_the_digest_and_disconnects() {
         .unwrap();
     assert!(streamed.contains("text/event-stream"), "{streamed}");
     assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+}
+
+#[tokio::test]
+async fn sse_streams_outlive_the_header_read_timeout_over_a_real_socket() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // talon-net cuts slow *headers*; an established SSE response that sits
+    // idle far longer than that must keep streaming.
+    let h = Harness::with_config(|c| {
+        c.header_read_timeout = Duration::from_millis(200);
+        c.sse_keepalive = Duration::from_secs(60);
+    });
+    let channel = Arc::new(HttpChannel::from_state(h.state.clone()));
+    channel.connect().await.unwrap();
+    let addr = channel.local_addr().unwrap();
+
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(
+        format!(
+            "POST /message HTTP/1.1\r\nHost: localhost\r\nX-Api-Key: {KEY}\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{{\"message\":\"hi\"}}"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    for _ in 0..100 {
+        if !h.host.messages().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(h.host.messages().len(), 1);
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+
+    channel.set_typing(COPILOT_JID, true).await.unwrap();
+    channel
+        .send_message(COPILOT_JID, "late answer")
+        .await
+        .unwrap();
+    channel.on_turn_complete(COPILOT_JID).await.unwrap();
+
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf))
+            .await
+            .expect("stream must deliver the reply")
+            .unwrap();
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+        if String::from_utf8_lossy(&out).contains(r#"{"type":"done"}"#) {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(text.contains("text/event-stream"), "{text}");
+    assert!(text.contains("late answer"), "{text}");
+    assert!(text.contains(r#"{"type":"done"}"#), "{text}");
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn auth_throttling_sees_the_real_peer_ip_through_talon_net() {
+    let h = Harness::with_config(|c| c.auth_max_failures = 2);
+    let channel = Arc::new(HttpChannel::from_state(h.state.clone()));
+    channel.connect().await.unwrap();
+    let addr = channel.local_addr().unwrap();
+    let bad =
+        "GET /status HTTP/1.1\r\nHost: localhost\r\nX-Api-Key: wrong\r\nConnection: close\r\n\r\n";
+    for _ in 0..2 {
+        let out = raw_http(addr, bad.to_string()).await;
+        assert!(out.starts_with("HTTP/1.1 401"), "{out}");
+    }
+    let out = raw_http(addr, bad.to_string()).await;
+    assert!(out.starts_with("HTTP/1.1 429"), "{out}");
+    let actors: Vec<String> = h.audit.snapshot().into_iter().map(|e| e.actor).collect();
+    assert!(actors.iter().all(|a| a == "127.0.0.1"), "{actors:?}");
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn default_config_binds_loopback_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = crate::HttpConfig::new(dir.path());
+    cfg.port = 0;
+    let state = crate::HttpState::new(
+        cfg,
+        crate::HttpDeps {
+            host: Arc::new(FakeHost::default()),
+            store: Arc::new(MemoryStore::default()),
+            audit: Arc::new(talon_core::audit::MemoryAuditSink::default()),
+            verifier: Arc::new(crate::auth::test_support::LocalVerifier),
+            palace: Arc::new(crate::DisabledPalaceRunner),
+        },
+    );
+    let channel = HttpChannel::from_state(state);
+    channel.connect().await.unwrap();
+    let addr = channel.local_addr().unwrap();
+    assert!(addr.ip().is_loopback(), "{addr}");
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn symlinked_evals_and_prompts_dirs_are_refused_over_http() {
+    let h = connected_harness().await;
+    let group = h.root().join("groups/copilot");
+    std::fs::create_dir_all(&group).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("12-x.json"), r#"{"secret":true}"#).unwrap();
+    std::fs::write(outside.path().join("t.txt"), "# secret template").unwrap();
+    std::os::unix::fs::symlink(outside.path(), group.join("evals")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), group.join("prompts")).unwrap();
+
+    let res = h.send(authed("GET", "/evals/12", None)).await;
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!body_text(res).await.contains("secret"));
+    let res = h.send(authed("GET", "/templates", None)).await;
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!body_text(res).await.contains("secret"));
+    let res = h
+        .send(authed(
+            "POST",
+            "/investigate",
+            Some(r#"{"alert_id":12,"customer_code":"acme","template_override":"t.txt"}"#),
+        ))
+        .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert!(h.store.tasks.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

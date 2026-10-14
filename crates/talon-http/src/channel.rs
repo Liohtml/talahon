@@ -16,11 +16,30 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{HttpConfig, MIN_RECOMMENDED_KEY_LEN};
 use crate::lanes::SendOutcome;
 use crate::metrics::Metrics;
+use crate::palace::PalaceRunner;
 use crate::server::{HttpDeps, HttpState, router};
 use crate::store::HttpStore;
 
-/// How long `disconnect` waits for in-flight requests before aborting.
+/// How long open connections may drain after shutdown starts.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Extra time `disconnect` gives the server task beyond [`SHUTDOWN_GRACE`]
+/// before aborting it.
+const SHUTDOWN_SLACK: Duration = Duration::from_secs(2);
+/// HTTP/2 keep-alive ping interval (dead peers are dropped).
+const HTTP2_KEEP_ALIVE: Duration = Duration::from_secs(30);
+
+/// Connection limits for [`talon_net::serve`] (MYTH-06): header-read
+/// timeout and connection caps. Established requests — SSE streams in
+/// particular — have no idle timeout.
+fn server_limits(cfg: &HttpConfig) -> talon_net::ServerLimits {
+    talon_net::ServerLimits {
+        max_connections: cfg.max_connections.max(1),
+        max_connections_per_ip: cfg.max_connections_per_ip.max(1),
+        header_read_timeout: cfg.header_read_timeout,
+        http2_keep_alive_interval: HTTP2_KEEP_ALIVE,
+        shutdown_grace: SHUTDOWN_GRACE,
+    }
+}
 
 struct Running {
     cancel: CancellationToken,
@@ -49,6 +68,9 @@ impl std::fmt::Debug for HttpChannel {
 
 impl HttpChannel {
     /// Production constructor: `db` is the shared `talon_db::Db`.
+    ///
+    /// The `/palace/*` endpoints are disabled (503) — see [`HttpDeps::new`];
+    /// use [`Self::with_palace`] to supply a (containerized) palace runner.
     pub fn new(
         config: HttpConfig,
         host: Arc<dyn ChannelHost>,
@@ -57,6 +79,21 @@ impl HttpChannel {
     ) -> Self {
         let store: Arc<dyn HttpStore> = Arc::new(db);
         let deps = HttpDeps::new(&config, host, store, audit);
+        Self::from_state(HttpState::new(config, deps))
+    }
+
+    /// Like [`Self::new`], serving `/palace/*` through `palace` (normally a
+    /// [`crate::CommandPalaceRunner`] running the palace in a hardened
+    /// container).
+    pub fn with_palace(
+        config: HttpConfig,
+        host: Arc<dyn ChannelHost>,
+        db: talon_db::Db,
+        audit: SharedAuditSink,
+        palace: Arc<dyn PalaceRunner>,
+    ) -> Self {
+        let store: Arc<dyn HttpStore> = Arc::new(db);
+        let deps = HttpDeps::new(&config, host, store, audit).with_palace(palace);
         Self::from_state(HttpState::new(config, deps))
     }
 
@@ -92,6 +129,9 @@ impl HttpChannel {
                 min_len = MIN_RECOMMENDED_KEY_LEN,
                 "HTTP_API_KEY is short; use a long random key (e.g. `openssl rand -hex 32`)"
             );
+        }
+        if let Some(warning) = self.state.config().exposure_warning() {
+            tracing::warn!("{warning}");
         }
     }
 }
@@ -151,19 +191,17 @@ impl Channel for HttpChannel {
 
         let cancel = CancellationToken::new();
         let app = router(self.state.clone());
-        let shutdown = cancel.clone();
-        let server = tokio::spawn(async move {
-            let svc = app.into_make_service_with_connect_info::<SocketAddr>();
-            if let Err(e) = axum::serve(listener, svc)
-                .with_graceful_shutdown(shutdown.cancelled_owned())
-                .await
-            {
-                tracing::error!(err = %e, "HTTP channel server error");
-            }
-        });
+        // talon_net::serve inserts ConnectInfo<SocketAddr> per request, so
+        // per-IP auth throttling and audit actors keep working.
+        let server = tokio::spawn(talon_net::serve(
+            listener,
+            app,
+            server_limits(cfg),
+            cancel.clone(),
+        ));
         let sweeper = tokio::spawn(sweep_loop(self.state.clone(), cancel.clone()));
 
-        tracing::info!(%addr, "HTTP channel listening");
+        tracing::info!(%addr, palace = self.state.0.palace.mode(), "HTTP channel listening");
         tracing::info!(
             "HTTP channel endpoints: POST /message, POST /investigate, GET /investigations[/{{id}}], \
              GET /evals/{{alert_id}}, GET /templates, POST /palace/lesson, GET /palace/search, \
@@ -234,7 +272,7 @@ impl Channel for HttpChannel {
         r.cancel.cancel();
         // Open SSE streams would otherwise hold graceful shutdown forever.
         self.state.0.streams.close_all();
-        if tokio::time::timeout(SHUTDOWN_GRACE, &mut r.server)
+        if tokio::time::timeout(SHUTDOWN_GRACE + SHUTDOWN_SLACK, &mut r.server)
             .await
             .is_err()
         {

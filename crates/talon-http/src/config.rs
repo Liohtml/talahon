@@ -8,7 +8,11 @@
 //! |---|---|---|
 //! | `HTTP_API_KEY` (`.env` only) | unset | Shared secret; unset => every request but `/health` is rejected |
 //! | `COPILOT_HTTP_PORT` | `3100` | Listen port |
-//! | `COPILOT_HTTP_BIND` | `0.0.0.0` | Listen address |
+//! | `COPILOT_HTTP_BIND` | `127.0.0.1` | Listen address. Loopback by default; set a private interface explicitly to expose the API |
+//! | `COPILOT_HTTP_TLS_TERMINATED` | `false` | Operator asserts a TLS-terminating proxy fronts the API (silences the wildcard-bind warning) |
+//! | `COPILOT_HTTP_MAX_CONNECTIONS` | `512` | Open connections across all peers |
+//! | `COPILOT_HTTP_MAX_CONNECTIONS_PER_IP` | `320` | Open connections per peer IP (CoPilot usually connects from one address, so keep it above `COPILOT_HTTP_MAX_STREAMS`) |
+//! | `COPILOT_HTTP_HEADER_TIMEOUT_SECS` | `15` | Time a client has to send complete request headers |
 //! | `COPILOT_JID` | `http:copilot` | Base lane JID |
 //! | `COPILOT_GROUP_FOLDER` | `copilot` | Group folder the lanes run in |
 //! | `COPILOT_HTTP_CORS_ORIGINS` | empty | Comma-separated allowed browser origins (`*` allowed explicitly) |
@@ -17,9 +21,14 @@
 //! | `COPILOT_INVESTIGATION_DEDUP_MINUTES` | `10` | Repeat-trigger window (`0` disables) |
 //! | `COPILOT_HTTP_AUTH_MAX_FAILURES` | `10` | Failed auths per IP before throttling |
 //! | `COPILOT_HTTP_AUTH_WINDOW_SECS` | `300` | Throttle window |
-//! | `COPILOT_PALACE_TIMEOUT_MS` | `30000` | `palace-call.sh` timeout |
+//! | `COPILOT_PALACE_TIMEOUT_MS` | `30000` | Palace call timeout |
+//! | `TALON_PALACE_HOST_EXEC` | unset | `unsafe` runs `mempalace/palace-call.sh` **on the host** when no palace runner is supplied. DANGEROUS: agents can write `mempalace-data/`, so this allows host code execution (MYTH-01) |
 //! | `COPILOT_HTTP_MAX_USER_LANES` | `256` | Cap on in-memory per-user lanes |
 //! | `COPILOT_HTTP_MAX_STREAMS` | `256` | Cap on concurrently open SSE streams |
+//!
+//! `/palace/*` is disabled (503) unless the host supplies a palace runner
+//! (see [`crate::HttpDeps::with_palace`]) or the operator opts into host
+//! execution with `TALON_PALACE_HOST_EXEC=unsafe`.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
@@ -31,6 +40,8 @@ use talon_core::config::TalonConfig;
 use talon_core::env::EnvFile;
 use talon_core::paths::is_valid_group_folder;
 use talon_core::{Error, Result};
+
+use crate::palace::{HOST_EXEC_ENV, HOST_EXEC_UNSAFE};
 
 /// Default listen port (TS: `COPILOT_HTTP_PORT || 3100`).
 pub const DEFAULT_PORT: u16 = 3100;
@@ -44,6 +55,14 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 256 * 1024;
 pub const MAX_BODY_BYTES_CEILING: usize = 16 * 1024 * 1024;
 /// Keys shorter than this trigger a startup warning.
 pub const MIN_RECOMMENDED_KEY_LEN: usize = 16;
+/// Default listen address: loopback only (MYTH-05).
+pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+/// Default cap on open connections.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
+/// Default cap on open connections from one peer IP.
+pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 320;
+/// Default time a client has to send complete request headers.
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The shared API key. `Debug` never prints the value.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -94,8 +113,18 @@ impl fmt::Debug for ApiKey {
 /// Resolved configuration for the HTTP channel.
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
-    /// Listen address.
+    /// Listen address (default `127.0.0.1`).
     pub bind: IpAddr,
+    /// A TLS-terminating proxy fronts the API (operator assertion; only
+    /// silences the wildcard-bind warning).
+    pub tls_terminated: bool,
+    /// Max simultaneously open connections.
+    pub max_connections: usize,
+    /// Max simultaneously open connections from one peer IP.
+    pub max_connections_per_ip: usize,
+    /// Time a client has to send complete request headers. Established
+    /// requests (SSE streams) have no idle timeout.
+    pub header_read_timeout: Duration,
     /// Listen port (`0` picks a free port; see `HttpChannel::local_addr`).
     pub port: u16,
     /// Shared secret callers present via `X-Api-Key` or `Authorization: Bearer`.
@@ -127,8 +156,13 @@ pub struct HttpConfig {
     pub auth_max_failures: u32,
     /// Auth-failure throttle window.
     pub auth_window: Duration,
-    /// Path of `mempalace/palace-call.sh`.
+    /// Path of `mempalace/palace-call.sh` (only used with
+    /// [`Self::palace_host_exec`]).
     pub palace_script: PathBuf,
+    /// `TALON_PALACE_HOST_EXEC=unsafe`: without an explicitly supplied
+    /// palace runner, run `palace_script` directly on the host. Dangerous
+    /// (MYTH-01); off by default.
+    pub palace_host_exec: bool,
     /// Timeout for one palace call.
     pub palace_timeout: Duration,
     /// Max bytes of stdout accepted from a palace call.
@@ -151,13 +185,18 @@ impl HttpConfig {
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         let project_root = project_root.into();
         Self {
-            bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            bind: DEFAULT_BIND,
+            tls_terminated: false,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_connections_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
+            header_read_timeout: DEFAULT_HEADER_READ_TIMEOUT,
             port: DEFAULT_PORT,
             api_key: ApiKey::unset(),
             base_jid: DEFAULT_BASE_JID.to_string(),
             group_folder: DEFAULT_GROUP_FOLDER.to_string(),
             groups_dir: project_root.join("groups"),
             palace_script: project_root.join("mempalace").join("palace-call.sh"),
+            palace_host_exec: false,
             project_root,
             timezone: chrono_tz::UTC,
             cors_origins: Vec::new(),
@@ -242,7 +281,37 @@ impl HttpConfig {
             Duration::from_millis(env.get_u64("COPILOT_PALACE_TIMEOUT_MS", 30_000, 1_000));
         cfg.max_user_lanes = env.get_u64("COPILOT_HTTP_MAX_USER_LANES", 256, 1) as usize;
         cfg.max_streams = env.get_u64("COPILOT_HTTP_MAX_STREAMS", 256, 1) as usize;
+        cfg.tls_terminated = env.get_bool("COPILOT_HTTP_TLS_TERMINATED");
+        cfg.max_connections = env.get_u64(
+            "COPILOT_HTTP_MAX_CONNECTIONS",
+            DEFAULT_MAX_CONNECTIONS as u64,
+            1,
+        ) as usize;
+        cfg.max_connections_per_ip = env.get_u64(
+            "COPILOT_HTTP_MAX_CONNECTIONS_PER_IP",
+            DEFAULT_MAX_CONNECTIONS_PER_IP as u64,
+            1,
+        ) as usize;
+        cfg.header_read_timeout = Duration::from_secs(env.get_u64(
+            "COPILOT_HTTP_HEADER_TIMEOUT_SECS",
+            DEFAULT_HEADER_READ_TIMEOUT.as_secs(),
+            1,
+        ));
+        cfg.palace_host_exec = parse_host_exec(env.get(HOST_EXEC_ENV).as_deref())?;
         Ok(cfg)
+    }
+
+    /// Startup warning for a listen address that exposes the API (and its
+    /// cleartext API key) on every interface without TLS in front.
+    pub fn exposure_warning(&self) -> Option<String> {
+        (self.bind.is_unspecified() && !self.tls_terminated).then(|| {
+            format!(
+                "COPILOT_HTTP_BIND={} exposes the CoPilot HTTP API on every interface without TLS: \
+                 the API key travels in cleartext. Bind a private interface (or 127.0.0.1) and/or \
+                 put a TLS-terminating proxy in front (then set COPILOT_HTTP_TLS_TERMINATED=true)",
+                self.bind
+            )
+        })
     }
 
     /// `<groups_dir>/<group_folder>`.
@@ -259,6 +328,30 @@ impl HttpConfig {
     pub fn evals_dir(&self) -> PathBuf {
         self.group_dir().join("evals")
     }
+}
+
+/// `TALON_PALACE_HOST_EXEC`: only the exact value `unsafe` enables host
+/// execution; common "off" spellings disable it; anything else is a
+/// configuration error rather than a silent guess.
+fn parse_host_exec(raw: Option<&str>) -> Result<bool> {
+    let Some(value) = raw.map(str::trim) else {
+        return Ok(false);
+    };
+    if value == HOST_EXEC_UNSAFE {
+        return Ok(true);
+    }
+    if value.is_empty()
+        || ["0", "false", "no", "off"]
+            .iter()
+            .any(|off| off.eq_ignore_ascii_case(value))
+    {
+        return Ok(false);
+    }
+    Err(Error::Config(format!(
+        "{HOST_EXEC_ENV}={value:?} is not recognised: set it to '{HOST_EXEC_UNSAFE}' to run \
+         mempalace/palace-call.sh on the host (DANGEROUS: agent-writable palace data allows host \
+         code execution) or leave it unset"
+    )))
 }
 
 /// A base JID: 1-128 printable ASCII characters without whitespace, not
@@ -321,6 +414,114 @@ mod tests {
         assert!(!cfg.api_key.is_configured());
         assert_eq!(cfg.dedup_window, Duration::from_secs(600));
         assert_eq!(cfg.sse_keepalive, Duration::from_secs(15));
+        assert!(!cfg.palace_host_exec);
+    }
+
+    #[test]
+    fn default_bind_is_loopback() {
+        let cfg = HttpConfig::new("/opt/talon");
+        assert_eq!(cfg.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(cfg.exposure_warning().is_none());
+        if std::env::var("COPILOT_HTTP_BIND").is_err() {
+            let cfg = HttpConfig::from_env(
+                Path::new("/x"),
+                Path::new("/x/g"),
+                chrono_tz::UTC,
+                &env("COPILOT_HTTP_PORT=3100\n"),
+            )
+            .unwrap();
+            assert_eq!(cfg.bind.to_string(), "127.0.0.1");
+        }
+    }
+
+    #[test]
+    fn wildcard_bind_without_tls_warns() {
+        let mut cfg = HttpConfig::new("/opt/talon");
+        for addr in ["0.0.0.0", "::"] {
+            cfg.bind = addr.parse().unwrap();
+            cfg.tls_terminated = false;
+            let w = cfg.exposure_warning().unwrap();
+            assert!(w.contains("every interface"), "{w}");
+            cfg.tls_terminated = true;
+            assert!(cfg.exposure_warning().is_none());
+        }
+        // An explicitly chosen private interface does not warn.
+        cfg.tls_terminated = false;
+        cfg.bind = "10.0.0.5".parse().unwrap();
+        assert!(cfg.exposure_warning().is_none());
+        if std::env::var("COPILOT_HTTP_BIND").is_err()
+            && std::env::var("COPILOT_HTTP_TLS_TERMINATED").is_err()
+        {
+            let cfg = HttpConfig::from_env(
+                Path::new("/x"),
+                Path::new("/x/g"),
+                chrono_tz::UTC,
+                &env("COPILOT_HTTP_BIND=0.0.0.0\nCOPILOT_HTTP_TLS_TERMINATED=true\n"),
+            )
+            .unwrap();
+            assert!(cfg.bind.is_unspecified());
+            assert!(cfg.tls_terminated);
+            assert!(cfg.exposure_warning().is_none());
+        }
+    }
+
+    #[test]
+    fn connection_limits_are_configurable() {
+        let cfg = HttpConfig::new("/opt/talon");
+        assert_eq!(cfg.max_connections, DEFAULT_MAX_CONNECTIONS);
+        assert!(cfg.max_connections_per_ip > cfg.max_streams);
+        assert_eq!(cfg.header_read_timeout, Duration::from_secs(15));
+        if [
+            "COPILOT_HTTP_MAX_CONNECTIONS",
+            "COPILOT_HTTP_MAX_CONNECTIONS_PER_IP",
+            "COPILOT_HTTP_HEADER_TIMEOUT_SECS",
+        ]
+        .iter()
+        .any(|k| std::env::var(k).is_ok())
+        {
+            return;
+        }
+        let cfg = HttpConfig::from_env(
+            Path::new("/x"),
+            Path::new("/x/g"),
+            chrono_tz::UTC,
+            &env("COPILOT_HTTP_MAX_CONNECTIONS=64\nCOPILOT_HTTP_MAX_CONNECTIONS_PER_IP=0\nCOPILOT_HTTP_HEADER_TIMEOUT_SECS=5\n"),
+        )
+        .unwrap();
+        assert_eq!(cfg.max_connections, 64);
+        assert_eq!(cfg.max_connections_per_ip, 1);
+        assert_eq!(cfg.header_read_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn palace_host_exec_requires_the_exact_unsafe_value() {
+        assert!(!parse_host_exec(None).unwrap());
+        for off in ["", "0", "false", "NO", "off"] {
+            assert!(!parse_host_exec(Some(off)).unwrap(), "{off}");
+        }
+        assert!(parse_host_exec(Some("unsafe")).unwrap());
+        assert!(parse_host_exec(Some(" unsafe ")).unwrap());
+        for bad in ["1", "true", "yes", "UNSAFE", "on"] {
+            let err = parse_host_exec(Some(bad)).unwrap_err().to_string();
+            assert!(err.contains("DANGEROUS"), "{bad}: {err}");
+        }
+        if std::env::var(HOST_EXEC_ENV).is_err() {
+            let from = |content: &str| {
+                HttpConfig::from_env(
+                    Path::new("/x"),
+                    Path::new("/x/g"),
+                    chrono_tz::UTC,
+                    &env(content),
+                )
+            };
+            assert!(!from("").unwrap().palace_host_exec);
+            assert!(
+                from("TALON_PALACE_HOST_EXEC=unsafe\n")
+                    .unwrap()
+                    .palace_host_exec
+            );
+            assert!(from("TALON_PALACE_HOST_EXEC=true\n").is_err());
+        }
     }
 
     #[test]

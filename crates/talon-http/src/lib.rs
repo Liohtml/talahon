@@ -11,8 +11,10 @@
 //! - `http:copilot:investigate` — investigations; ephemeral session, its
 //!   output reaches CoPilot through the MCP write-back tools, not SSE.
 //! - `http:copilot:u:<id>` — one in-memory lane per CoPilot user, cloned
-//!   from the base group (same folder/mounts, own session + IPC namespace),
-//!   dropped again by the idle-lane sweep.
+//!   from the base group (same folder/mounts, own session + IPC namespace
+//!   `copilot-u-<lowercased id prefix>-<sha256 prefix>`), dropped again by
+//!   the idle-lane sweep. Ids must match `^[A-Za-z0-9_-]{1,48}$`; anything
+//!   else is rejected with 400 rather than stripped into another user's lane.
 //!
 //! ## Endpoints
 //! | Method | Path | Notes |
@@ -26,9 +28,9 @@
 //! | GET  | `/investigations/{id}` | one job |
 //! | GET  | `/evals/{alert_id}` | eval JSON files written by the agent |
 //! | GET  | `/templates` | prompt templates available for overrides |
-//! | POST | `/palace/lesson` | MemPalace `add_drawer` |
-//! | GET  | `/palace/search` | MemPalace `search` |
-//! | POST | `/palace/forget` | MemPalace `delete_drawer` |
+//! | POST | `/palace/lesson` | MemPalace `add_drawer` (503 unless a palace runner is configured) |
+//! | GET  | `/palace/search` | MemPalace `search` (503 unless configured) |
+//! | POST | `/palace/forget` | MemPalace `delete_drawer` (503 unless configured) |
 //! | POST | `/message` | chat; answers stream back as SSE |
 //!
 //! ## Security
@@ -36,7 +38,11 @@
 //! `/health`), constant-time comparison via [`talon_security::auth`],
 //! per-IP auth-failure throttling, request body limit, strict input
 //! validation, security headers, allowlist-based CORS, audit events and
-//! investigation de-duplication.
+//! investigation de-duplication. Served with [`talon_net::serve`]
+//! (header-read timeout, connection caps), bound to `127.0.0.1` unless
+//! configured otherwise. MemPalace code never runs on the host by default
+//! (see [`palace`]); agent-writable `evals/` and `prompts/` are read without
+//! following symlinks.
 //!
 //! ## Testing
 //! [`router`] builds the full axum [`axum::Router`] from an [`HttpState`];
@@ -67,7 +73,9 @@ mod testutil;
 pub use auth::{KeyVerifier, SecurityKeyVerifier};
 pub use channel::HttpChannel;
 pub use config::{ApiKey, HttpConfig};
-pub use lanes::{LaneIds, lane_jid_for_user, normalize_user_id};
-pub use palace::{PalaceError, PalaceRunner, ScriptPalaceRunner};
+pub use lanes::{InvalidUserId, LaneIds, UserId, is_valid_user_id, lane_jid_for_user};
+pub use palace::{
+    CommandPalaceRunner, DisabledPalaceRunner, PalaceError, PalaceRunner, ScriptPalaceRunner,
+};
 pub use server::{HttpDeps, HttpState, router};
 pub use store::HttpStore;
