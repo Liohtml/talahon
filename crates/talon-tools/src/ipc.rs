@@ -54,6 +54,10 @@ pub const REGISTER_GROUP: &str = "register_group";
 
 /// Largest message text accepted by `send_message`.
 const MAX_TEXT_BYTES: usize = 100_000;
+/// Error returned when a non-main group passes `script` (the host denies
+/// such requests too; failing here gives the model a clear message).
+const SCRIPT_MAIN_ONLY: &str = "Task scripts are only available to the main group. Put the logic into the task prompt instead.";
+
 /// Largest task prompt / script accepted.
 const MAX_PROMPT_BYTES: usize = 100_000;
 /// Largest `current_tasks.json` read by `list_tasks`.
@@ -314,7 +318,7 @@ impl Tool for ScheduleTaskTool {
                     "schedule_value": {"type": "string", "description": "cron: \"*/5 * * * *\" | interval: milliseconds like \"300000\" | once: local timestamp like \"2026-02-01T15:30:00\" (no Z suffix!)"},
                     "context_mode": {"type": "string", "enum": ["group", "isolated"], "default": "group", "description": "group=runs with chat history and memory, isolated=fresh session (include context in prompt)"},
                     "target_group_jid": {"type": "string", "description": "(Main group only) JID of the group to schedule the task for. Defaults to the current group."},
-                    "script": {"type": "string", "description": "Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { \"wakeAgent\": boolean, \"data\"?: any }. If wakeAgent is false, the agent is not called. Test your script with bash -c \"...\" before scheduling."}
+                    "script": {"type": "string", "description": "(Main group only) Optional bash script to run before waking the agent. Script must output JSON on the last line of stdout: { \"wakeAgent\": boolean, \"data\"?: any }. If wakeAgent is false, the agent is not called. Test your script with bash -c \"...\" before scheduling."}
                 },
                 "required": ["prompt", "schedule_type", "schedule_value"],
                 "additionalProperties": false
@@ -364,6 +368,9 @@ impl Tool for ScheduleTaskTool {
             Ok(p) => p,
             Err(e) => return ToolOutput::err(e),
         };
+        if script.is_some() && !ctx.is_main {
+            return ToolOutput::err(SCRIPT_MAIN_ONLY);
+        }
         if let Err(e) = validate_schedule(schedule_type, &schedule_value, self.opts.timezone) {
             return ToolOutput::err(e);
         }
@@ -609,7 +616,7 @@ impl Tool for UpdateTaskTool {
                     "prompt": {"type": "string", "description": "New prompt for the task"},
                     "schedule_type": {"type": "string", "enum": ["cron", "interval", "once"], "description": "New schedule type"},
                     "schedule_value": {"type": "string", "description": "New schedule value (see schedule_task for format)"},
-                    "script": {"type": "string", "description": "New script for the task. Set to empty string to remove the script."}
+                    "script": {"type": "string", "description": "(Main group only) New script for the task. Set to empty string to remove the script."}
                 },
                 "required": ["task_id"],
                 "additionalProperties": false
@@ -648,6 +655,10 @@ impl Tool for UpdateTaskTool {
             Ok(p) => p,
             Err(e) => return ToolOutput::err(e),
         };
+        // Clearing a script (empty string) is fine; setting one is main-only.
+        if script.as_ref().is_some_and(|s| !s.is_empty()) && !ctx.is_main {
+            return ToolOutput::err(SCRIPT_MAIN_ONLY);
+        }
         if prompt.is_none()
             && schedule_type.is_none()
             && schedule_value.is_none()
@@ -912,6 +923,28 @@ mod tests {
         assert!(targets.contains(&"tg:42"));
         assert!(targets.contains(&"tg:999"));
         assert!(files.iter().all(|v| v["context_mode"] == "isolated"));
+    }
+
+    #[tokio::test]
+    async fn task_scripts_are_main_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_for(dir.path());
+        let schedule = ScheduleTaskTool::default();
+        let args = json!({"prompt": "p", "schedule_type": "interval", "schedule_value": "60000", "script": "echo '{\"wakeAgent\":true}'"});
+        let out = schedule.call(args.clone(), &ctx).await;
+        assert!(out.is_error);
+        assert_eq!(out.content, SCRIPT_MAIN_ONLY);
+        assert!(files_in(&ctx.ipc_dir.join("tasks")).is_empty());
+        let update = UpdateTaskTool::default();
+        let out = update
+            .call(json!({"task_id": "task-x", "script": "echo hi"}), &ctx)
+            .await;
+        assert!(out.is_error);
+        assert_eq!(out.content, SCRIPT_MAIN_ONLY);
+        ctx.is_main = true;
+        let out = schedule.call(args, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(files_in(&ctx.ipc_dir.join("tasks")).len(), 1);
     }
 
     #[tokio::test]
