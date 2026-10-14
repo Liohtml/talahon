@@ -10,6 +10,8 @@
 //! bounded work on unbounded input (cap scanned length), unit tests for every
 //! bypass you can think of.
 
+#![warn(missing_docs)]
+
 pub mod auth;
 pub mod egress;
 pub mod injection;
