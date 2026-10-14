@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 default-run = "talon"
 
+[lib]
+name = "talon"
+path = "src/lib.rs"
+
 [[bin]]
 name = "talon"
 path = "src/main.rs"
@@ -23,7 +27,6 @@ talon-router = { workspace = true }
 talon-channels = { workspace = true }
 talon-http = { workspace = true }
 talon-setup = { workspace = true }
-talon-intel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -32,8 +35,10 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+futures = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

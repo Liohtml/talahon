@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "mysql": {
-      "command": "/workspace/project/mysql/mysql-mcp.sh"
+      "command": "/workspace/project/mysql/mysql-mcp.sh",
+      "runAs": "mcp-mysql"
     }
   }
 }
