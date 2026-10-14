@@ -730,3 +730,525 @@ async fn bind_conflict_is_a_config_error() {
             .is_err()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mythos hardening: MYTH-06 (talon-net serving), MYTH-07 (memory/concurrency
+// bounds), MYTH-08 (parameter allowlist, cache_salt).
+// ---------------------------------------------------------------------------
+
+async fn post_chat(gw: &GatewayHandle, token: &str, body: &Value) -> reqwest::Response {
+    http()
+        .post(url(gw, "/v1/chat/completions"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+fn sorted_keys(v: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+#[tokio::test]
+async fn allowlist_drops_vllm_extensions_and_keeps_allowed_fields() {
+    let server = MockServer::start().await;
+    mount_completion(&server).await;
+    let (gw, _audit) = start(&server, |_| {}).await;
+    let token = gw.issue_token("lane", Duration::from_secs(60));
+    let tools = json!([{"type": "function", "function": {
+        "name": "get_weather", "description": "w",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+    }}]);
+    let response_format = json!({"type": "json_schema", "json_schema": {
+        "name": "verdict", "strict": true, "schema": {"type": "object"}
+    }});
+    let mut body = json!({
+        "model": "qwen",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": [
+                {"type": "text", "text": "hi", "image_url": {"url": "http://169.254.169.254/latest/meta-data/"}}
+            ]}
+        ],
+        "tools": tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "temperature": 0.2, "top_p": 0.9, "top_k": 20, "min_p": 0.05,
+        "presence_penalty": 0.1, "frequency_penalty": 0.2, "repetition_penalty": 1.05,
+        "seed": 7, "stop": ["END"], "max_completion_tokens": 100,
+        "response_format": response_format,
+        "chat_template_kwargs": {
+            "enable_thinking": false,
+            "chat_template": "{% for i in range(999999999) %}x{% endfor %}",
+            "tokenize": true
+        }
+    });
+    let blocked = [
+        ("chat_template", json!("{{ evil }}")),
+        ("guided_regex", json!("(a|aa)+$")),
+        ("guided_grammar", json!("root ::= \"a\"*")),
+        ("guided_json", json!({"type": "object"})),
+        ("guided_choice", json!(["a"])),
+        ("structured_outputs", json!({"grammar": "root ::= \"a\"*"})),
+        ("ignore_eos", json!(true)),
+        ("min_tokens", json!(16000)),
+        ("request_id", json!("other-lanes-request")),
+        ("logits_processors", json!(["os.system"])),
+        ("priority", json!(-1000)),
+        ("best_of", json!(16)),
+        ("use_beam_search", json!(true)),
+        ("prompt_logprobs", json!(20)),
+        ("logprobs", json!(true)),
+        ("top_logprobs", json!(20)),
+        ("user", json!("analyst\nforged log line")),
+        ("mm_processor_kwargs", json!({"num_crops": 100})),
+        ("documents", json!([{"title": "x", "text": "y"}])),
+        ("vllm_xargs", json!({"k": 1})),
+        ("kv_transfer_params", json!({"do_remote_decode": true})),
+        ("continue_final_message", json!(true)),
+    ];
+    for (k, v) in &blocked {
+        body[*k] = v.clone();
+    }
+    let r = post_chat(&gw, &token, &body).await;
+    assert_eq!(r.status(), 200);
+
+    let sent = last_upstream_body(&server).await;
+    for (k, _) in &blocked {
+        assert!(sent.get(*k).is_none(), "{k} reached vLLM");
+    }
+    assert_eq!(
+        sorted_keys(&sent),
+        vec![
+            "cache_salt",
+            "chat_template_kwargs",
+            "frequency_penalty",
+            "max_completion_tokens",
+            "messages",
+            "min_p",
+            "model",
+            "parallel_tool_calls",
+            "presence_penalty",
+            "repetition_penalty",
+            "response_format",
+            "seed",
+            "stop",
+            "temperature",
+            "tool_choice",
+            "tools",
+            "top_k",
+            "top_p",
+        ]
+    );
+    assert_eq!(
+        sent["chat_template_kwargs"],
+        json!({"enable_thinking": false})
+    );
+    assert_eq!(
+        sent["messages"][1]["content"],
+        json!([{"type": "text", "text": "hi"}])
+    );
+    assert_eq!(sent["tools"], body["tools"]);
+    assert_eq!(sent["response_format"], body["response_format"]);
+    for k in [
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "seed",
+        "stop",
+        "max_completion_tokens",
+    ] {
+        assert_eq!(sent[k], body[k], "{k}");
+    }
+    // Dropped fields are counted (22 top-level + 2 kwargs), per label too.
+    let stats = gw.stats();
+    assert_eq!(stats.dropped_fields, 24);
+    assert_eq!(stats.labels["lane"].dropped_fields, 24);
+}
+
+#[tokio::test]
+async fn media_parts_grammar_forms_and_bad_shapes_are_rejected_before_upstream() {
+    let server = MockServer::start().await;
+    mount_completion(&server).await;
+    let (gw, audit) = start(&server, |_| {}).await;
+    let token = gw.issue_token("lane", Duration::from_secs(60));
+    let with_part = |part: Value| json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "look"}, part]}]});
+    let msgs = json!([{"role": "user", "content": "x"}]);
+    let bad = [
+        with_part(
+            json!({"type": "image_url", "image_url": {"url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"}}),
+        ),
+        with_part(
+            json!({"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}),
+        ),
+        with_part(
+            json!({"type": "audio_url", "audio_url": {"url": "http://10.0.0.5:9200/_cat/indices"}}),
+        ),
+        with_part(
+            json!({"type": "video_url", "video_url": {"url": "http://127.0.0.1:3001/v1/models"}}),
+        ),
+        with_part(json!({"type": "image_embeds", "image_embeds": "AAAA"})),
+        with_part(json!({"type": "file", "file": {"file_data": "AAAA"}})),
+        json!({"messages": msgs, "response_format": {"type": "grammar", "grammar": "root ::= \"a\""}}),
+        json!({"messages": msgs, "response_format": {"type": "regex", "regex": "(a+)+$"}}),
+        json!({"messages": msgs, "response_format": {"type": "structural_tag", "structures": [], "triggers": []}}),
+        json!({"messages": msgs, "response_format": {"type": "json_schema", "json_schema": {
+            "name": "big", "schema": {"type": "object", "description": "x".repeat(70 * 1024)}}}}),
+        json!({"messages": msgs, "tools": [{"type": "code_interpreter"}]}),
+        json!({"messages": [{"role": "developer", "content": "x"}]}),
+        json!({"messages": [{"role": "user", "content": {"type": "image_url"}}]}),
+        json!({"messages": msgs, "chat_template_kwargs": {"enable_thinking": "please"}}),
+    ];
+    for body in &bad {
+        let r = post_chat(&gw, &token, body).await;
+        assert_eq!(r.status(), 400, "{body}");
+        let err: Value = r.json().await.unwrap();
+        assert_eq!(err["error"]["type"], "invalid_request_error");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(gw.stats().rejected, bad.len() as u64);
+    assert!(
+        audit
+            .snapshot()
+            .iter()
+            .any(|e| e.kind == "gateway.request" && e.details["reason"] == "policy")
+    );
+}
+
+#[tokio::test]
+async fn tokenize_allowlist() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/tokenize"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"count": 3})))
+        .mount(&server)
+        .await;
+    let (gw, _audit) = start(&server, |_| {}).await;
+    let token = gw.issue_token("t", Duration::from_secs(60));
+    let send = |body: Value| {
+        let u = url(&gw, "/tokenize");
+        let t = token.clone();
+        async move {
+            http()
+                .post(u)
+                .bearer_auth(t)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let r = send(json!({
+        "model": "qwen", "prompt": "hello", "add_special_tokens": false,
+        "chat_template": "{{ x }}", "return_token_strs": true, "mm_processor_kwargs": {}
+    }))
+    .await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        last_upstream_body(&server).await,
+        json!({"model": "qwen", "prompt": "hello", "add_special_tokens": false})
+    );
+
+    let r = send(json!({
+        "messages": [{"role": "user", "content": "hi"}], "add_generation_prompt": true,
+        "tools": [{"type": "function", "function": {"name": "f"}}],
+        "chat_template_kwargs": {"enable_thinking": true, "chat_template": "x"},
+        "continue_final_message": true
+    }))
+    .await;
+    assert_eq!(r.status(), 200);
+    let sent = last_upstream_body(&server).await;
+    assert_eq!(
+        sorted_keys(&sent),
+        vec![
+            "add_generation_prompt",
+            "chat_template_kwargs",
+            "messages",
+            "model",
+            "tools"
+        ]
+    );
+    assert_eq!(
+        sent["chat_template_kwargs"],
+        json!({"enable_thinking": true})
+    );
+
+    for bad in [
+        json!({"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "http://169.254.169.254/"}}]}]}),
+        json!({"prompt": "a", "messages": [{"role": "user", "content": "b"}]}),
+        json!({"prompt": [1, 2, 3]}),
+        json!({"model": "qwen"}),
+    ] {
+        assert_eq!(send(bad.clone()).await.status(), 400, "{bad}");
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(gw.stats().dropped_fields, 5);
+}
+
+#[tokio::test]
+async fn cache_salt_is_per_label_and_can_be_disabled() {
+    let server = MockServer::start().await;
+    mount_completion(&server).await;
+    let (gw, _audit) = start(&server, |_| {}).await;
+    let body = json!({"messages": [], "cache_salt": "shared-by-attacker"});
+    let mut salt_for = Vec::new();
+    for label in ["lane-a", "lane-a", "lane-b"] {
+        let token = gw.issue_token(label, Duration::from_secs(60));
+        assert_eq!(post_chat(&gw, &token, &body).await.status(), 200);
+        let sent = last_upstream_body(&server).await;
+        let salt = sent["cache_salt"].as_str().unwrap().to_string();
+        assert_eq!(salt.len(), 64);
+        assert!(salt.bytes().all(|b| b.is_ascii_hexdigit()), "{salt}");
+        salt_for.push(salt);
+    }
+    assert_eq!(
+        salt_for[0], salt_for[1],
+        "same label, same salt (cache reuse)"
+    );
+    assert_ne!(
+        salt_for[0], salt_for[2],
+        "different labels never share the cache"
+    );
+    assert!(salt_for.iter().all(|s| s != "shared-by-attacker"));
+    assert_eq!(gw.stats().dropped_fields, 0, "a client salt is not a probe");
+
+    // Another gateway (another secret) derives other salts for the same label.
+    let (gw2, _audit) = start(&server, |_| {}).await;
+    let token = gw2.issue_token("lane-a", Duration::from_secs(60));
+    post_chat(&gw2, &token, &body).await;
+    assert_ne!(
+        last_upstream_body(&server).await["cache_salt"],
+        json!(salt_for[0])
+    );
+
+    // Disabled (older vLLM): no salt at all, client salts are still discarded.
+    let (gw3, _audit) = start(&server, |c| c.cache_salt = false).await;
+    let token = gw3.issue_token("lane-a", Duration::from_secs(60));
+    assert_eq!(post_chat(&gw3, &token, &body).await.status(), 200);
+    assert!(
+        last_upstream_body(&server)
+            .await
+            .get("cache_salt")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn global_concurrency_cap_spans_tokens() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(completion("slow"))
+                .set_delay(Duration::from_millis(400)),
+        )
+        .mount(&server)
+        .await;
+    let (gw, audit) = start(&server, |c| c.max_concurrent_requests = 1).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let b = gw.issue_token("b", Duration::from_secs(60));
+    let body = json!({"messages": []});
+    let (ra, rb) = tokio::join!(post_chat(&gw, &a, &body), post_chat(&gw, &b, &body));
+    let mut statuses = vec![ra.status().as_u16(), rb.status().as_u16()];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        vec![200, 503],
+        "per-token caps alone would allow both"
+    );
+    let limited = if ra.status() == 503 { ra } else { rb };
+    assert_eq!(limited.headers()["retry-after"], "2");
+    let err: Value = limited.json().await.unwrap();
+    assert_eq!(err["error"]["type"], "overloaded_error");
+    assert_eq!(gw.stats().overloaded, 1);
+    assert!(
+        audit
+            .snapshot()
+            .iter()
+            .any(|e| e.kind == "gateway.request" && e.details["reason"] == "overloaded")
+    );
+    // The permit is released with the response.
+    assert_eq!(post_chat(&gw, &b, &body).await.status(), 200);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+/// An upstream that sends one SSE event and then never finishes.
+async fn hanging_sse_upstream() -> String {
+    use axum::response::IntoResponse;
+    use futures::StreamExt;
+    async fn handler() -> axum::response::Response {
+        let first = futures::stream::once(async {
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n",
+            ))
+        });
+        let body = axum::body::Body::from_stream(first.chain(futures::stream::pending()));
+        ([("content-type", "text/event-stream")], body).into_response()
+    }
+    let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn open_streams_hold_a_global_permit_until_they_end_and_shutdown_ends_them() {
+    let upstream = hanging_sse_upstream().await;
+    let mut cfg = GatewayConfig::new(upstream, "qwen");
+    cfg.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+    cfg.max_concurrent_requests = 1;
+    cfg.server_limits.shutdown_grace = Duration::from_millis(300);
+    let gw = LlmGateway::start(cfg, Arc::new(MemoryAuditSink::default()))
+        .await
+        .unwrap();
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let b = gw.issue_token("b", Duration::from_secs(60));
+    let stream_body = json!({"messages": [], "stream": true});
+
+    let mut held = post_chat(&gw, &a, &stream_body).await;
+    assert_eq!(held.status(), 200);
+    assert!(held.chunk().await.unwrap().is_some());
+    // While the stream is open, the only permit is taken.
+    assert_eq!(post_chat(&gw, &b, &stream_body).await.status(), 503);
+
+    // Client disconnect ends the stream and frees the permit.
+    drop(held);
+    let mut next = None;
+    for _ in 0..100 {
+        let r = post_chat(&gw, &b, &stream_body).await;
+        if r.status() == 200 {
+            next = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut held = next.expect("permit released after client disconnect");
+    assert!(held.chunk().await.unwrap().is_some());
+
+    // Shutdown waits out the grace period, then ends streams still open.
+    let ended = tokio::time::timeout(Duration::from_secs(10), async {
+        gw.shutdown().await;
+        while let Ok(Some(_)) = held.chunk().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "stream must end after the shutdown grace");
+    assert!(
+        gw.stats().labels["b"].errors >= 1,
+        "cut-off stream counted as error"
+    );
+}
+
+#[tokio::test]
+async fn default_body_limit_is_4_mib() {
+    let server = MockServer::start().await;
+    mount_completion(&server).await;
+    let (gw, audit) = start(&server, |_| {}).await;
+    assert_eq!(talon_llm::gateway::DEFAULT_MAX_BODY_BYTES, 4 * 1024 * 1024);
+    let token = gw.issue_token("t", Duration::from_secs(60));
+    let big = json!({"messages": [{"role": "user", "content": "x".repeat(4 * 1024 * 1024)}]});
+    assert_eq!(post_chat(&gw, &token, &big).await.status(), 413);
+    let fits = json!({"messages": [{"role": "user", "content": "x".repeat(3 * 1024 * 1024)}]});
+    assert_eq!(post_chat(&gw, &token, &fits).await.status(), 200);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(
+        audit
+            .snapshot()
+            .iter()
+            .any(|e| e.details["reason"] == "body_too_large")
+    );
+}
+
+#[tokio::test]
+async fn json_value_budget_is_enforced_before_parsing() {
+    let server = MockServer::start().await;
+    mount_completion(&server).await;
+    let (gw, audit) = start(&server, |_| {}).await;
+    let token = gw.issue_token("t", Duration::from_secs(60));
+    // ~400 KB of `0,` — small on the wire, ~10x that as a Value tree.
+    let raw = format!(
+        "{{\"messages\":[],\"pad\":[{}0]}}",
+        "0,".repeat(talon_llm::gateway::MAX_JSON_NODES + 10)
+    );
+    let r = http()
+        .post(url(&gw, "/v1/chat/completions"))
+        .bearer_auth(&token)
+        .header("content-type", "application/json")
+        .body(raw)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 413);
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(
+        audit
+            .snapshot()
+            .iter()
+            .any(|e| e.details["reason"] == "body_too_complex")
+    );
+}
+
+#[tokio::test]
+async fn slow_header_clients_are_disconnected() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = MockServer::start().await;
+    let (gw, _audit) = start(&server, |c| {
+        c.server_limits.header_read_timeout = Duration::from_millis(300);
+    })
+    .await;
+    let mut s = tokio::net::TcpStream::connect(gw.addr()).await.unwrap();
+    s.write_all(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nX-Slow: ")
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let mut buf = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut buf)).await;
+    assert!(
+        read.is_ok(),
+        "gateway must close a connection with incomplete headers"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // Normal clients are unaffected.
+    let token = gw.issue_token("t", Duration::from_secs(60));
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+    let r = http()
+        .get(url(&gw, "/v1/models"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+#[tokio::test]
+async fn per_ip_connection_cap_closes_excess_connections() {
+    use tokio::io::AsyncReadExt;
+    let server = MockServer::start().await;
+    let (gw, _audit) = start(&server, |c| {
+        c.server_limits.max_connections_per_ip = 2;
+        c.server_limits.header_read_timeout = Duration::from_secs(30);
+    })
+    .await;
+    let _a = tokio::net::TcpStream::connect(gw.addr()).await.unwrap();
+    let _b = tokio::net::TcpStream::connect(gw.addr()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut c = tokio::net::TcpStream::connect(gw.addr()).await.unwrap();
+    let mut buf = [0u8; 16];
+    let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
+        .await
+        .expect("excess connection must be closed promptly")
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+}

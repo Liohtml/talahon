@@ -11,9 +11,12 @@
 //!   Used by the in-container agent (`talon-agent`) and by host-side checks.
 //! - **Gateway** ([`gateway::LlmGateway`]) — the host-side reverse proxy
 //!   containers use instead of vLLM: short-lived per-run tokens (stored as
-//!   SHA-256 digests), upstream key injection, model pinning, `max_tokens`
-//!   clamp, body limit, per-token rate limit, SSE passthrough, usage per
-//!   label, audit of auth failures.
+//!   SHA-256 digests), upstream key injection, a request-parameter
+//!   allowlist (no template overrides, media URLs or grammar decoding),
+//!   model pinning, `max_tokens` clamp, per-label `cache_salt`, body and
+//!   JSON-size limits, per-token rate limit, per-token and global
+//!   concurrency caps, slowloris-safe serving via `talon-net`, SSE
+//!   passthrough, usage per label, audit of auth failures.
 //!
 //! ```text
 //! talon (host) ── LlmGateway::start ── issue_token(label, ttl) ──▶ ContainerInput.llm (stdin)

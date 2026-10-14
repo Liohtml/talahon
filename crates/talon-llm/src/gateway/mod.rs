@@ -7,25 +7,32 @@
 //!
 //! ```text
 //! container ──Bearer tlgw_…──▶ gateway ──Bearer <TALON_VLLM_API_KEY>──▶ vLLM
+//!                              │ talon-net: header-read timeout, connection caps
 //!                              │ token digest lookup + TTL
-//!                              │ per-token rate limit (429 + Retry-After)
-//!                              │ body size limit (413)
+//!                              │ per-token rate limit + in-flight cap (429)
+//!                              │ global in-flight cap across tokens (503)
+//!                              │ body size (413) and JSON value budget
+//!                              │ parameter allowlist (unknown fields dropped,
+//!                              │   media parts / grammar forms refused)
 //!                              │ model pinned to the allow-list
 //!                              │ max_tokens clamped / inserted, n = 1
-//!                              │ dangerous params stripped (chat_template, …)
+//!                              │ per-label cache_salt (no shared prefix cache)
 //!                              │ SSE passed through, usage counted per label
 //!                              └ audit: gateway.auth.failed / gateway.request
 //! ```
 //!
 //! Routes: `POST /v1/chat/completions` (JSON or SSE), `GET /v1/models`
 //! (filtered to allowed models), `POST /tokenize`. Everything else is 404.
-//! Client headers are never forwarded; the upstream request is built fresh.
+//! Client headers are never forwarded; the upstream request is built fresh
+//! from the allowlisted fields (see [`CHAT_ALLOWED_FIELDS`] and
+//! [`TOKENIZE_ALLOWED_FIELDS`]).
 
 mod policy;
 mod stats;
 mod tokens;
 
 use std::fmt;
+use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -44,40 +51,63 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bytes::Bytes;
 use futures::Stream;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use talon_core::audit::{SharedAuditSink, event};
 use talon_core::protocol::LlmEndpoint;
 use talon_core::provider::DEFAULT_MAX_CONTEXT_TOKENS;
 use talon_core::types::VllmConfig;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
 use crate::client::{BaseUrls, normalize_base_url, read_body_capped};
 use crate::error::LlmError;
 use crate::sse::SseDecoder;
 use crate::types::Usage;
 
-pub use policy::STRIPPED_FIELDS;
+pub use policy::{
+    CHAT_ALLOWED_FIELDS, MAX_JSON_NODES, MAX_SCHEMA_BYTES, MAX_TOOL_DEFINITION_BYTES, MAX_TOOLS,
+    TOKENIZE_ALLOWED_FIELDS,
+};
 pub use stats::{GatewayStats, LabelStats, MAX_LABELS, OVERFLOW_LABEL};
+/// Connection limits of the gateway's HTTP server (re-exported from
+/// `talon-net` so hosts can tune them without depending on it).
+pub use talon_net::ServerLimits;
 pub use tokens::TOKEN_PREFIX;
 
-use policy::RequestPolicy;
+use policy::{CacheSaltKey, PolicyOutcome, RequestPolicy};
 use stats::StatsRecorder;
 use tokens::{AuthDecision, InFlightGuard, TokenStore, extract_token};
 
 /// Default gateway port (`TALON_LLM_GATEWAY_PORT`).
 pub const DEFAULT_GATEWAY_PORT: u16 = 3001;
-/// Default request body limit (long SOC transcripts + 100+ tool schemas).
-pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Default request body limit. 4 MiB is roughly a million tokens of text —
+/// far beyond any served context window — including 100+ tool schemas, and
+/// keeps `bodies x concurrency` bounded on the host.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// Default `max_tokens` cap.
 pub const DEFAULT_MAX_OUTPUT_TOKENS_CAP: u32 = 16_384;
 /// Default per-token request budget.
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
 /// Default per-token cap on simultaneous requests.
 pub const DEFAULT_MAX_CONCURRENT_PER_TOKEN: u32 = 8;
+/// Default cap on simultaneous requests across all tokens.
+pub const DEFAULT_MAX_CONCURRENT_REQUESTS: u32 = 32;
+/// Default cap on open connections (see [`ServerLimits`]).
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+/// Default cap on open connections from one peer IP (one container
+/// normally has one IP on the docker bridge).
+pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
 /// A client must deliver its request body within this time (slow-trickle
-/// clients would otherwise hold a connection and a request slot forever).
-const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// clients would otherwise hold a connection and request slots). 4 MiB
+/// over the docker bridge takes milliseconds.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// `Retry-After` (seconds) when the global concurrency cap is reached.
+const OVERLOAD_RETRY_AFTER: &str = "2";
+/// A streamed response may outlive `request_timeout` by this much before
+/// its slots are reclaimed (covers a client that stopped reading).
+const STREAM_DEADLINE_SLACK: Duration = Duration::from_secs(30);
 /// Audit records for auth failures / denials per minute (the rest are
 /// counted and reported in the next record as `suppressed_since_last`).
 const AUDIT_DENIALS_PER_MINUTE: u32 = 60;
@@ -113,6 +143,26 @@ pub struct GatewayConfig {
     /// Per-token cap on simultaneous requests (streams count until they
     /// end). `0` disables the cap.
     pub max_concurrent_per_token: u32,
+    /// Cap on simultaneous requests across **all** tokens (streams count
+    /// until they end; request bodies are buffered under it, so it also
+    /// bounds host memory at about `max_concurrent_requests x
+    /// max_body_bytes`). Excess requests get `503` + `Retry-After`. `0`
+    /// disables the cap.
+    pub max_concurrent_requests: u32,
+    /// Send a per-label `cache_salt` (derived from a random per-gateway
+    /// secret) with every chat request, so lanes never share vLLM
+    /// prefix-cache blocks — otherwise one lane could learn from response
+    /// timing whether another lane's prompt starts with a guessed prefix.
+    /// Needs vLLM >= 0.9 (V1 engine). Older vLLM releases and other
+    /// OpenAI-compatible servers may reject (or warn about) the unknown
+    /// field; set this to `false` for them. Client-supplied salts are
+    /// always discarded.
+    pub cache_salt: bool,
+    /// Connection limits for the HTTP server (header-read timeout, global
+    /// and per-IP connection caps, shutdown grace). Defaults:
+    /// [`DEFAULT_MAX_CONNECTIONS`], [`DEFAULT_MAX_CONNECTIONS_PER_IP`] and
+    /// the `talon-net` defaults for the rest.
+    pub server_limits: ServerLimits,
     /// Upstream request timeout (whole request, including a streamed body).
     pub request_timeout: Duration,
     /// Upper bound for a buffered (non-streaming) upstream response body.
@@ -140,14 +190,18 @@ impl fmt::Debug for GatewayConfig {
             .field("max_output_tokens_cap", &self.max_output_tokens_cap)
             .field("requests_per_minute", &self.requests_per_minute)
             .field("max_concurrent_per_token", &self.max_concurrent_per_token)
+            .field("max_concurrent_requests", &self.max_concurrent_requests)
+            .field("cache_salt", &self.cache_salt)
+            .field("server_limits", &self.server_limits)
             .field("request_timeout", &self.request_timeout)
             .finish_non_exhaustive()
     }
 }
 
 impl GatewayConfig {
-    /// Defaults: `127.0.0.1:3001`, 16 MiB bodies, 16384 output-token cap,
-    /// 120 requests/minute per token, 600 s timeout.
+    /// Defaults: `127.0.0.1:3001`, 4 MiB bodies, 16384 output-token cap,
+    /// 120 requests/minute and 8 in flight per token, 32 in flight overall,
+    /// per-label `cache_salt`, 256 connections (64 per IP), 600 s timeout.
     pub fn new(upstream_base_url: impl Into<String>, default_model: impl Into<String>) -> Self {
         Self {
             bind: SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_GATEWAY_PORT)),
@@ -159,6 +213,9 @@ impl GatewayConfig {
             max_output_tokens_cap: Some(DEFAULT_MAX_OUTPUT_TOKENS_CAP),
             requests_per_minute: DEFAULT_REQUESTS_PER_MINUTE,
             max_concurrent_per_token: DEFAULT_MAX_CONCURRENT_PER_TOKEN,
+            max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
+            cache_salt: true,
+            server_limits: default_server_limits(),
             request_timeout: crate::client::DEFAULT_REQUEST_TIMEOUT,
             max_response_bytes: crate::client::DEFAULT_MAX_RESPONSE_BYTES,
             audit_requests: false,
@@ -207,7 +264,29 @@ impl GatewayConfig {
                 "gateway request_timeout must be > 0".into(),
             ));
         }
+        let limits = &self.server_limits;
+        if limits.max_connections == 0 || limits.max_connections_per_ip == 0 {
+            return Err(LlmError::Config(
+                "gateway connection limits must be > 0".into(),
+            ));
+        }
+        if limits.header_read_timeout.is_zero() {
+            return Err(LlmError::Config(
+                "gateway header_read_timeout must be > 0".into(),
+            ));
+        }
         Ok(())
+    }
+}
+
+/// The gateway's default [`ServerLimits`]: [`DEFAULT_MAX_CONNECTIONS`],
+/// [`DEFAULT_MAX_CONNECTIONS_PER_IP`], `talon-net` defaults otherwise
+/// (15 s header-read timeout, 10 s shutdown grace).
+pub fn default_server_limits() -> ServerLimits {
+    ServerLimits {
+        max_connections: DEFAULT_MAX_CONNECTIONS,
+        max_connections_per_ip: DEFAULT_MAX_CONNECTIONS_PER_IP,
+        ..ServerLimits::default()
     }
 }
 
@@ -250,7 +329,15 @@ impl LlmGateway {
             allowed_models: config.allowed_models.clone(),
             default_model: config.default_model.clone(),
             max_output_tokens_cap: config.max_output_tokens_cap,
+            cache_salt: config.cache_salt.then(CacheSaltKey::random),
         };
+        let global = (config.max_concurrent_requests > 0).then(|| {
+            Arc::new(Semaphore::new(
+                usize::try_from(config.max_concurrent_requests)
+                    .unwrap_or(usize::MAX)
+                    .min(Semaphore::MAX_PERMITS),
+            ))
+        });
         let state = Arc::new(GatewayState {
             tokens: TokenStore::new(config.requests_per_minute, config.max_concurrent_per_token),
             stats: StatsRecorder::new(),
@@ -259,6 +346,8 @@ impl LlmGateway {
             upstream_auth,
             http,
             policy,
+            global,
+            kill: CancellationToken::new(),
             audit,
             config,
         });
@@ -282,18 +371,16 @@ impl LlmGateway {
             .fallback(not_found)
             .with_state(state.clone());
 
+        // talon-net instead of `axum::serve`: header-read timeout and
+        // connection caps against slowloris FD exhaustion; it inserts
+        // `ConnectInfo<SocketAddr>` for the handlers.
         let cancel = CancellationToken::new();
-        let serve_cancel = cancel.clone();
-        let task = tokio::spawn(async move {
-            let server = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(serve_cancel.cancelled_owned());
-            if let Err(e) = server.await {
-                tracing::error!(error = %e, "LLM gateway server failed");
-            }
-        });
+        let task = tokio::spawn(talon_net::serve(
+            listener,
+            app,
+            state.config.server_limits,
+            cancel.clone(),
+        ));
         let sweep_state = state.clone();
         let sweep_cancel = cancel.clone();
         tokio::spawn(async move {
@@ -316,6 +403,9 @@ impl LlmGateway {
             %addr,
             upstream = %state.upstream.api,
             default_model = %state.config.default_model,
+            max_concurrent_requests = state.config.max_concurrent_requests,
+            max_connections = state.config.server_limits.max_connections,
+            cache_salt = state.config.cache_salt,
             "LLM gateway listening"
         );
         Ok(GatewayHandle {
@@ -434,8 +524,9 @@ impl GatewayHandle {
         }
     }
 
-    /// Stop accepting connections and wait (up to 10 s) for in-flight
-    /// requests; remaining streams are aborted after that.
+    /// Stop accepting connections and wait (up to the configured
+    /// `server_limits.shutdown_grace`) for in-flight requests; streams
+    /// still running after that are ended.
     pub async fn shutdown(&self) {
         self.inner.cancel.cancel();
         let task = {
@@ -443,14 +534,19 @@ impl GatewayHandle {
             guard.take()
         };
         if let Some(task) = task {
+            let grace = self
+                .inner
+                .state
+                .config
+                .server_limits
+                .shutdown_grace
+                .saturating_add(Duration::from_secs(1));
             let abort = task.abort_handle();
-            if tokio::time::timeout(Duration::from_secs(10), task)
-                .await
-                .is_err()
-            {
+            if tokio::time::timeout(grace, task).await.is_err() {
                 abort.abort();
             }
         }
+        self.inner.state.kill.cancel();
         tracing::info!(addr = %self.inner.addr, "LLM gateway stopped");
     }
 }
@@ -467,6 +563,10 @@ struct GatewayState {
     tokens: TokenStore,
     stats: StatsRecorder,
     policy: RequestPolicy,
+    /// Global in-flight cap (`None` = disabled).
+    global: Option<Arc<Semaphore>>,
+    /// Cancelled at the end of `shutdown`: ends streams still running.
+    kill: CancellationToken,
     audit: SharedAuditSink,
     throttle: AuditThrottle,
 }
@@ -573,6 +673,62 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
+/// Slots a request holds while it runs: the token's in-flight slot and a
+/// global permit. Dropping it releases both.
+struct AdmissionGuard {
+    _slot: InFlightGuard,
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
+/// An authenticated request that got its slots.
+struct Admission {
+    label: String,
+    guard: AdmissionGuard,
+}
+
+/// Authenticate, rate-limit, take the token's in-flight slot, then a global
+/// permit. Keep the returned guard alive until the response is done.
+fn admit(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    remote: SocketAddr,
+    route: &str,
+) -> Result<Admission, Box<Response>> {
+    let (label, slot) = authenticate(state, headers, remote, route)?;
+    let permit = match &state.global {
+        None => None,
+        Some(sem) => match Arc::clone(sem).try_acquire_owned() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                state.stats.overloaded();
+                tracing::debug!(label, route, "LLM gateway at its global concurrency cap");
+                state.audit_denial(
+                    "gateway.request",
+                    &label,
+                    route,
+                    json!({"reason": "overloaded", "remote": remote.ip().to_string()}),
+                );
+                let mut resp = error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "overloaded_error",
+                    "LLM gateway is at its concurrency limit; retry later",
+                );
+                resp.headers_mut()
+                    .insert(RETRY_AFTER, HeaderValue::from_static(OVERLOAD_RETRY_AFTER));
+                return Err(Box::new(resp));
+            }
+        },
+    };
+    state.stats.request(&label);
+    Ok(Admission {
+        label,
+        guard: AdmissionGuard {
+            _slot: slot,
+            _permit: permit,
+        },
+    })
+}
+
 /// Authenticate, rate-limit and take an in-flight slot. Returns the token's
 /// label and the slot guard (keep it alive until the response is done).
 fn authenticate(
@@ -587,10 +743,7 @@ fn authenticate(
     );
     let decision = state.tokens.authorize(presented.as_deref());
     match decision {
-        AuthDecision::Allowed { label, guard } => {
-            state.stats.request(&label);
-            Ok((label, guard))
-        }
+        AuthDecision::Allowed { label, guard } => Ok((label, guard)),
         AuthDecision::TooManyConcurrent { label } => {
             state.stats.rate_limited(&label);
             state.audit_denial(
@@ -712,6 +865,69 @@ async fn read_request_body(
     }
 }
 
+/// Read the body and parse it once. The raw bytes are dropped as soon as
+/// the value exists; bodies with more than [`MAX_JSON_NODES`] values are
+/// refused before parsing (bounds the `Value` blow-up per request).
+async fn read_json_body(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    body: Body,
+    label: &str,
+    route: &str,
+) -> Result<Value, Box<Response>> {
+    let bytes = read_request_body(state, headers, body, label, route).await?;
+    if !policy::json_nodes_within(&bytes, MAX_JSON_NODES) {
+        return Err(Box::new(reject(
+            state,
+            label,
+            route,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "body_too_complex",
+            "request body has too many JSON values",
+        )));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| {
+        Box::new(reject(
+            state,
+            label,
+            route,
+            StatusCode::BAD_REQUEST,
+            "invalid_json",
+            "request body is not valid JSON",
+        ))
+    })
+}
+
+/// Count and log what the policy changed (field names are client-chosen:
+/// truncated, and `?`-formatted so control characters are escaped).
+fn note_policy(state: &GatewayState, label: &str, route: &str, outcome: &PolicyOutcome) {
+    if outcome.dropped_count > 0 {
+        state.stats.dropped_fields(label, outcome.dropped_count);
+    }
+    if outcome.model_rewritten || outcome.dropped_count > 0 {
+        tracing::debug!(
+            label,
+            route,
+            model = %outcome.model,
+            model_rewritten = outcome.model_rewritten,
+            dropped = ?outcome.dropped,
+            dropped_count = outcome.dropped_count,
+            "LLM gateway rewrote request"
+        );
+    }
+}
+
+/// Serialize the filtered body once (consuming it) for the upstream.
+fn encode_payload(json: Value) -> Result<Vec<u8>, Box<Response>> {
+    serde_json::to_vec(&json).map_err(|_| {
+        Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "cannot encode request",
+        ))
+    })
+}
+
 fn upstream_failure(state: &GatewayState, label: &str, route: &str, err: &LlmError) -> Response {
     state.stats.upstream_error(label);
     tracing::warn!(route, label, error = %err, "LLM gateway upstream request failed");
@@ -787,10 +1003,16 @@ fn is_event_stream(headers: &HeaderMap) -> bool {
         .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
 }
 
+/// Only the `usage` member is materialized; the rest of the response is
+/// skipped by the deserializer without building a `Value` tree.
+#[derive(Deserialize)]
+struct UsageEnvelope {
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
 fn usage_from_json(bytes: &[u8]) -> Option<Usage> {
-    let v: Value = serde_json::from_slice(bytes).ok()?;
-    let usage = v.get("usage").filter(|u| u.is_object())?;
-    serde_json::from_value(usage.clone()).ok()
+    serde_json::from_slice::<UsageEnvelope>(bytes).ok()?.usage
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -803,29 +1025,15 @@ async fn chat_completions(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (label, slot) = match authenticate(&state, &headers, remote, ROUTE_CHAT) {
-        Ok(l) => l,
+    let Admission { label, guard } = match admit(&state, &headers, remote, ROUTE_CHAT) {
+        Ok(a) => a,
         Err(r) => return *r,
     };
-    let bytes = match read_request_body(&state, &headers, body, &label, ROUTE_CHAT).await {
-        Ok(b) => b,
-        Err(r) => return *r,
-    };
-    let mut json: Value = match serde_json::from_slice(&bytes) {
+    let mut json = match read_json_body(&state, &headers, body, &label, ROUTE_CHAT).await {
         Ok(v) => v,
-        Err(_) => {
-            return reject(
-                &state,
-                &label,
-                ROUTE_CHAT,
-                StatusCode::BAD_REQUEST,
-                "invalid_json",
-                "request body is not valid JSON",
-            );
-        }
+        Err(r) => return *r,
     };
-    drop(bytes);
-    let outcome = match state.policy.apply_chat(&mut json) {
+    let outcome = match state.policy.apply_chat(&mut json, &label) {
         Ok(o) => o,
         Err(msg) => {
             return reject(
@@ -838,26 +1046,11 @@ async fn chat_completions(
             );
         }
     };
-    if outcome.model_rewritten || !outcome.removed.is_empty() {
-        tracing::debug!(
-            label,
-            model = %outcome.model,
-            model_rewritten = outcome.model_rewritten,
-            removed = ?outcome.removed,
-            "LLM gateway rewrote request"
-        );
-    }
-    let payload = match serde_json::to_vec(&json) {
+    note_policy(&state, &label, ROUTE_CHAT, &outcome);
+    let payload = match encode_payload(json) {
         Ok(p) => p,
-        Err(_) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "cannot encode request",
-            );
-        }
+        Err(r) => return *r,
     };
-    drop(json);
 
     let started = Instant::now();
     let url = format!("{}/chat/completions", state.upstream.api);
@@ -885,6 +1078,19 @@ async fn chat_completions(
     }
 
     if outcome.stream && status.is_success() && is_event_stream(upstream.headers()) {
+        // The stream's lifetime is bounded independently of the client:
+        // a watchdog owns the slots and releases them at the deadline even
+        // if the client stopped reading (hyper then never polls the body).
+        let stop = state.kill.child_token();
+        spawn_stream_watchdog(
+            guard,
+            stop.clone(),
+            state
+                .config
+                .request_timeout
+                .saturating_add(STREAM_DEADLINE_SLACK),
+            label.clone(),
+        );
         let tap = UsageTap {
             inner: Box::pin(upstream.bytes_stream()),
             decoder: Some(SseDecoder::default()),
@@ -895,7 +1101,9 @@ async fn chat_completions(
             started,
             completed: false,
             failed: false,
-            _slot: slot,
+            stopped: false,
+            stop: Box::pin(stop.clone().cancelled_owned()),
+            _done: stop.drop_guard(),
         };
         return Response::builder()
             .status(status)
@@ -917,6 +1125,7 @@ async fn chat_completions(
         Ok(b) => b,
         Err(e) => return upstream_failure(&state, &label, ROUTE_CHAT, &e),
     };
+    drop(guard);
     if status.is_success() {
         let usage = usage_from_json(&body);
         state.stats.completion(&label, usage.as_ref(), false);
@@ -935,6 +1144,28 @@ async fn chat_completions(
         );
     }
     passthrough(status, &upstream_headers, body)
+}
+
+/// Own a streaming request's slots until the stream ends (`stop` is
+/// cancelled by the stream's drop guard), the gateway shuts down (parent
+/// token), or `deadline` passes — then cancel `stop` (the stream ends the
+/// next time it is polled) and release the slots.
+fn spawn_stream_watchdog(
+    guard: AdmissionGuard,
+    stop: CancellationToken,
+    deadline: Duration,
+    label: String,
+) {
+    tokio::spawn(async move {
+        tokio::select! {
+            () = stop.cancelled() => {}
+            () = tokio::time::sleep(deadline) => {
+                tracing::warn!(label, "LLM gateway stream exceeded its deadline; releasing its slots");
+                stop.cancel();
+            }
+        }
+        drop(guard);
+    });
 }
 
 fn request_details(
@@ -960,8 +1191,11 @@ async fn list_models(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    let (label, _slot) = match authenticate(&state, &headers, remote, ROUTE_MODELS) {
-        Ok(l) => l,
+    let Admission {
+        label,
+        guard: _guard,
+    } = match admit(&state, &headers, remote, ROUTE_MODELS) {
+        Ok(a) => a,
         Err(r) => return *r,
     };
     let url = format!("{}/models", state.upstream.api);
@@ -1011,45 +1245,44 @@ async fn tokenize(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (label, _slot) = match authenticate(&state, &headers, remote, ROUTE_TOKENIZE) {
-        Ok(l) => l,
+    let Admission {
+        label,
+        guard: _guard,
+    } = match admit(&state, &headers, remote, ROUTE_TOKENIZE) {
+        Ok(a) => a,
         Err(r) => return *r,
     };
-    let bytes = match read_request_body(&state, &headers, body, &label, ROUTE_TOKENIZE).await {
-        Ok(b) => b,
-        Err(r) => return *r,
-    };
-    let mut json: Value = match serde_json::from_slice(&bytes) {
+    let mut json = match read_json_body(&state, &headers, body, &label, ROUTE_TOKENIZE).await {
         Ok(v) => v,
-        Err(_) => {
+        Err(r) => return *r,
+    };
+    let outcome = match state.policy.apply_tokenize(&mut json) {
+        Ok(o) => o,
+        Err(msg) => {
             return reject(
                 &state,
                 &label,
                 ROUTE_TOKENIZE,
                 StatusCode::BAD_REQUEST,
-                "invalid_json",
-                "request body is not valid JSON",
+                "policy",
+                &msg,
             );
         }
     };
-    if let Err(msg) = state.policy.apply_tokenize(&mut json) {
-        return reject(
-            &state,
-            &label,
-            ROUTE_TOKENIZE,
-            StatusCode::BAD_REQUEST,
-            "policy",
-            &msg,
-        );
-    }
+    note_policy(&state, &label, ROUTE_TOKENIZE, &outcome);
+    let payload = match encode_payload(json) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
     let url = format!("{}/tokenize", state.upstream.root);
     let request = state.upstream_request(
         state
             .http
             .post(&url)
+            .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
             .timeout(AUX_TIMEOUT.min(state.config.request_timeout))
-            .json(&json),
+            .body(payload),
     );
     let upstream = match request.send().await {
         Ok(r) => r,
@@ -1080,7 +1313,7 @@ type UpstreamBytes = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + 
 
 /// Passes upstream SSE bytes through unchanged while watching for the
 /// usage chunk; records stats/audit when the stream ends or is dropped
-/// (client disconnect).
+/// (client disconnect). Ends early when `stop` fires (deadline/shutdown).
 struct UsageTap {
     inner: UpstreamBytes,
     decoder: Option<SseDecoder>,
@@ -1091,8 +1324,13 @@ struct UsageTap {
     started: Instant,
     completed: bool,
     failed: bool,
-    /// Released when the stream ends or the client disconnects.
-    _slot: InFlightGuard,
+    /// `stop` fired; the stream has ended.
+    stopped: bool,
+    /// Deadline / shutdown signal (see [`spawn_stream_watchdog`]).
+    stop: Pin<Box<WaitForCancellationFutureOwned>>,
+    /// Cancels `stop` on drop, which makes the watchdog release the
+    /// request's slots.
+    _done: DropGuard,
 }
 
 impl UsageTap {
@@ -1121,6 +1359,15 @@ impl Stream for UsageTap {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
+        if this.stopped {
+            return Poll::Ready(None);
+        }
+        if this.stop.as_mut().poll(cx).is_ready() {
+            this.stopped = true;
+            this.failed = true;
+            tracing::debug!(label = %this.label, "LLM gateway stream ended by deadline or shutdown");
+            return Poll::Ready(None);
+        }
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 this.inspect(&bytes);
@@ -1204,7 +1451,125 @@ mod tests {
         let mut c = GatewayConfig::new("http://x", "m");
         c.max_body_bytes = 0;
         assert!(c.validate().is_err());
+        let mut c = GatewayConfig::new("http://x", "m");
+        c.server_limits.max_connections = 0;
+        assert!(c.validate().is_err());
+        let mut c = GatewayConfig::new("http://x", "m");
+        c.server_limits.max_connections_per_ip = 0;
+        assert!(c.validate().is_err());
+        let mut c = GatewayConfig::new("http://x", "m");
+        c.server_limits.header_read_timeout = Duration::ZERO;
+        assert!(c.validate().is_err());
         assert!(GatewayConfig::new("http://x", "m").validate().is_ok());
+    }
+
+    #[test]
+    fn hardened_defaults() {
+        let vllm = VllmConfig {
+            base_url: "http://vllm:8000".into(),
+            model: "big".into(),
+            fast_model: None,
+            max_context_tokens: None,
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            enable_thinking: None,
+            request_timeout_secs: None,
+        };
+        for cfg in [
+            GatewayConfig::new("http://x", "m"),
+            GatewayConfig::from_vllm(&vllm, None),
+        ] {
+            assert_eq!(cfg.max_body_bytes, 4 * 1024 * 1024);
+            assert_eq!(cfg.max_concurrent_requests, 32);
+            assert_eq!(cfg.max_concurrent_per_token, 8);
+            assert!(cfg.cache_salt);
+            assert_eq!(cfg.server_limits.max_connections, 256);
+            assert_eq!(cfg.server_limits.max_connections_per_ip, 64);
+            assert!(!cfg.server_limits.header_read_timeout.is_zero());
+            let dbg = format!("{cfg:?}");
+            assert!(dbg.contains("max_concurrent_requests: 32"), "{dbg}");
+        }
+    }
+
+    fn held_admission(store: &TokenStore, token: &str, sem: &Arc<Semaphore>) -> AdmissionGuard {
+        let AuthDecision::Allowed { guard, .. } = store.authorize(Some(token)) else {
+            panic!("token must be allowed");
+        };
+        AdmissionGuard {
+            _slot: guard,
+            _permit: Some(Arc::clone(sem).try_acquire_owned().unwrap()),
+        }
+    }
+
+    /// A client that stops reading a stream never lets hyper poll the body
+    /// again; the watchdog still gives the slots back at the deadline.
+    #[tokio::test]
+    async fn stream_watchdog_releases_slots_at_deadline_or_when_the_stream_ends() {
+        let store = TokenStore::new(0, 1);
+        let token = store.issue("lane", Duration::from_secs(60));
+        let sem = Arc::new(Semaphore::new(1));
+
+        let stop = CancellationToken::new();
+        let guard = held_admission(&store, &token, &sem);
+        spawn_stream_watchdog(
+            guard,
+            stop.clone(),
+            Duration::from_millis(50),
+            "lane".into(),
+        );
+        assert_eq!(sem.available_permits(), 0);
+        assert!(matches!(
+            store.authorize(Some(&token)),
+            AuthDecision::TooManyConcurrent { .. }
+        ));
+        tokio::time::timeout(Duration::from_secs(5), stop.cancelled())
+            .await
+            .expect("deadline cancels the stream");
+        for _ in 0..200 {
+            if sem.available_permits() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(sem.available_permits(), 1);
+        assert!(matches!(
+            store.authorize(Some(&token)),
+            AuthDecision::Allowed { .. }
+        ));
+
+        // Normal end: the stream's drop guard cancels `stop` long before
+        // the deadline.
+        let stop = CancellationToken::new();
+        let guard = held_admission(&store, &token, &sem);
+        spawn_stream_watchdog(
+            guard,
+            stop.clone(),
+            Duration::from_secs(3600),
+            "lane".into(),
+        );
+        drop(stop.clone().drop_guard());
+        for _ in 0..200 {
+            if sem.available_permits() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    #[test]
+    fn usage_is_read_without_materializing_the_body() {
+        let body = br#"{"id":"x","choices":[{"message":{"content":"hi"}}],
+            "usage":{"prompt_tokens":5,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}"#;
+        let u = usage_from_json(body).unwrap();
+        assert_eq!(
+            (u.prompt_tokens, u.completion_tokens, u.cached_tokens),
+            (5, 2, 4)
+        );
+        assert!(usage_from_json(br#"{"usage":null}"#).is_none());
+        assert!(usage_from_json(br#"{"choices":[]}"#).is_none());
+        assert!(usage_from_json(b"not json").is_none());
     }
 
     #[test]

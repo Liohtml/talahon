@@ -34,6 +34,8 @@ pub struct LabelStats {
     pub completion_tokens: u64,
     /// Summed prefix-cache hits.
     pub cached_tokens: u64,
+    /// Request fields the parameter allowlist dropped.
+    pub dropped_fields: u64,
 }
 
 /// Snapshot returned by `GatewayHandle::stats`.
@@ -47,10 +49,14 @@ pub struct GatewayStats {
     pub auth_failures: u64,
     /// Requests refused by the rate limit.
     pub rate_limited: u64,
+    /// Requests refused because the global concurrency cap was reached.
+    pub overloaded: u64,
     /// Requests refused by policy (bad JSON, too large, ...).
     pub rejected: u64,
     /// Upstream connection failures / timeouts / upstream auth errors.
     pub upstream_errors: u64,
+    /// Request fields the parameter allowlist dropped (all labels).
+    pub dropped_fields: u64,
     /// Live tokens.
     pub active_tokens: usize,
     /// Per-label accounting.
@@ -62,8 +68,10 @@ struct Inner {
     requests: u64,
     auth_failures: u64,
     rate_limited: u64,
+    overloaded: u64,
     rejected: u64,
     upstream_errors: u64,
+    dropped_fields: u64,
     labels: BTreeMap<String, LabelStats>,
 }
 
@@ -111,6 +119,18 @@ impl StatsRecorder {
         self.lock().rejected += 1;
     }
 
+    pub(crate) fn overloaded(&self) {
+        self.lock().overloaded += 1;
+    }
+
+    pub(crate) fn dropped_fields(&self, label: &str, n: usize) {
+        let n = u64::try_from(n).unwrap_or(u64::MAX);
+        let mut g = self.lock();
+        g.dropped_fields = g.dropped_fields.saturating_add(n);
+        let s = g.label(label);
+        s.dropped_fields = s.dropped_fields.saturating_add(n);
+    }
+
     pub(crate) fn request(&self, label: &str) {
         let mut g = self.lock();
         g.requests += 1;
@@ -148,8 +168,10 @@ impl StatsRecorder {
             requests: g.requests,
             auth_failures: g.auth_failures,
             rate_limited: g.rate_limited,
+            overloaded: g.overloaded,
             rejected: g.rejected,
             upstream_errors: g.upstream_errors,
+            dropped_fields: g.dropped_fields,
             active_tokens,
             labels: g.labels.clone(),
         }
@@ -179,12 +201,16 @@ mod tests {
         s.auth_failure();
         s.upstream_error("a");
         s.rejected();
+        s.overloaded();
+        s.dropped_fields("a", 3);
         let snap = s.snapshot(3);
         assert_eq!(snap.requests, 2);
         assert_eq!(snap.auth_failures, 1);
         assert_eq!(snap.rate_limited, 1);
         assert_eq!(snap.upstream_errors, 1);
         assert_eq!(snap.rejected, 1);
+        assert_eq!(snap.overloaded, 1);
+        assert_eq!(snap.dropped_fields, 3);
         assert_eq!(snap.active_tokens, 3);
         let a = &snap.labels["a"];
         assert_eq!(a.completions, 2);
@@ -192,6 +218,7 @@ mod tests {
         assert_eq!(a.prompt_tokens, 10);
         assert_eq!(a.cached_tokens, 8);
         assert_eq!(a.errors, 1);
+        assert_eq!(a.dropped_fields, 3);
         assert_eq!(snap.labels["b"].rate_limited, 1);
     }
 
