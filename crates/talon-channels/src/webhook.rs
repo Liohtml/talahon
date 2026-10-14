@@ -7,6 +7,10 @@
 //! never surfacing delivery failures as errors.
 //!
 //! Hardened:
+//! - **Own lane keys.** The lane shares the `copilot` folder with the
+//!   CoPilot HTTP lanes but runs under its own session/IPC key
+//!   ([`WEBHOOK_LANE_KEY`]) with an ephemeral session, so digest runs never
+//!   resume, mount or feed the analyst lane's session and IPC directories.
 //! - **Signed, not bearer.** With a secret, every request carries
 //!   `X-Talon-Timestamp: <unix seconds>` and
 //!   `X-Talon-Signature: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>`;
@@ -47,8 +51,15 @@ use crate::util::{backoff_delay, list_setting, secret_value, setting};
 /// JID used by the webhook channel. Tasks that want their output POSTed to
 /// the webhook use this as their `chat_jid`.
 pub const WEBHOOK_JID: &str = "webhook:copilot";
-/// Group folder the webhook lane runs in.
+/// Group folder the webhook lane runs in (shared with the CoPilot HTTP
+/// lanes: the digest uses the CoPilot workspace, prompts and MCP config).
 pub const WEBHOOK_GROUP_FOLDER: &str = "copilot";
+/// Session and IPC key of the webhook lane. Distinct from the base CoPilot
+/// lane (`http:copilot`, keys `copilot`), the per-analyst lanes
+/// (`copilot-u-<id>`) and the investigation lane (`copilot-investigate`), so
+/// a digest run neither mounts another lane's transcripts nor shares an IPC
+/// `input/` directory (follow-ups) with a concurrently running container.
+pub const WEBHOOK_LANE_KEY: &str = "copilot-webhook";
 /// Display name of the webhook lane.
 pub const WEBHOOK_GROUP_NAME: &str = "CoPilot Webhook";
 /// Signature header (`sha256=<hex>`).
@@ -367,9 +378,16 @@ impl Channel for WebhookChannel {
             container_config: None,
             requires_trigger: Some(false),
             is_main: false,
-            session_key: None,
-            ipc_key: None,
-            ephemeral_session: false,
+            // Own keys: never the folder-derived `copilot` of `http:copilot`.
+            session_key: Some(WEBHOOK_LANE_KEY.to_string()),
+            ipc_key: Some(WEBHOOK_LANE_KEY.to_string()),
+            // The lane is outbound-only (no chat to continue) and its only
+            // runs are scheduled tasks. The seeded digest is `context_mode:
+            // group` but self-contained (it re-queries the last 15 minutes
+            // and de-duplicates through CoPilot), so nothing is resumed or
+            // persisted: untrusted alert data from one run never carries
+            // over into the next, and the context cannot grow unbounded.
+            ephemeral_session: true,
             trusted_session_commands: false,
         };
         // In-memory only, like the TS `opts.registerGroup`.

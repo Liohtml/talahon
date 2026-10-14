@@ -536,44 +536,54 @@ async fn auth_with_real_constant_time_eq() {
 
 // --- filesystem bootstrap ---------------------------------------------------------------
 
-#[cfg(unix)]
-#[tokio::test]
-async fn symlinks_groups_emacs_to_main_and_writes_claude_md() {
-    let dir = tempfile::tempdir().unwrap();
-    let groups = dir.path().join("groups");
-    let host = Arc::new(RecordingHost::with_groups(&[("main:jid", {
+fn ops_main_host() -> Arc<RecordingHost> {
+    Arc::new(RecordingHost::with_groups(&[("main:jid", {
         let mut g = group("Ops", "ops-main", "");
         g.is_main = true;
         g
-    })]));
-    let audit = MemoryAuditSink::default();
-    let channel = make_with_dir(host, &audit, Some(groups.clone()));
+    })]))
+}
+
+/// MYTH-09: the Emacs lane gets its own real folder, never main's.
+#[tokio::test]
+async fn creates_own_emacs_folder_and_writes_claude_md() {
+    let dir = tempfile::tempdir().unwrap();
+    // Fresh install: not even `groups/` exists yet.
+    let groups = dir.path().join("groups");
+    let host = ops_main_host();
+    let channel = make_with_dir(
+        host.clone(),
+        &MemoryAuditSink::default(),
+        Some(groups.clone()),
+    );
     channel.connect().await.unwrap();
 
-    let link = groups.join("emacs");
-    let meta = std::fs::symlink_metadata(&link).unwrap();
-    assert!(meta.file_type().is_symlink());
-    assert_eq!(std::fs::read_link(&link).unwrap(), groups.join("ops-main"));
-    // CLAUDE.md lands in the main folder through the link.
-    let md = std::fs::read_to_string(groups.join("ops-main").join("CLAUDE.md")).unwrap();
+    let meta = std::fs::symlink_metadata(groups.join("emacs")).unwrap();
+    assert!(meta.is_dir() && !meta.file_type().is_symlink());
+    let md = std::fs::read_to_string(groups.join("emacs").join("CLAUDE.md")).unwrap();
+    assert_eq!(md, CLAUDE_MD);
     assert!(md.contains("Always format responses in standard markdown"));
+    // Main's folder is never created or written by the Emacs lane.
+    assert!(!groups.join("ops-main").exists());
+    assert!(!groups.join("main").exists());
+    let regs = host.registrations();
+    assert_eq!(regs.len(), 1);
+    assert_eq!(regs[0].1.folder, EMACS_GROUP_FOLDER);
     channel.disconnect().await.unwrap();
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn defaults_to_main_folder_and_keeps_existing_claude_md() {
+async fn keeps_existing_claude_md() {
     let dir = tempfile::tempdir().unwrap();
     let groups = dir.path().join("groups");
-    std::fs::create_dir_all(groups.join("main")).unwrap();
-    std::fs::write(groups.join("main").join("CLAUDE.md"), "keep me").unwrap();
-    let host = Arc::new(RecordingHost::default());
-    let channel = make_with_dir(host, &MemoryAuditSink::default(), Some(groups.clone()));
-    channel.connect().await.unwrap();
-    assert_eq!(
-        std::fs::read_link(groups.join("emacs")).unwrap(),
-        groups.join("main")
+    std::fs::create_dir_all(groups.join("emacs")).unwrap();
+    std::fs::write(groups.join("emacs").join("CLAUDE.md"), "keep me").unwrap();
+    let channel = make_with_dir(
+        main_host(),
+        &MemoryAuditSink::default(),
+        Some(groups.clone()),
     );
+    channel.connect().await.unwrap();
     assert_eq!(
         std::fs::read_to_string(groups.join("emacs").join("CLAUDE.md")).unwrap(),
         "keep me"
@@ -586,6 +596,7 @@ async fn leaves_existing_emacs_directory_alone() {
     let dir = tempfile::tempdir().unwrap();
     let groups = dir.path().join("groups");
     std::fs::create_dir_all(groups.join("emacs")).unwrap();
+    std::fs::write(groups.join("emacs").join("notes.md"), "mine").unwrap();
     let channel = make_with_dir(
         main_host(),
         &MemoryAuditSink::default(),
@@ -595,12 +606,157 @@ async fn leaves_existing_emacs_directory_alone() {
     let meta = std::fs::symlink_metadata(groups.join("emacs")).unwrap();
     assert!(meta.is_dir() && !meta.file_type().is_symlink());
     assert!(groups.join("emacs").join("CLAUDE.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(groups.join("emacs").join("notes.md")).unwrap(),
+        "mine"
+    );
     assert!(!groups.join("main").exists());
     channel.disconnect().await.unwrap();
 }
 
+/// MYTH-09: a legacy `groups/emacs -> groups/<main>` link is neither
+/// followed nor deleted; the bridge refuses to start and says how to fix it.
+#[cfg(unix)]
 #[tokio::test]
-async fn invalid_main_folder_creates_no_symlink() {
+async fn refuses_to_start_on_legacy_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let groups = dir.path().join("groups");
+    std::fs::create_dir_all(groups.join("ops-main")).unwrap();
+    std::fs::write(groups.join("ops-main").join("CLAUDE.md"), "main prompt").unwrap();
+    std::os::unix::fs::symlink(groups.join("ops-main"), groups.join("emacs")).unwrap();
+    let host = ops_main_host();
+    let channel = make_with_dir(
+        host.clone(),
+        &MemoryAuditSink::default(),
+        Some(groups.clone()),
+    );
+
+    let err = channel.connect().await.unwrap_err();
+    let msg = err.to_string();
+    assert!(matches!(err, Error::Config(_)), "{err:?}");
+    assert!(msg.contains("symlink"), "{msg}");
+    assert!(msg.contains("rm "), "{msg}");
+    assert!(
+        msg.contains(&groups.join("emacs").display().to_string()),
+        "{msg}"
+    );
+
+    // Link untouched, main untouched, nothing registered, nothing listening.
+    let meta = std::fs::symlink_metadata(groups.join("emacs")).unwrap();
+    assert!(meta.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_link(groups.join("emacs")).unwrap(),
+        groups.join("ops-main")
+    );
+    assert_eq!(
+        std::fs::read_to_string(groups.join("ops-main").join("CLAUDE.md")).unwrap(),
+        "main prompt"
+    );
+    assert_eq!(
+        std::fs::read_dir(groups.join("ops-main")).unwrap().count(),
+        1
+    );
+    assert!(host.registrations().is_empty());
+    assert!(!channel.is_connected());
+    assert!(channel.local_addr().await.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refuses_to_start_on_dangling_legacy_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let groups = dir.path().join("groups");
+    std::fs::create_dir_all(&groups).unwrap();
+    let target = dir.path().join("gone");
+    std::os::unix::fs::symlink(&target, groups.join("emacs")).unwrap();
+    let channel = make_with_dir(
+        main_host(),
+        &MemoryAuditSink::default(),
+        Some(groups.clone()),
+    );
+    assert!(channel.connect().await.is_err());
+    assert!(!target.exists(), "the link target must not be created");
+    assert!(
+        std::fs::symlink_metadata(groups.join("emacs"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[tokio::test]
+async fn refuses_to_start_when_emacs_entry_is_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let groups = dir.path().join("groups");
+    std::fs::create_dir_all(&groups).unwrap();
+    std::fs::write(groups.join("emacs"), "not a dir").unwrap();
+    let host = main_host();
+    let channel = make_with_dir(
+        host.clone(),
+        &MemoryAuditSink::default(),
+        Some(groups.clone()),
+    );
+    let err = channel.connect().await.unwrap_err();
+    assert!(err.to_string().contains("not a directory"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(groups.join("emacs")).unwrap(),
+        "not a dir"
+    );
+    assert!(host.registrations().is_empty());
+    assert!(!channel.is_connected());
+}
+
+/// MYTH-10: an agent-planted dangling `CLAUDE.md` symlink must not make the
+/// bootstrap create an arbitrary host file.
+#[cfg(unix)]
+#[tokio::test]
+async fn never_writes_claude_md_through_a_dangling_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let groups = dir.path().join("groups");
+    std::fs::create_dir_all(groups.join("emacs")).unwrap();
+    let outside = dir.path().join("outside").join("planted.txt");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    let link = groups.join("emacs").join("CLAUDE.md");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let channel = make_with_dir(
+        main_host(),
+        &MemoryAuditSink::default(),
+        Some(groups.clone()),
+    );
+    channel.connect().await.unwrap();
+    assert!(!outside.exists(), "write followed the planted symlink");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_link(&link).unwrap(), outside);
+    channel.disconnect().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn never_writes_claude_md_through_a_symlink_to_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let groups = dir.path().join("groups");
+    std::fs::create_dir_all(groups.join("emacs")).unwrap();
+    std::fs::create_dir_all(groups.join("main")).unwrap();
+    let main_md = groups.join("main").join("CLAUDE.md");
+    std::fs::write(&main_md, "main prompt").unwrap();
+    std::os::unix::fs::symlink(&main_md, groups.join("emacs").join("CLAUDE.md")).unwrap();
+    let channel = make_with_dir(
+        main_host(),
+        &MemoryAuditSink::default(),
+        Some(groups.clone()),
+    );
+    channel.connect().await.unwrap();
+    assert_eq!(std::fs::read_to_string(&main_md).unwrap(), "main prompt");
+    channel.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn main_group_folder_is_never_used() {
     let dir = tempfile::tempdir().unwrap();
     let groups = dir.path().join("groups");
     let host = Arc::new(RecordingHost::with_groups(&[("main:jid", {
@@ -610,7 +766,64 @@ async fn invalid_main_folder_creates_no_symlink() {
     })]));
     let channel = make_with_dir(host, &MemoryAuditSink::default(), Some(groups.clone()));
     channel.connect().await.unwrap();
-    assert!(std::fs::symlink_metadata(groups.join("emacs")).is_err());
+    let meta = std::fs::symlink_metadata(groups.join("emacs")).unwrap();
+    assert!(meta.is_dir() && !meta.file_type().is_symlink());
     assert!(!dir.path().join("outside").exists());
     channel.disconnect().await.unwrap();
+}
+
+// --- connection limits (MYTH-06) -----------------------------------------------------
+
+#[test]
+fn server_limits_cap_connections() {
+    let limits = server_limits();
+    assert_eq!(limits.max_connections, 32);
+    assert_eq!(limits.max_connections_per_ip, 16);
+    let defaults = talon_net::ServerLimits::default();
+    assert_eq!(limits.header_read_timeout, defaults.header_read_timeout);
+    assert!(limits.header_read_timeout <= Duration::from_secs(30));
+}
+
+/// Idle connections that never send a request (slowloris) cannot pile up:
+/// beyond the per-IP cap new connections are closed before any parsing.
+#[tokio::test]
+async fn excess_idle_connections_are_closed() {
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpStream;
+
+    let (channel, addr, _) = connected(main_host()).await;
+    let mut idle = Vec::new();
+    for _ in 0..MAX_CONNECTIONS_PER_IP {
+        idle.push(TcpStream::connect(addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut excess = TcpStream::connect(addr).await.unwrap();
+    let mut buf = [0u8; 16];
+    let n = tokio::time::timeout(Duration::from_secs(5), excess.read(&mut buf))
+        .await
+        .expect("excess connection must be closed promptly")
+        .unwrap_or(0);
+    assert_eq!(n, 0);
+
+    // Freeing the slots makes the bridge usable again.
+    drop(idle);
+    drop(excess);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut status = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Ok(resp) = client
+            .get(format!("http://{addr}/api/messages"))
+            .header("Authorization", bearer())
+            .send()
+            .await
+        {
+            status = Some(resp.status().as_u16());
+            break;
+        }
+    }
+    assert_eq!(status, Some(200));
+    drop(client);
+    channel.disconnect().await.unwrap();
+    assert!(!channel.is_connected());
 }

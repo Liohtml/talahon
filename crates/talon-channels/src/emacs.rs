@@ -8,16 +8,26 @@
 //! - `GET /api/messages?since=<epoch ms>` -> `{"messages": [{"text",
 //!   "timestamp"}]}` with every buffered reply newer than `since`.
 //! - Outbound replies are buffered (newest 200).
-//! - On connect the `emacs:default` group is auto-registered (persisted),
-//!   `groups/emacs` is symlinked to the main group's folder when missing,
-//!   and a Markdown-formatting `CLAUDE.md` is bootstrapped.
+//! - On connect the `emacs:default` group is auto-registered (persisted)
+//!   and a Markdown-formatting `CLAUDE.md` is bootstrapped in its folder.
 //!
 //! Hardened: the listener is bound to loopback only, a bearer token is
 //! **required** (the TS bridge ran unauthenticated without
 //! `EMACS_AUTH_TOKEN`) and compared in constant time, failures are audited
 //! (`http.auth.failed`), bodies are capped, reply timestamps and message ids
 //! are strictly increasing (no message lost or overwritten when two land in
-//! the same millisecond).
+//! the same millisecond). The server runs on [`talon_net::serve`]
+//! (header-read timeout, global and per-IP connection caps), so a local
+//! slowloris client cannot exhaust the host's file descriptors.
+//!
+//! **Own folder.** The TS bridge symlinked `groups/emacs` to the main
+//! group's folder, so this non-main lane wrote main's files, including the
+//! `CLAUDE.md` that becomes main's system prompt. The lane now runs in its
+//! own real `groups/emacs` directory. A leftover legacy symlink is never
+//! followed or deleted: the bridge refuses to start and tells the operator
+//! how to replace it. `CLAUDE.md` is created with `O_CREAT | O_EXCL`, so a
+//! planted (even dangling) symlink can never redirect the write to a host
+//! file.
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -45,14 +55,15 @@ use talon_core::types::{ChatMetadata, NewMessage, RegisteredGroup};
 use talon_core::{Error, Result};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::security::{ConstantTimeEqFn, default_constant_time_eq};
 use crate::util::{MonotonicMillis, project_root, secret_value, setting};
 
 /// The single JID the bridge owns.
 pub const EMACS_JID: &str = "emacs:default";
-/// Group folder the Emacs lane runs in (symlinked to the main group).
+/// Group folder the Emacs lane runs in: its own real directory under
+/// `groups/`, never a link to another group's folder.
 pub const EMACS_GROUP_FOLDER: &str = "emacs";
 /// Default listen port (same as the TS release).
 pub const DEFAULT_EMACS_PORT: u16 = 8766;
@@ -64,6 +75,19 @@ pub const EMACS_AUTH_TOKEN_ENV: &str = "EMACS_AUTH_TOKEN";
 pub const MAX_BUFFERED_REPLIES: usize = 200;
 /// Largest accepted request body.
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
+/// Simultaneous connections the bridge accepts (one local Emacs client).
+pub const MAX_CONNECTIONS: usize = 32;
+/// Simultaneous connections the bridge accepts from one peer IP.
+pub const MAX_CONNECTIONS_PER_IP: usize = 16;
+
+/// Connection limits of the bridge's HTTP server.
+pub fn server_limits() -> talon_net::ServerLimits {
+    talon_net::ServerLimits {
+        max_connections: MAX_CONNECTIONS,
+        max_connections_per_ip: MAX_CONNECTIONS_PER_IP,
+        ..Default::default()
+    }
+}
 
 const CLAUDE_MD: &str = "## Message Formatting
 
@@ -88,8 +112,8 @@ pub struct EmacsConfig {
     pub port: u16,
     /// Bearer token the Emacs client must present. Required; never logged.
     pub auth_token: String,
-    /// `groups/` directory for the symlink / `CLAUDE.md` bootstrap. `None`
-    /// skips the filesystem bootstrap.
+    /// `groups/` directory holding the lane's own `emacs` folder and its
+    /// `CLAUDE.md`. `None` skips the filesystem bootstrap.
     pub groups_dir: Option<PathBuf>,
 }
 
@@ -244,7 +268,15 @@ impl EmacsBridgeChannel {
     }
 
     async fn ensure_group_registered(&self) {
-        if self.shared.host.registered_groups().contains_key(EMACS_JID) {
+        if let Some(existing) = self.shared.host.registered_groups().get(EMACS_JID) {
+            if existing.folder != EMACS_GROUP_FOLDER {
+                // An operator choice; the bridge does not rewrite it, but
+                // the lane then does not use the folder prepared here.
+                warn!(
+                    folder = %existing.folder,
+                    "Emacs lane is registered on a folder other than groups/emacs; it shares that folder's files and CLAUDE.md"
+                );
+            }
             return;
         }
         let group = RegisteredGroup {
@@ -266,70 +298,91 @@ impl EmacsBridgeChannel {
             .await;
         info!("Emacs group auto-registered");
     }
-
-    /// `groups/emacs` -> main group folder, unless something already exists.
-    fn ensure_symlink(&self, groups_dir: &Path) {
-        let emacs_dir = groups_dir.join(EMACS_GROUP_FOLDER);
-        match std::fs::symlink_metadata(&emacs_dir) {
-            Ok(meta) => {
-                if !meta.file_type().is_symlink() {
-                    debug!(dir = %emacs_dir.display(), "Emacs groups dir already exists as a directory");
-                }
-                return;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                warn!(dir = %emacs_dir.display(), err = %e, "Emacs channel: cannot stat groups/emacs");
-                return;
-            }
-        }
-
-        let groups = self.shared.host.registered_groups();
-        let target_folder = groups
-            .values()
-            .find(|g| g.is_main)
-            .map(|g| g.folder.clone())
-            .unwrap_or_else(|| "main".to_string());
-        if target_folder == EMACS_GROUP_FOLDER {
-            return;
-        }
-        let target = match talon_core::paths::group_folder_path(groups_dir, &target_folder) {
-            Ok(path) => path,
-            Err(e) => {
-                warn!(err = %e, "Emacs channel: main group folder is invalid; no symlink");
-                return;
-            }
-        };
-        if let Err(e) = std::fs::create_dir_all(&target) {
-            warn!(err = %e, "Emacs channel: cannot create main group folder");
-            return;
-        }
-        match make_dir_link(&target, &emacs_dir) {
-            Ok(()) => info!(target = %target.display(), "Created groups/emacs symlink"),
-            Err(e) => error!(err = %e, "Emacs channel: failed to create groups/emacs symlink"),
-        }
-    }
-
-    fn ensure_claude_md(&self, groups_dir: &Path) {
-        let claude_md = groups_dir.join(EMACS_GROUP_FOLDER).join("CLAUDE.md");
-        if claude_md.exists() {
-            return;
-        }
-        match std::fs::write(&claude_md, CLAUDE_MD) {
-            Ok(()) => info!("Emacs channel: wrote CLAUDE.md"),
-            Err(e) => warn!(err = %e, "Emacs channel: could not write CLAUDE.md"),
-        }
-    }
 }
 
-#[cfg(unix)]
-fn make_dir_link(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
+/// Make sure `<groups_dir>/emacs` is the lane's own real directory and
+/// return its path.
+///
+/// # Errors
+/// The entry is a symlink (the legacy layout linked it to the main group's
+/// folder) or anything else that is not a directory, or it cannot be
+/// created. The entry is never followed, replaced or deleted: the operator
+/// decides what to keep.
+fn prepare_group_dir(groups_dir: &Path) -> Result<PathBuf> {
+    let dir = talon_core::paths::group_folder_path(groups_dir, EMACS_GROUP_FOLDER)?;
+    std::fs::create_dir_all(groups_dir).map_err(|e| {
+        Error::Channel(format!(
+            "Emacs bridge cannot create {}: {e}",
+            groups_dir.display()
+        ))
+    })?;
+    // `mkdir` never follows a symlink in the last component: an existing
+    // entry of any kind is reported as `AlreadyExists` and inspected below.
+    match std::fs::create_dir(&dir) {
+        Ok(()) => info!(dir = %dir.display(), "Emacs channel: created group folder"),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(Error::Channel(format!(
+                "Emacs bridge cannot create {}: {e}",
+                dir.display()
+            )));
+        }
+    }
+    let meta = std::fs::symlink_metadata(&dir)
+        .map_err(|e| Error::Channel(format!("Emacs bridge cannot stat {}: {e}", dir.display())))?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(&dir)
+            .map(|t| t.display().to_string())
+            .unwrap_or_else(|_| "?".to_string());
+        return Err(Error::Config(format!(
+            "Emacs bridge not started: {dir} is a symlink to {target} (legacy layout that let \
+             the non-main Emacs lane write another group's folder and CLAUDE.md). Replace it \
+             with a real directory: `rm {dir}` (removes only the link, not its target), copy \
+             any instructions the Emacs lane should keep into {dir}/CLAUDE.md, then restart \
+             Talon. The bridge creates the folder itself when it is missing.",
+            dir = dir.display()
+        )));
+    }
+    if !meta.is_dir() {
+        return Err(Error::Config(format!(
+            "Emacs bridge not started: {} exists but is not a directory; move it away and \
+             restart Talon",
+            dir.display()
+        )));
+    }
+    Ok(dir)
 }
 
-#[cfg(not(unix))]
-fn make_dir_link(_target: &Path, link: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(link)
+/// Bootstrap `<dir>/CLAUDE.md` with the Emacs formatting instructions.
+///
+/// The file is opened with `create_new` (`O_CREAT | O_EXCL`), which fails on
+/// any existing entry, including a dangling symlink: an agent-planted link
+/// can never redirect the write to a host file, and an existing file is
+/// left untouched.
+fn ensure_claude_md(dir: &Path) {
+    let path = dir.join("CLAUDE.md");
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, CLAUDE_MD.as_bytes()));
+    match written {
+        Ok(()) => info!("Emacs channel: wrote CLAUDE.md"),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let is_link = std::fs::symlink_metadata(&path)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_link {
+                warn!(
+                    path = %path.display(),
+                    "Emacs channel: CLAUDE.md is a symlink; left untouched (never written through)"
+                );
+            } else {
+                debug!("Emacs channel: CLAUDE.md already exists");
+            }
+        }
+        Err(e) => warn!(err = %e, "Emacs channel: could not write CLAUDE.md"),
+    }
 }
 
 #[async_trait]
@@ -347,11 +400,13 @@ impl Channel for EmacsBridgeChannel {
         if server.is_some() {
             return Ok(());
         }
-        // Filesystem first, so the host's own group bootstrap (folder,
-        // CLAUDE.md template) follows the symlink instead of shadowing it.
+        // Filesystem first: a legacy `groups/emacs` symlink stops the
+        // bridge before the lane is registered (the host's registration
+        // would otherwise create directories through the link). The host
+        // logs the returned error and keeps running without the bridge.
         if let Some(groups_dir) = &self.groups_dir {
-            self.ensure_symlink(groups_dir);
-            self.ensure_claude_md(groups_dir);
+            let dir = prepare_group_dir(groups_dir)?;
+            ensure_claude_md(&dir);
         }
         self.ensure_group_registered().await;
 
@@ -370,13 +425,10 @@ impl Channel for EmacsBridgeChannel {
         let listening = Arc::clone(&self.listening);
         listening.store(true, Ordering::SeqCst);
         let handle = tokio::spawn(async move {
-            let result = axum::serve(listener, app)
-                .with_graceful_shutdown(async move { shutdown.cancelled().await })
-                .await;
+            // Header-read timeout and connection caps: no slowloris FD
+            // exhaustion through the bridge.
+            talon_net::serve(listener, app, server_limits(), shutdown).await;
             listening.store(false, Ordering::SeqCst);
-            if let Err(e) = result {
-                error!(err = %e, "Emacs bridge server failed");
-            }
         });
         info!(
             port = addr.port(),
@@ -416,10 +468,9 @@ impl Channel for EmacsBridgeChannel {
         };
         server.cancel.cancel();
         let mut handle = server.handle;
-        if tokio::time::timeout(Duration::from_secs(5), &mut handle)
-            .await
-            .is_err()
-        {
+        // `serve` drains open connections for at most `shutdown_grace`.
+        let wait = server_limits().shutdown_grace + Duration::from_secs(2);
+        if tokio::time::timeout(wait, &mut handle).await.is_err() {
             handle.abort();
         }
         self.listening.store(false, Ordering::SeqCst);

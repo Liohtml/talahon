@@ -113,6 +113,9 @@ async fn connect_registers_in_memory_lane_and_metadata() {
     assert_eq!(group.trigger, "");
     assert_eq!(group.requires_trigger, Some(false));
     assert!(!group.is_main);
+    assert_eq!(group.session_key(), "copilot-webhook");
+    assert_eq!(group.ipc_key(), "copilot-webhook");
+    assert!(group.ephemeral_session);
 
     let meta = f.host.metadata();
     assert_eq!(meta.len(), 1);
@@ -123,6 +126,50 @@ async fn connect_registers_in_memory_lane_and_metadata() {
 
     f.channel.disconnect().await.unwrap();
     assert!(!f.channel.is_connected());
+}
+
+/// MYTH-03: the webhook lane shares the `copilot` folder with the CoPilot
+/// HTTP lanes but must not share their session or IPC namespace.
+#[tokio::test]
+async fn webhook_lane_keys_are_isolated_from_copilot_lanes() {
+    let base = crate::test_support::group("CoPilot", "copilot", "");
+    let mut investigate = crate::test_support::group("CoPilot investigate", "copilot", "");
+    investigate.session_key = Some("copilot-investigate".to_string());
+    investigate.ipc_key = Some("copilot-investigate".to_string());
+    let host = Arc::new(RecordingHost::with_groups(&[
+        ("http:copilot", base.clone()),
+        ("http:copilot:investigate", investigate.clone()),
+    ]));
+    let channel = WebhookChannel::new(
+        config("https://hooks.example.com/x"),
+        host.clone(),
+        Arc::new(MemoryAuditSink::default()),
+    )
+    .unwrap()
+    .with_egress_guard(Arc::new(AllowGuard::default()));
+    channel.connect().await.unwrap();
+
+    let groups = host.registered_groups();
+    let webhook = &groups[WEBHOOK_JID];
+    assert_eq!(webhook.folder, WEBHOOK_GROUP_FOLDER);
+    assert_eq!(webhook.session_key(), WEBHOOK_LANE_KEY);
+    assert_eq!(webhook.ipc_key(), WEBHOOK_LANE_KEY);
+    for (jid, other) in groups.iter().filter(|(jid, _)| *jid != WEBHOOK_JID) {
+        assert_ne!(webhook.session_key(), other.session_key(), "{jid}");
+        assert_ne!(webhook.ipc_key(), other.ipc_key(), "{jid}");
+    }
+    // Never collides with a per-analyst lane (`copilot-u-<id>`).
+    assert!(!WEBHOOK_LANE_KEY.starts_with("copilot-u-"));
+    // The keys end up in host paths: they must be valid group folders.
+    assert!(talon_core::paths::is_valid_group_folder(
+        webhook.session_key()
+    ));
+    assert!(talon_core::paths::is_valid_group_folder(webhook.ipc_key()));
+    // Digest runs start fresh and never persist a session.
+    assert!(!webhook.should_persist_session());
+    // The existing CoPilot lanes are untouched.
+    assert_eq!(groups["http:copilot"], base);
+    assert_eq!(groups["http:copilot:investigate"], investigate);
 }
 
 #[tokio::test]
