@@ -27,6 +27,7 @@ talon-router = { path = "crates/talon-router" }
 talon-channels = { path = "crates/talon-channels" }
 talon-http = { path = "crates/talon-http" }
 talon-setup = { path = "crates/talon-setup" }
+talon-net = { path = "crates/talon-net" }
 
 # --- async runtime ---
 tokio = { version = "1.47", features = ["full"] }

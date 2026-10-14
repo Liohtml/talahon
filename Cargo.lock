@@ -1974,6 +1974,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "talon-net"
+version = "2.0.0"
+dependencies = [
+ "axum",
+ "http",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "talon-router"
 version = "2.0.0"
 dependencies = [
