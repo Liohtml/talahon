@@ -24,6 +24,7 @@ pub mod tasks;
 mod tests;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
@@ -44,11 +45,17 @@ use tokio::time::Instant;
 
 use crate::agent::{ContainerLauncher, LlmAccess};
 use crate::allowlist::AllowlistSource;
+use crate::output_limits::OutputLimits;
+use crate::safe_fs;
 
 /// Router-state key of the global "seen" cursor.
 pub const LAST_TIMESTAMP_KEY: &str = "last_timestamp";
 /// Router-state key of the per-lane agent cursors (JSON object).
 pub const LAST_AGENT_TIMESTAMP_KEY: &str = "last_agent_timestamp";
+/// Per-group memory file bootstrapped from the `main` / `global` template.
+const CLAUDE_MD: &str = "CLAUDE.md";
+/// Largest `CLAUDE.md` template the host copies.
+const MAX_TEMPLATE_BYTES: u64 = 256 * 1024;
 
 /// Tunables that are not part of `TalonConfig`.
 #[derive(Debug, Clone)]
@@ -62,6 +69,8 @@ pub struct Settings {
     pub token_ttl_margin: Duration,
     /// Shutdown grace for running lane jobs.
     pub shutdown_grace: Duration,
+    /// Caps on agent output (MYTH-07).
+    pub output_limits: OutputLimits,
 }
 
 impl Default for Settings {
@@ -71,6 +80,7 @@ impl Default for Settings {
             command_close_delay: Duration::from_secs(10),
             token_ttl_margin: Duration::from_secs(5 * 60),
             shutdown_grace: Duration::from_secs(10),
+            output_limits: OutputLimits::default(),
         }
     }
 }
@@ -454,30 +464,61 @@ impl Orchestrator {
             st.groups.insert(jid.to_string(), group.clone());
         }
 
-        if let Err(e) = std::fs::create_dir_all(group_dir.join("logs")) {
-            tracing::warn!(jid, folder = %group.folder, error = %e, "cannot create group folder");
-        }
-        if create_template {
-            self.install_claude_md(&group_dir, &group);
-        }
+        self.prepare_group_dir(&group_dir, &group, create_template);
         tracing::info!(jid, name = %group.name, folder = %group.folder, persisted, "Group registered");
         Ok(())
     }
 
+    /// Create `groups/<folder>/logs` and, with `create_template`, bootstrap
+    /// `CLAUDE.md`. Group folders are agent-writable, so everything below
+    /// `groups/` is handled descriptor-relatively without following
+    /// symlinks (MYTH-10): a planted `groups/<folder>` or `logs` symlink is
+    /// refused instead of redirecting the host's writes.
+    fn prepare_group_dir(&self, group_dir: &Path, group: &RegisteredGroup, create_template: bool) {
+        let groups_dir = &self.config.groups_dir;
+        let prepared = std::fs::create_dir_all(groups_dir)
+            .and_then(|()| safe_fs::open_root(groups_dir))
+            .and_then(|groups| {
+                let dir = safe_fs::ensure_dir_at(groups.as_fd(), &group.folder)?;
+                Ok((groups, dir))
+            });
+        let (groups, dir) = match prepared {
+            Ok(fds) => fds,
+            Err(e) => {
+                tracing::warn!(folder = %group.folder, dir = %group_dir.display(), error = %e, "cannot create group folder");
+                return;
+            }
+        };
+        if let Err(e) = safe_fs::ensure_dir_at(dir.as_fd(), "logs") {
+            tracing::warn!(folder = %group.folder, error = %e, "cannot create group logs folder");
+        }
+        if create_template {
+            self.install_claude_md(groups.as_fd(), dir.as_fd(), group);
+        }
+    }
+
     /// Copy the `CLAUDE.md` template into a new group folder (fixes #1391
     /// in TS). Never follows or replaces an existing entry (the folder is
-    /// agent-writable, so a planted symlink must not redirect the write).
-    fn install_claude_md(&self, group_dir: &Path, group: &RegisteredGroup) {
-        let target = group_dir.join("CLAUDE.md");
-        if std::fs::symlink_metadata(&target).is_ok() {
-            return;
+    /// agent-writable, so a planted symlink must not redirect the write:
+    /// the file is created with `O_CREAT | O_EXCL | O_NOFOLLOW`), and the
+    /// template itself (`groups/main` is writable by the main agent) is
+    /// read only when it is a regular, size-capped file.
+    fn install_claude_md(
+        &self,
+        groups: BorrowedFd<'_>,
+        dir: BorrowedFd<'_>,
+        group: &RegisteredGroup,
+    ) {
+        match safe_fs::entry_exists_at(dir, CLAUDE_MD) {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(e) => {
+                tracing::warn!(folder = %group.folder, error = %e, "cannot inspect CLAUDE.md");
+                return;
+            }
         }
-        let template = self
-            .config
-            .groups_dir
-            .join(if group.is_main { "main" } else { "global" })
-            .join("CLAUDE.md");
-        let Ok(mut content) = std::fs::read_to_string(&template) else {
+        let template_folder = if group.is_main { "main" } else { "global" };
+        let Some(mut content) = read_template(groups, template_folder) else {
             return;
         };
         let name = &self.config.assistant_name;
@@ -496,13 +537,11 @@ impl Orchestrator {
                 + if content.ends_with('\n') { "\n" } else { "" };
             content = content.replace("You are Andy", &format!("You are {name}"));
         }
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)
-            .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()));
-        match written {
+        match safe_fs::create_new_at(dir, CLAUDE_MD, content.as_bytes()) {
             Ok(()) => tracing::info!(folder = %group.folder, "Created CLAUDE.md from template"),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                tracing::debug!(folder = %group.folder, "CLAUDE.md appeared concurrently; kept");
+            }
             Err(e) => tracing::warn!(folder = %group.folder, error = %e, "cannot create CLAUDE.md"),
         }
     }
@@ -529,6 +568,42 @@ impl Orchestrator {
         let redacted = self.redactor.redact(raw);
         let channels = self.channels();
         talon_router::send_formatted(&channels, jid, &redacted).await
+    }
+}
+
+/// Read `groups/<template_folder>/CLAUDE.md`: neither the folder nor the
+/// file may be a symlink, the file must be a regular, size-capped UTF-8
+/// file (a FIFO cannot block the open). Missing templates are silent.
+fn read_template(groups: BorrowedFd<'_>, template_folder: &str) -> Option<String> {
+    let folder = match safe_fs::open_dir_at(groups, template_folder) {
+        Ok(fd) => fd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(template = template_folder, error = %e, "unsafe CLAUDE.md template folder; not copied");
+            return None;
+        }
+    };
+    let file = match safe_fs::open_regular_at(folder.as_fd(), CLAUDE_MD, MAX_TEMPLATE_BYTES) {
+        Ok((file, _)) => file,
+        Err(safe_fs::OpenRefusal::Missing) => return None,
+        Err(safe_fs::OpenRefusal::Rejected(reason)) => {
+            tracing::warn!(template = template_folder, %reason, "unsafe CLAUDE.md template; not copied");
+            return None;
+        }
+    };
+    match safe_fs::read_capped(file, MAX_TEMPLATE_BYTES).map(String::from_utf8) {
+        Ok(Ok(text)) => Some(text),
+        Ok(Err(_)) => {
+            tracing::warn!(
+                template = template_folder,
+                "CLAUDE.md template is not UTF-8; not copied"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(template = template_folder, error = %e, "cannot read CLAUDE.md template");
+            None
+        }
     }
 }
 

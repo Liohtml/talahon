@@ -8,28 +8,44 @@
 //!    stored with it differs (a transcript produced by another model is
 //!    not resumed — the session is dropped instead).
 //! 3. Snapshots: `current_tasks.json` / `available_groups.json` in the
-//!    lane's IPC namespace.
+//!    lane's IPC namespace. Tasks are filtered per lane (MYTH-03): a
+//!    non-main namespace only sees tasks whose chat JID belongs to one of
+//!    its own lanes, never those of other lanes sharing the group folder.
 //! 4. A per-run gateway token (TTL = the run's maximum lifetime + margin)
 //!    goes into `ContainerInput.llm` — stdin only — and is revoked when the
 //!    run ends.
-//! 5. Output frames stream to the caller's handler in order; session ids
-//!    are persisted as they arrive.
+//! 5. Output frames stream to the caller's handler in order over a
+//!    bounded channel (backpressure); every frame passes the run's
+//!    [`OutputGuard`] first (result text capped per frame, run aborted —
+//!    container stopped, rest dropped — when it exceeds its per-run caps;
+//!    MYTH-07). Session ids are persisted as they arrive.
 //! 6. Errors that say the stored session is gone clear it so the queue's
 //!    retry starts fresh.
 
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::Duration;
 
 use regex::Regex;
 use talon_container::{RunOutcome, RunSpec};
-use talon_core::protocol::{ContainerInput, OutputStatus};
+use talon_core::protocol::{ContainerInput, ContainerOutput, OutputStatus};
 use talon_core::provider::{effective_vllm, merge_container_config, provider_fingerprint};
-use talon_core::types::{AvailableGroup, RegisteredGroup, TaskSnapshot};
+use talon_core::types::{AvailableGroup, RegisteredGroup, ScheduledTask};
 use talon_router::AgentOutputHandler;
+use talon_scheduler::RunningContainer;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::Orchestrator;
 use crate::agent::{AgentOutcome, StartHook};
+use crate::output_limits::{Admission, OUTPUT_CHANNEL_CAPACITY, OutputGuard, cap_text};
+
+/// How long an aborted run's container gets to stop before the run is left
+/// to the runner's own timeout handling.
+const ABORT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The container of the current run, once started (stopped on abort).
+type ContainerSlot = Arc<Mutex<Option<Arc<dyn RunningContainer>>>>;
 
 /// Error reported when no vLLM provider is configured.
 pub const VLLM_NOT_CONFIGURED: &str = "vLLM provider is not configured: set TALON_VLLM_BASE_URL and \
@@ -101,10 +117,10 @@ impl Orchestrator {
         }
     }
 
-    /// All tasks as snapshot rows.
-    pub(crate) fn task_snapshots(&self) -> Vec<TaskSnapshot> {
+    /// All scheduled tasks (snapshot source).
+    pub(crate) fn all_tasks(&self) -> Vec<ScheduledTask> {
         match self.db.get_all_tasks() {
-            Ok(tasks) => tasks.iter().map(TaskSnapshot::from).collect(),
+            Ok(tasks) => tasks,
             Err(e) => {
                 tracing::warn!(error = %e, "cannot list tasks for snapshot");
                 Vec::new()
@@ -112,22 +128,40 @@ impl Orchestrator {
         }
     }
 
-    /// Write `current_tasks.json` into the lane's IPC namespace.
-    pub(crate) fn write_tasks_snapshot_for(&self, group: &RegisteredGroup, tasks: &[TaskSnapshot]) {
-        if let Err(e) = talon_container::write_tasks_snapshot(
+    /// Write `current_tasks.json` into IPC namespace `ipc_key`, showing a
+    /// non-main namespace only the tasks of its own lanes (`extra_jid`:
+    /// the running lane, in case it is not registered).
+    pub(crate) fn write_lane_tasks_snapshot_for(
+        &self,
+        ipc_key: &str,
+        groups: &HashMap<String, RegisteredGroup>,
+        extra_jid: Option<&str>,
+        tasks: &[ScheduledTask],
+    ) {
+        // Main-ness comes from the registry only, never from `extra_jid`.
+        let (mut jids, is_main) = lane_namespace(groups, ipc_key);
+        if let Some(jid) = extra_jid {
+            if !jids.iter().any(|j| j == jid) {
+                jids.push(jid.to_string());
+            }
+        }
+        if let Err(e) = talon_container::write_lane_tasks_snapshot(
             &self.config.data_dir,
-            &group.folder,
-            group.is_main,
+            ipc_key,
+            is_main,
+            &jids,
             tasks,
-            Some(group.ipc_key()),
         ) {
-            tracing::warn!(group = %group.name, error = %e, "failed to write tasks snapshot");
+            tracing::warn!(ipc_key, error = %e, "failed to write tasks snapshot");
         }
     }
 
-    /// Write both snapshots for a run.
-    fn write_snapshots(&self, group: &RegisteredGroup) {
-        self.write_tasks_snapshot_for(group, &self.task_snapshots());
+    /// Write both snapshots for a run of `group` in lane `chat_jid`.
+    fn write_snapshots(&self, group: &RegisteredGroup, chat_jid: &str) {
+        let groups = self.groups_snapshot();
+        let extra = (groups.get(chat_jid).map(RegisteredGroup::ipc_key) != Some(group.ipc_key()))
+            .then_some(chat_jid);
+        self.write_lane_tasks_snapshot_for(group.ipc_key(), &groups, extra, &self.all_tasks());
         let available = self.available_groups();
         if let Err(e) = talon_container::write_groups_snapshot(
             &self.config.data_dir,
@@ -137,6 +171,52 @@ impl Orchestrator {
             Some(group.ipc_key()),
         ) {
             tracing::warn!(group = %group.name, error = %e, "failed to write groups snapshot");
+        }
+    }
+
+    /// Stop a run whose output exceeded its caps (MYTH-07): log, audit and
+    /// stop the container (bounded by [`ABORT_STOP_TIMEOUT`]).
+    async fn abort_run(
+        &self,
+        group: &RegisteredGroup,
+        chat_jid: &str,
+        slot: &ContainerSlot,
+        reason: &str,
+        guard: &OutputGuard,
+    ) {
+        tracing::error!(
+            group = %group.name,
+            chat_jid,
+            frames = guard.frames(),
+            result_bytes = guard.result_bytes(),
+            %reason,
+            "agent output limit exceeded; stopping the container"
+        );
+        self.audit.record(talon_core::audit::event(
+            "container.output_limit",
+            &group.folder,
+            Some(chat_jid),
+            "warn",
+            serde_json::json!({
+                "reason": reason,
+                "frames": guard.frames(),
+                "resultBytes": guard.result_bytes(),
+            }),
+        ));
+        let container = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+        match container {
+            Some(container) => {
+                match tokio::time::timeout(ABORT_STOP_TIMEOUT, container.stop()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(container = container.name(), error = %e, "cannot stop container")
+                    }
+                    Err(_) => {
+                        tracing::warn!(container = container.name(), "container stop timed out")
+                    }
+                }
+            }
+            None => tracing::warn!(chat_jid, "aborted run has no registered container"),
         }
     }
 
@@ -199,7 +279,7 @@ impl Orchestrator {
         let fingerprint = provider_fingerprint(&merged);
         let session_id = self.resolve_session(group, &fingerprint, &opts);
 
-        self.write_snapshots(group);
+        self.write_snapshots(group, chat_jid);
 
         let ttl = self
             .launcher
@@ -229,20 +309,34 @@ impl Orchestrator {
             st.run_tokens
                 .insert(chat_jid.to_string(), (token.clone(), ttl));
         }
+        let slot: ContainerSlot = Arc::new(Mutex::new(None));
         let hook: StartHook = {
             let queue = self.queue.clone();
             let jid = chat_jid.to_string();
             let ipc_key = group.ipc_key().to_string();
+            let slot = slot.clone();
             Box::new(move |container| {
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(container.clone());
                 queue.register_process(&jid, container, &ipc_key);
             })
         };
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let limits = self.settings.output_limits;
+        let (tx, rx) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
         let launch = self.launcher.launch(spec, tx, hook);
         let consume = async {
+            let mut rx = rx;
+            let mut guard = OutputGuard::new(limits);
             let mut last_result: Option<String> = None;
+            let mut aborted: Option<String> = None;
             while let Some(output) = rx.recv().await {
+                let output = match guard.admit(output) {
+                    Admission::Deliver(output) => output,
+                    Admission::Abort(reason) => {
+                        aborted = Some(reason);
+                        break;
+                    }
+                };
                 if opts.manage_session {
                     if let Some(id) = output.new_session_id.as_deref().filter(|s| !s.is_empty()) {
                         self.persist_session(group, id, &fingerprint, output.usage.as_ref());
@@ -253,9 +347,30 @@ impl Orchestrator {
                 }
                 sink.on_output(&output).await;
             }
-            last_result
+            // Dropping the receiver makes every further send fail: the
+            // launcher discards the rest of an aborted run's frames.
+            drop(rx);
+            if let Some(reason) = &aborted {
+                self.abort_run(group, chat_jid, &slot, reason, &guard).await;
+                sink.on_output(&ContainerOutput::error(reason.clone()))
+                    .await;
+            }
+            (last_result, aborted)
         };
-        let (result, streamed_result) = tokio::join!(launch, consume);
+        let (mut result, (streamed_result, aborted)) = tokio::join!(launch, consume);
+        if let Some(reason) = aborted {
+            result.status = OutputStatus::Error;
+            result.error = Some(reason);
+        }
+        // The runner's own copies are as untrusted as the frames.
+        result.error = result
+            .error
+            .as_deref()
+            .map(|e| cap_text(e, limits.max_error_bytes));
+        result.last_result = result
+            .last_result
+            .as_deref()
+            .map(|r| cap_text(r, limits.max_result_bytes));
 
         llm.revoke(&token);
         if !opts.scheduled_task {
@@ -306,6 +421,27 @@ impl Orchestrator {
     }
 }
 
+/// The lanes of IPC namespace `ipc_key`: every registered JID whose
+/// `ipc_key()` equals it (sorted), and whether the namespace counts as main.
+/// It does only when every lane in it is main: lanes that disagree get the
+/// restricted view (the IPC watcher refuses such a namespace altogether).
+pub fn lane_namespace(
+    groups: &HashMap<String, RegisteredGroup>,
+    ipc_key: &str,
+) -> (Vec<String>, bool) {
+    let mut jids: Vec<String> = Vec::new();
+    let mut all_main = true;
+    for (jid, group) in groups {
+        if group.ipc_key() == ipc_key {
+            all_main &= group.is_main;
+            jids.push(jid.clone());
+        }
+    }
+    jids.sort();
+    let is_main = all_main && !jids.is_empty();
+    (jids, is_main)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +458,77 @@ mod tests {
         assert!(is_stale_session_error("Session Not Found"));
         assert!(!is_stale_session_error("Container exited with code 1"));
         assert!(!is_stale_session_error("not found: model"));
+    }
+
+    fn lane(folder: &str, ipc_key: Option<&str>, is_main: bool) -> RegisteredGroup {
+        RegisteredGroup {
+            name: folder.into(),
+            folder: folder.into(),
+            trigger: "@Andy".into(),
+            added_at: "2026-01-01T00:00:00.000Z".into(),
+            container_config: None,
+            requires_trigger: None,
+            is_main,
+            session_key: None,
+            ipc_key: ipc_key.map(str::to_string),
+            ephemeral_session: false,
+            trusted_session_commands: false,
+        }
+    }
+
+    #[test]
+    fn lane_jids_are_the_registered_jids_of_one_namespace() {
+        let mut groups = HashMap::new();
+        groups.insert("tg:main".to_string(), lane("main", None, true));
+        groups.insert("http:copilot".to_string(), lane("copilot", None, false));
+        groups.insert(
+            "http:copilot:u:alice".to_string(),
+            lane("copilot", Some("copilot-u-alice"), false),
+        );
+        groups.insert(
+            "http:copilot:u:bob".to_string(),
+            lane("copilot", Some("copilot-u-bob"), false),
+        );
+        groups.insert(
+            "http:copilot:investigate".to_string(),
+            lane("copilot", Some("copilot-investigate"), false),
+        );
+        groups.insert(
+            "http:copilot:investigate:2".to_string(),
+            lane("copilot", Some("copilot-investigate"), false),
+        );
+
+        assert_eq!(
+            lane_namespace(&groups, "copilot-u-alice"),
+            (vec!["http:copilot:u:alice".to_string()], false)
+        );
+        // The shared folder does not merge lanes: only the base lane uses
+        // the folder as its key.
+        assert_eq!(
+            lane_namespace(&groups, "copilot"),
+            (vec!["http:copilot".to_string()], false)
+        );
+        assert_eq!(
+            lane_namespace(&groups, "copilot-investigate"),
+            (
+                vec![
+                    "http:copilot:investigate".to_string(),
+                    "http:copilot:investigate:2".to_string()
+                ],
+                false
+            )
+        );
+        assert_eq!(
+            lane_namespace(&groups, "main"),
+            (vec!["tg:main".to_string()], true)
+        );
+        assert_eq!(lane_namespace(&groups, "nobody"), (Vec::new(), false));
+
+        // A non-main lane sharing main's namespace demotes it.
+        groups.insert("tg:intruder".to_string(), lane("main", None, false));
+        let (jids, is_main) = lane_namespace(&groups, "main");
+        assert_eq!(jids.len(), 2);
+        assert!(!is_main);
     }
 
     #[test]

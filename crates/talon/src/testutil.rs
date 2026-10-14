@@ -136,7 +136,7 @@ impl Script {
     }
 }
 
-struct FakeContainer(String);
+struct FakeContainer(String, Arc<AtomicUsize>);
 
 #[async_trait]
 impl RunningContainer for FakeContainer {
@@ -145,6 +145,7 @@ impl RunningContainer for FakeContainer {
     }
 
     async fn stop(&self) -> talon_core::Result<()> {
+        self.1.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -156,6 +157,10 @@ pub struct FakeLauncher {
     pub scripts: Mutex<VecDeque<Script>>,
     pub calls: Mutex<Vec<RunSpec>>,
     pub started: AtomicUsize,
+    /// Frames the orchestrator accepted (sends that did not fail).
+    pub delivered: AtomicUsize,
+    /// `stop()` calls on started containers.
+    pub stopped: Arc<AtomicUsize>,
     pub hard_timeout: Mutex<Duration>,
     probe: Mutex<Option<Probe>>,
     pub probes: Mutex<Vec<String>>,
@@ -167,6 +172,8 @@ impl Default for FakeLauncher {
             scripts: Mutex::new(VecDeque::new()),
             calls: Mutex::new(Vec::new()),
             started: AtomicUsize::new(0),
+            delivered: AtomicUsize::new(0),
+            stopped: Arc::new(AtomicUsize::new(0)),
             hard_timeout: Mutex::new(Duration::from_secs(30 * 60)),
             probe: Mutex::new(None),
             probes: Mutex::new(Vec::new()),
@@ -208,7 +215,7 @@ impl ContainerLauncher for FakeLauncher {
     async fn launch(
         &self,
         spec: RunSpec,
-        outputs: mpsc::UnboundedSender<ContainerOutput>,
+        outputs: mpsc::Sender<ContainerOutput>,
         on_start: StartHook,
     ) -> RunResult {
         self.calls.lock().unwrap().push(spec.clone());
@@ -218,7 +225,7 @@ impl ContainerLauncher for FakeLauncher {
         }
         let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
         let name = format!("talon-{}-test", spec.group.folder);
-        on_start(Arc::new(FakeContainer(name.clone())));
+        on_start(Arc::new(FakeContainer(name.clone(), self.stopped.clone())));
         self.started.fetch_add(1, Ordering::SeqCst);
         if let Some(gate) = &script.gate {
             gate.notified().await;
@@ -231,7 +238,9 @@ impl ContainerLauncher for FakeLauncher {
             .find_map(|o| o.new_session_id.clone())
             .or(script.new_session_id.clone());
         for o in script.outputs {
-            let _ = outputs.send(o);
+            if outputs.send(o).await.is_ok() {
+                self.delivered.fetch_add(1, Ordering::SeqCst);
+            }
         }
         drop(outputs);
         RunResult {

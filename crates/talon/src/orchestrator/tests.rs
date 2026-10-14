@@ -225,6 +225,166 @@ async fn outbound_text_is_redacted() {
     assert!(sent[0].contains("REDACTED"));
 }
 
+// ---------------------------------------------------------------------------
+// Output limits (MYTH-07)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn oversized_result_is_truncated_before_delivery() {
+    let h = harness();
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    // 200 KB of text with a secret at the very end.
+    let huge = format!("{} harness-secret-value", "word ".repeat(40_000));
+    h.launcher.push(Script::reply(&huge));
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "1", "me", "dump it", &ts(1)));
+    assert!(h.orch.process_group_messages(MAIN).await);
+    let sent = h.channel.sent_texts();
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0].len() <= crate::output_limits::DEFAULT_MAX_RESULT_BYTES,
+        "{} bytes delivered",
+        sent[0].len()
+    );
+    assert!(sent[0].contains("output truncated"), "note missing");
+    assert!(!sent[0].contains("harness-secret-value"));
+}
+
+fn tight_limits() -> crate::output_limits::OutputLimits {
+    crate::output_limits::OutputLimits {
+        max_result_bytes: 1000,
+        max_run_result_bytes: 1_000_000,
+        max_run_frames: 20,
+        max_error_bytes: 500,
+    }
+}
+
+#[tokio::test]
+async fn run_exceeding_output_caps_is_aborted_and_container_stopped() {
+    let h = harness_with(HarnessOptions {
+        settings: Settings {
+            output_limits: tight_limits(),
+            ..Settings::default()
+        },
+        ..HarnessOptions::default()
+    });
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    let flood: Vec<ContainerOutput> = (0..500)
+        .map(|i| ContainerOutput::success(Some(format!("chunk {i}")), None))
+        .collect();
+    h.launcher.push(Script {
+        outputs: flood,
+        ..Script::default()
+    });
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "1", "me", "go", &ts(1)));
+    // Output already reached the user: no rollback / retry of the flood.
+    assert!(h.orch.process_group_messages(MAIN).await);
+
+    assert_eq!(h.channel.sent_texts().len(), 20);
+    assert_eq!(
+        h.launcher.stopped.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the container must be stopped"
+    );
+    // The bounded channel never let the launcher run far ahead.
+    let delivered = h
+        .launcher
+        .delivered
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        delivered <= 21 + crate::output_limits::OUTPUT_CHANNEL_CAPACITY,
+        "{delivered} frames accepted"
+    );
+    assert!(
+        h.audit
+            .snapshot()
+            .iter()
+            .any(|e| e.kind == "container.output_limit")
+    );
+    // The LLM token of the aborted run is revoked as usual.
+    assert_eq!(h.llm.revoked.lock().unwrap().len(), 1);
+}
+
+/// Blocks on its first frame until released, then records frames.
+struct GatedSink {
+    gate: Arc<Notify>,
+    first: bool,
+    seen: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl talon_router::AgentOutputHandler for GatedSink {
+    async fn on_output(&mut self, _output: &ContainerOutput) {
+        if self.first {
+            self.first = false;
+            self.gate.notified().await;
+        }
+        self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn slow_consumer_applies_backpressure_to_the_launcher() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let h = harness();
+    let main = group("Main", "main", true);
+    h.orch
+        .register_group_inner(MAIN, main.clone(), true, false)
+        .unwrap();
+    let frames: Vec<ContainerOutput> = (0..200)
+        .map(|i| ContainerOutput::success(Some(format!("f{i}")), None))
+        .collect();
+    h.launcher.push(Script {
+        outputs: frames,
+        ..Script::default()
+    });
+    let gate = Arc::new(Notify::new());
+    let seen = Arc::new(AtomicUsize::new(0));
+    let run = tokio::spawn({
+        let orch = h.orch.clone();
+        let gate = gate.clone();
+        let seen = seen.clone();
+        async move {
+            let mut sink = GatedSink {
+                gate,
+                first: true,
+                seen,
+            };
+            orch.run_agent(
+                &main,
+                "p",
+                MAIN,
+                super::run::RunOptions::message(),
+                &mut sink,
+            )
+            .await
+        }
+    });
+    h.launcher.wait_started(1).await;
+    // Let the launcher push as much as it can while the consumer is stuck.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let accepted = h.launcher.delivered.load(Ordering::SeqCst);
+    assert!(
+        accepted <= crate::output_limits::OUTPUT_CHANNEL_CAPACITY + 1,
+        "launcher ran ahead: {accepted} frames buffered"
+    );
+    assert_eq!(seen.load(Ordering::SeqCst), 0);
+    gate.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(outcome.is_success());
+    assert_eq!(seen.load(Ordering::SeqCst), 200);
+    assert_eq!(h.launcher.delivered.load(Ordering::SeqCst), 200);
+}
+
 #[tokio::test]
 async fn missing_vllm_fails_without_launching() {
     let h = harness_with(HarnessOptions {
@@ -838,6 +998,99 @@ async fn ipc_registration_installs_claude_md_without_following_symlinks() {
 }
 
 #[tokio::test]
+async fn group_bootstrap_never_follows_symlinked_folders_or_templates() {
+    let h = harness();
+    let groups = h.root().join("groups");
+
+    // A symlinked group folder: neither logs/ nor CLAUDE.md land outside.
+    std::fs::create_dir_all(groups.join("global")).unwrap();
+    std::fs::write(groups.join("global/CLAUDE.md"), "# Andy\n").unwrap();
+    let outside = h.root().join("outside-dir");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, groups.join("evil")).unwrap();
+    IpcHost::register_group(h.orch.as_ref(), "fake:evil", group("Evil", "evil", false))
+        .await
+        .unwrap();
+    assert!(!outside.join("logs").exists());
+    assert!(!outside.join("CLAUDE.md").exists());
+
+    // A symlinked template (main agent pointing it at a host secret) is
+    // not copied into the new group.
+    let secret = h.root().join("secret.txt");
+    std::fs::write(&secret, "TOP-SECRET").unwrap();
+    std::fs::create_dir_all(groups.join("main")).unwrap();
+    std::os::unix::fs::symlink(&secret, groups.join("main/CLAUDE.md")).unwrap();
+    h.orch
+        .register_group_inner("fake:m2", group("M2", "m2", true), true, true)
+        .unwrap();
+    assert!(groups.join("m2/logs").is_dir());
+    assert!(!groups.join("m2/CLAUDE.md").exists());
+
+    // A FIFO template cannot block registration.
+    std::fs::remove_file(groups.join("global/CLAUDE.md")).unwrap();
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        groups.join("global/CLAUDE.md"),
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        IpcHost::register_group(h.orch.as_ref(), "fake:f", group("F", "fifo", false)),
+    )
+    .await
+    .expect("a FIFO template must not block")
+    .unwrap();
+    assert!(!groups.join("fifo/CLAUDE.md").exists());
+}
+
+#[tokio::test]
+async fn ipc_registration_cannot_touch_main_or_container_config() {
+    let h = harness();
+    let mut main = group("Main", "main", true);
+    main.container_config = Some(talon_core::types::ContainerConfig {
+        timeout: Some(1234),
+        ..talon_core::types::ContainerConfig::default()
+    });
+    h.orch
+        .register_group_inner(MAIN, main.clone(), true, false)
+        .unwrap();
+    // Re-registering main through IPC is refused.
+    assert!(
+        IpcHost::register_group(h.orch.as_ref(), MAIN, group("Evil", "main", false))
+            .await
+            .is_err()
+    );
+    assert!(h.orch.group(MAIN).unwrap().is_main);
+
+    // New lanes never become main and never get a container config.
+    let mut requested = group("Ops", "ops", true);
+    requested.container_config = Some(talon_core::types::ContainerConfig {
+        timeout: Some(99),
+        ..talon_core::types::ContainerConfig::default()
+    });
+    IpcHost::register_group(h.orch.as_ref(), "fake:ops", requested)
+        .await
+        .unwrap();
+    let ops = h.orch.group("fake:ops").unwrap();
+    assert!(!ops.is_main);
+    assert!(ops.container_config.is_none());
+
+    // An existing lane keeps its operator-set configuration.
+    let mut team = group("Team", "team", false);
+    team.container_config = main.container_config.clone();
+    h.orch
+        .register_group_inner(TEAM, team, true, false)
+        .unwrap();
+    IpcHost::register_group(h.orch.as_ref(), TEAM, group("Team 2", "team", false))
+        .await
+        .unwrap();
+    let team = h.orch.group(TEAM).unwrap();
+    assert_eq!(team.name, "Team 2");
+    assert_eq!(team.container_config, main.container_config);
+}
+
+#[tokio::test]
 async fn ipc_send_message_requires_an_owning_channel() {
     let h = harness();
     assert!(
@@ -1106,18 +1359,63 @@ async fn scheduler_runs_due_task_through_the_queue() {
 async fn ipc_task_change_refreshes_snapshots_per_namespace() {
     let h = harness();
     copilot_lanes(&h);
-    h.db.create_task(&once_task("t1", "copilot", INV_JID))
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    let mut alice = group("CoPilot alice", "copilot", false);
+    alice.ipc_key = Some("copilot-u-alice".into());
+    alice.session_key = Some("copilot-u-alice".into());
+    h.orch
+        .register_group_inner("fake:copilot:u:alice", alice, false, false)
+        .unwrap();
+    h.db.create_task(&once_task("t-inv", "copilot", INV_JID))
+        .unwrap();
+    h.db.create_task(&once_task("t-alice", "copilot", "fake:copilot:u:alice"))
         .unwrap();
     IpcHost::on_tasks_changed(h.orch.as_ref());
-    for key in ["copilot", "copilot-investigate"] {
-        let snap = h
-            .root()
-            .join("data/ipc")
-            .join(key)
-            .join("current_tasks.json");
-        let body = std::fs::read_to_string(&snap).unwrap();
-        assert!(body.contains("\"t1\""), "{key}: {body}");
-    }
+    let snapshot = |key: &str| {
+        std::fs::read_to_string(
+            h.root()
+                .join("data/ipc")
+                .join(key)
+                .join("current_tasks.json"),
+        )
+        .unwrap()
+    };
+    // MYTH-03: lanes sharing the `copilot` folder only see their own tasks.
+    let inv = snapshot("copilot-investigate");
+    assert!(
+        inv.contains("\"t-inv\"") && !inv.contains("t-alice"),
+        "{inv}"
+    );
+    let alice = snapshot("copilot-u-alice");
+    assert!(
+        alice.contains("\"t-alice\"") && !alice.contains("t-inv"),
+        "{alice}"
+    );
+    let base = snapshot("copilot");
+    assert!(
+        !base.contains("t-inv") && !base.contains("t-alice"),
+        "{base}"
+    );
+    // Main sees everything.
+    let main = snapshot("main");
+    assert!(main.contains("t-inv") && main.contains("t-alice"), "{main}");
+
+    // A run rewrites its own lane's snapshot with the same filter.
+    let mut bob = group("CoPilot bob", "copilot", false);
+    bob.ipc_key = Some("copilot-u-bob".into());
+    bob.requires_trigger = Some(false);
+    h.orch
+        .register_group_inner("fake:copilot:u:bob", bob, false, false)
+        .unwrap();
+    h.launcher.push(Script::reply("ok"));
+    h.orch.accept_message(
+        "fake:copilot:u:bob",
+        msg("fake:copilot:u:bob", "1", "bob", "hi", &ts(1)),
+    );
+    assert!(h.orch.process_group_messages("fake:copilot:u:bob").await);
+    assert_eq!(snapshot("copilot-u-bob").trim(), "[]");
 }
 
 #[tokio::test]

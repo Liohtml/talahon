@@ -2,7 +2,7 @@
 //! [`ChannelHost`] (channels), [`IpcHost`] (IPC watcher),
 //! [`LaneProcessor`] (group queue) and [`GroupDirectory`] (scheduler).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use async_trait::async_trait;
 use talon_core::channel::{ChannelHost, QueueStatus};
@@ -57,17 +57,14 @@ impl Orchestrator {
         true
     }
 
-    /// Rewrite `current_tasks.json` for every lane (one write per IPC
-    /// namespace).
+    /// Rewrite `current_tasks.json` for every IPC namespace (one write
+    /// each), filtered to the namespace's own lanes (MYTH-03).
     pub fn refresh_task_snapshots(&self) {
-        let tasks = self.task_snapshots();
-        let mut seen = HashSet::new();
-        let mut groups: Vec<RegisteredGroup> = self.groups_snapshot().into_values().collect();
-        groups.sort_by(|a, b| a.ipc_key().cmp(b.ipc_key()));
-        for group in groups {
-            if seen.insert(group.ipc_key().to_string()) {
-                self.write_tasks_snapshot_for(&group, &tasks);
-            }
+        let tasks = self.all_tasks();
+        let groups = self.groups_snapshot();
+        let keys: BTreeSet<String> = groups.values().map(|g| g.ipc_key().to_string()).collect();
+        for key in keys {
+            self.write_lane_tasks_snapshot_for(&key, &groups, None, &tasks);
         }
     }
 }
@@ -128,7 +125,18 @@ impl IpcHost for Orchestrator {
         self.groups_snapshot()
     }
 
-    async fn register_group(&self, jid: &str, group: RegisteredGroup) -> Result<()> {
+    async fn register_group(&self, jid: &str, mut group: RegisteredGroup) -> Result<()> {
+        // Defense in depth on top of the watcher (MYTH-04), against the
+        // host's current registry: IPC never changes the main group, never
+        // grants main, and never sets operator-only container options.
+        let existing = self.group(jid);
+        if existing.as_ref().is_some_and(|g| g.is_main) {
+            return Err(Error::InvalidInput(
+                "the main group's registration cannot be changed via IPC".into(),
+            ));
+        }
+        group.is_main = false;
+        group.container_config = existing.and_then(|g| g.container_config);
         self.register_group_inner(jid, group, true, true)
     }
 

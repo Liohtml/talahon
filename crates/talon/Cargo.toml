@@ -39,6 +39,8 @@ futures = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
+# Descriptor-relative, symlink-safe reads of agent-written files (MYTH-10).
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

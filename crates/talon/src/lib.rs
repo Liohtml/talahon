@@ -49,6 +49,9 @@ pub mod doctor;
 pub mod investigation;
 pub mod logging;
 pub mod orchestrator;
+pub mod output_limits;
+pub mod palace;
+pub mod safe_fs;
 pub mod secrets;
 
 #[cfg(test)]

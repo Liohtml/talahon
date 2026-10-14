@@ -2,16 +2,22 @@
 //! `src/index.ts`).
 //!
 //! Startup:
-//! 1. container runtime: detect, `ensure_running`, clean up orphans;
+//! 1. container runtime: detect, `ensure_running`, clean up orphans,
+//!    create the dedicated agent network (`talon-agents`, inter-container
+//!    traffic off; MYTH-05) unless the operator chose the runtime default —
+//!    fatal when it cannot be created;
 //! 2. database: open + migrate, import legacy JSON state, hash-chained audit
 //!    sink, log the audit chain head;
-//! 3. LLM gateway (when vLLM is configured): bind address from
-//!    `TALON_LLM_GATEWAY_BIND` or the container bridge, allow every
-//!    group's model;
+//! 3. LLM gateway (when vLLM is configured *and* `TALON_VLLM_API_KEY` is
+//!    set — without a key containers could call vLLM directly and bypass
+//!    the gateway, so it is refused unless `TALON_VLLM_ALLOW_NO_API_KEY=true`;
+//!    MYTH-05): bind address from `TALON_LLM_GATEWAY_BIND` or the container
+//!    bridge, allow every group's model;
 //! 4. container runner (mount allowlist, redactor), group queue,
 //!    orchestrator (loads state), task scheduler, queue processor;
-//! 5. channels: CoPilot HTTP API + Telegram / Emacs / webhook when
-//!    configured; at least one must connect;
+//! 5. channels: CoPilot HTTP API (its `/palace/*` calls run in throw-away
+//!    hardened containers — never on the host; MYTH-01) + Telegram / Emacs /
+//!    webhook when configured; at least one must connect;
 //! 6. scheduler loop, IPC watcher, startup recovery, message loop.
 //!
 //! Shutdown (SIGTERM / SIGINT; a second signal exits immediately):
@@ -44,10 +50,19 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{GatewayLlm, LlmAccess, RunnerLauncher};
 use crate::allowlist::AllowlistSource;
 use crate::orchestrator::{Orchestrator, OrchestratorDeps, Settings};
+use crate::palace::host_palace_runner;
 
 /// Host name containers use for the host (Docker Desktop built-in; mapped
 /// to the bridge gateway on Linux by `talon-container`).
 pub const DEFAULT_CONTAINER_HOST: &str = "host.docker.internal";
+/// Explicit opt-out of the vLLM API key requirement (MYTH-05).
+pub const ALLOW_NO_API_KEY_ENV: &str = "TALON_VLLM_ALLOW_NO_API_KEY";
+/// Logged when the gateway is refused for lack of an upstream API key.
+pub const VLLM_API_KEY_REQUIRED: &str = "TALON_VLLM_API_KEY is not set: refusing to start the LLM \
+     gateway. Without an API key vLLM serves anyone who can reach it, so agent containers could \
+     call it directly and bypass the gateway (per-run tokens, model allowlist, request filtering). \
+     Set TALON_VLLM_API_KEY in .env to vLLM's --api-key; only if containers provably cannot reach \
+     vLLM, set TALON_VLLM_ALLOW_NO_API_KEY=true. Every agent run fails until then — run `talon doctor`";
 /// How long a channel gets to disconnect at shutdown.
 const CHANNEL_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long background loops get to stop at shutdown.
@@ -63,6 +78,41 @@ pub fn log_audit_head(db: &Db, phase: &str) {
         (Err(e), _) | (_, Err(e)) => {
             tracing::warn!(phase, error = %e, "cannot read audit chain head")
         }
+    }
+}
+
+/// Whether the upstream vLLM API key requirement is met (MYTH-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyPolicy {
+    /// `TALON_VLLM_API_KEY` is set (non-blank) in `.env`.
+    Present,
+    /// No key, but the operator opted out (`TALON_VLLM_ALLOW_NO_API_KEY=true`).
+    MissingAllowed,
+    /// No key and no opt-out: the gateway must not start.
+    Missing,
+}
+
+/// Evaluate the vLLM API key requirement for `config`.
+pub fn api_key_policy(config: &TalonConfig) -> ApiKeyPolicy {
+    let present = config
+        .env
+        .file_value("TALON_VLLM_API_KEY")
+        .is_some_and(|k| !k.trim().is_empty());
+    if present {
+        ApiKeyPolicy::Present
+    } else if config.env.get_bool(ALLOW_NO_API_KEY_ENV) {
+        ApiKeyPolicy::MissingAllowed
+    } else {
+        ApiKeyPolicy::Missing
+    }
+}
+
+/// `true`/`false` (also `1/0`, `yes/no`, `on/off`, any case).
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -82,6 +132,8 @@ pub fn gateway_config(
     let api_key = config
         .env
         .file_value("TALON_VLLM_API_KEY")
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
         .map(str::to_string);
     let mut gw = GatewayConfig::from_vllm(vllm, api_key);
     gw.bind = bind;
@@ -93,6 +145,26 @@ pub fn gateway_config(
         gw.requests_per_minute = rpm;
     }
     gw.audit_requests = config.env.get_bool("TALON_LLM_GATEWAY_AUDIT_REQUESTS");
+    if let Some(raw) = config.env.get("TALON_LLM_GATEWAY_MAX_CONCURRENT") {
+        match raw.trim().parse::<u32>() {
+            Ok(n) => gw.max_concurrent_requests = n,
+            Err(_) => tracing::warn!(
+                value = %raw,
+                default = gw.max_concurrent_requests,
+                "TALON_LLM_GATEWAY_MAX_CONCURRENT is not a number; using the default"
+            ),
+        }
+    }
+    if let Some(raw) = config.env.get("TALON_LLM_GATEWAY_CACHE_SALT") {
+        match parse_bool(&raw) {
+            Some(on) => gw.cache_salt = on,
+            None => tracing::warn!(
+                value = %raw,
+                default = gw.cache_salt,
+                "TALON_LLM_GATEWAY_CACHE_SALT is not true/false; using the default"
+            ),
+        }
+    }
 
     let upstream = normalize_base(&vllm.base_url);
     let mut jids: Vec<&String> = groups.keys().collect();
@@ -151,18 +223,57 @@ async fn start_gateway(
         );
         return Ok(None);
     }
+    match api_key_policy(config) {
+        ApiKeyPolicy::Present => {}
+        ApiKeyPolicy::MissingAllowed => tracing::warn!(
+            "TALON_VLLM_API_KEY is not set and {ALLOW_NO_API_KEY_ENV}=true: the gateway calls vLLM \
+             without an API key; make sure agent containers cannot reach vLLM directly"
+        ),
+        ApiKeyPolicy::Missing => {
+            tracing::error!("{VLLM_API_KEY_REQUIRED}");
+            return Ok(None);
+        }
+    }
     let ip = gateway_bind_ip(config, runtime).await?;
     let bind = SocketAddr::new(ip, config.llm_gateway_port);
     let Some(gw) = gateway_config(config, groups, bind) else {
         return Ok(None);
     };
-    if gw.upstream_api_key.is_none() {
-        tracing::warn!("TALON_VLLM_API_KEY is not set: the gateway calls vLLM without an API key");
-    }
     let handle = LlmGateway::start(gw, audit)
         .await
         .map_err(|e| anyhow!("cannot start the LLM gateway on {bind}: {e}"))?;
     Ok(Some(handle))
+}
+
+/// Create (or verify) the network agent containers run on (MYTH-05):
+/// `RunnerConfig::default_network`, normally
+/// [`talon_container::AGENT_NETWORK`]. Nothing to do when the operator
+/// chose the runtime's default bridge.
+///
+/// # Errors
+/// The network cannot be inspected or created — fatal, because the runner
+/// would otherwise fail every launch (or fall back to a weaker network).
+pub async fn ensure_agent_network(
+    runtime: &ContainerRuntime,
+    runner_config: &RunnerConfig,
+) -> anyhow::Result<()> {
+    let Some(network) = runner_config.default_network.as_deref() else {
+        tracing::warn!(
+            "agent containers use the runtime's default bridge network (no dedicated \
+             talon-agents network): containers can reach each other and egress is not \
+             restricted by `talon setup egress`"
+        );
+        return Ok(());
+    };
+    runtime.ensure_agent_network(network).await.map_err(|e| {
+        anyhow!(
+            "cannot prepare the agent container network {network:?}: {e}. Run `talon setup \
+             egress` (creates the network and its egress firewall rules), or check that the \
+             container runtime can create networks"
+        )
+    })?;
+    tracing::info!(network, "agent network ready");
+    Ok(())
 }
 
 async fn wait_for_signal() -> &'static str {
@@ -240,6 +351,8 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
     if !orphans.is_empty() {
         tracing::info!(count = orphans.len(), names = ?orphans, "Stopped orphaned containers");
     }
+    let runner_config = RunnerConfig::from_talon_config(&config);
+    ensure_agent_network(&runtime, &runner_config).await?;
 
     // 2. Database + audit.
     let db = Db::open_with_options(
@@ -279,8 +392,9 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
     // 4. Runner, queue, orchestrator, scheduler.
     let mounts: Arc<dyn MountPolicy> = Arc::new(MountValidator::load(&config.mount_allowlist_path));
     let log_redactor: Arc<dyn LogRedactor> = redactor.clone();
+    let agent_network = runner_config.default_network.clone();
     let runner = ContainerRunner::new(
-        RunnerConfig::from_talon_config(&config),
+        runner_config,
         runtime.clone(),
         mounts,
         log_redactor,
@@ -322,11 +436,13 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
     let host: Arc<dyn ChannelHost> = orch.clone();
     let http_config =
         HttpConfig::from_talon_config(&config).map_err(|e| anyhow!("HTTP channel: {e}"))?;
-    let mut candidates: Vec<Arc<dyn Channel>> = vec![Arc::new(HttpChannel::new(
+    let palace = host_palace_runner(&config, &http_config, &runtime, agent_network);
+    let mut candidates: Vec<Arc<dyn Channel>> = vec![Arc::new(HttpChannel::with_palace(
         http_config,
         host.clone(),
         db.clone(),
         audit.clone(),
+        palace,
     ))];
     candidates.extend(talon_channels::build_channels(
         host.clone(),
@@ -492,6 +608,78 @@ mod tests {
         }
         assert_eq!(gw.upstream_api_key.as_deref(), Some("sekret-key-123"));
         assert!(!format!("{gw:?}").contains("sekret-key-123"));
+    }
+
+    #[test]
+    fn api_key_is_required_unless_explicitly_waived() {
+        if std::env::var(ALLOW_NO_API_KEY_ENV).is_ok() {
+            return; // process env overrides .env in CI shells
+        }
+        assert_eq!(
+            api_key_policy(&cfg("TALON_VLLM_API_KEY=abc\n")),
+            ApiKeyPolicy::Present
+        );
+        assert_eq!(api_key_policy(&cfg("")), ApiKeyPolicy::Missing);
+        assert_eq!(
+            api_key_policy(&cfg("TALON_VLLM_API_KEY=\"   \"\n")),
+            ApiKeyPolicy::Missing
+        );
+        assert_eq!(
+            api_key_policy(&cfg("TALON_VLLM_ALLOW_NO_API_KEY=false\n")),
+            ApiKeyPolicy::Missing
+        );
+        assert_eq!(
+            api_key_policy(&cfg("TALON_VLLM_ALLOW_NO_API_KEY=true\n")),
+            ApiKeyPolicy::MissingAllowed
+        );
+        // A key always wins over the waiver.
+        assert_eq!(
+            api_key_policy(&cfg(
+                "TALON_VLLM_API_KEY=k\nTALON_VLLM_ALLOW_NO_API_KEY=true\n"
+            )),
+            ApiKeyPolicy::Present
+        );
+    }
+
+    #[test]
+    fn gateway_concurrency_and_cache_salt_settings() {
+        let base = "TALON_VLLM_BASE_URL=http://vllm:8000/v1\nTALON_VLLM_MODEL=qwen\n";
+        if [
+            "TALON_VLLM_BASE_URL",
+            "TALON_VLLM_MODEL",
+            "TALON_LLM_GATEWAY_MAX_CONCURRENT",
+            "TALON_LLM_GATEWAY_CACHE_SALT",
+        ]
+        .iter()
+        .any(|k| std::env::var(k).is_ok())
+        {
+            return; // process env overrides .env in CI shells
+        }
+        let bind: SocketAddr = "127.0.0.1:3999".parse().unwrap();
+        let defaults = gateway_config(&cfg(base), &HashMap::new(), bind).unwrap();
+        assert!(defaults.cache_salt);
+        let gw = gateway_config(
+            &cfg(&format!(
+                "{base}TALON_LLM_GATEWAY_MAX_CONCURRENT=7\nTALON_LLM_GATEWAY_CACHE_SALT=false\n"
+            )),
+            &HashMap::new(),
+            bind,
+        )
+        .unwrap();
+        assert_eq!(gw.max_concurrent_requests, 7);
+        assert!(!gw.cache_salt);
+        let gw = gateway_config(
+            &cfg(&format!(
+                "{base}TALON_LLM_GATEWAY_MAX_CONCURRENT=lots\nTALON_LLM_GATEWAY_CACHE_SALT=maybe\n"
+            )),
+            &HashMap::new(),
+            bind,
+        )
+        .unwrap();
+        assert_eq!(gw.max_concurrent_requests, defaults.max_concurrent_requests);
+        assert!(gw.cache_salt);
+        assert_eq!(parse_bool(" Off "), Some(false));
+        assert_eq!(parse_bool("YES"), Some(true));
     }
 
     #[test]

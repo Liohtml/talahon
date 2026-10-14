@@ -25,7 +25,7 @@ use tokio::time::Instant;
 use super::Orchestrator;
 use super::run::RunOptions;
 use crate::investigation::{
-    STATUS_COMPLETED, STATUS_FAILED, STATUS_RUNNING, load_verdict, sightings_from_verdict,
+    STATUS_COMPLETED, STATUS_FAILED, STATUS_RUNNING, load_verdict_async, sightings_from_verdict,
     truncate_error,
 };
 
@@ -98,16 +98,23 @@ impl Orchestrator {
     }
 
     /// Record the end of an investigation run: status, error, verdict and
-    /// IOC sightings.
-    pub(crate) fn investigation_finished(
+    /// IOC sightings. The agent-written report is read on the blocking
+    /// pool without following symlinks (MYTH-10).
+    pub(crate) async fn investigation_finished(
         &self,
         mut inv: Investigation,
         group: &RegisteredGroup,
         error: Option<&str>,
         run_started: SystemTime,
     ) {
-        let group_dir = self.config.groups_dir.join(&group.folder);
-        let verdict = load_verdict(&group_dir, &inv.id, &inv.alert_id, run_started);
+        let verdict = load_verdict_async(
+            self.config.groups_dir.clone(),
+            group.folder.clone(),
+            inv.id.clone(),
+            inv.alert_id.clone(),
+            run_started,
+        )
+        .await;
         let now = now_iso();
         inv.updated_at = now.clone();
         match error {
@@ -219,7 +226,8 @@ impl Orchestrator {
         }
 
         if let Some(inv) = investigation {
-            self.investigation_finished(inv, group, error.as_deref(), started_wall);
+            self.investigation_finished(inv, group, error.as_deref(), started_wall)
+                .await;
         }
 
         TaskExecution {

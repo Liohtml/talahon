@@ -8,16 +8,24 @@
 //! `ioc_sightings` for cross-alert correlation.
 //!
 //! The report was written by the (untrusted) agent, so reading is
-//! defensive: regular files only (no symlinks), size-capped, must be a JSON
-//! object; indicator values are normalized, length-checked and capped.
+//! defensive (MYTH-10): `groups/<folder>` and `reports/` are opened with
+//! `O_DIRECTORY | O_NOFOLLOW` relative to the already-open parent, the file
+//! with `O_NOFOLLOW | O_NONBLOCK` (a symlink fails, a FIFO cannot block) and
+//! checked on the opened inode (`fstat`): regular file, one link, at most
+//! [`MAX_REPORT_BYTES`]; it must be a JSON object; indicator values are
+//! normalized, length-checked and capped. The read runs on the blocking
+//! pool ([`load_verdict_async`]).
 
-use std::io::Read;
 use std::net::IpAddr;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
+use talon_core::paths::is_valid_group_folder;
 use talon_db::{IocSighting, MAX_IOC_VALUE_LEN};
+
+use crate::safe_fs::{OpenRefusal, open_dir_at, open_regular_at, open_root, read_capped};
 
 /// Directory (inside the group folder) the agent writes reports to.
 pub const REPORTS_DIR: &str = "reports";
@@ -48,60 +56,109 @@ pub fn is_safe_report_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-fn report_path(group_dir: &Path, id: &str) -> Option<PathBuf> {
-    is_safe_report_id(id).then(|| group_dir.join(REPORTS_DIR).join(format!("{id}.json")))
-}
-
-/// Read one report file defensively. `not_before`: ignore files last
-/// modified before this time (stale reports of an earlier run).
-fn read_report_file(path: &Path, not_before: Option<SystemTime>) -> Option<Value> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.file_type().is_file() {
-        if meta.file_type().is_symlink() {
-            tracing::warn!(path = %path.display(), "ignoring symlinked investigation report");
+/// Read one report file from the open `reports/` directory. `not_before`:
+/// ignore files last modified before this time (stale reports of an
+/// earlier run).
+fn read_report_at(
+    reports: BorrowedFd<'_>,
+    id: &str,
+    not_before: Option<SystemTime>,
+) -> Option<Value> {
+    if !is_safe_report_id(id) {
+        return None;
+    }
+    let name = format!("{id}.json");
+    let (file, meta) = match open_regular_at(reports, &name, MAX_REPORT_BYTES) {
+        Ok(opened) => opened,
+        Err(OpenRefusal::Missing) => return None,
+        Err(OpenRefusal::Rejected(reason)) => {
+            tracing::warn!(report = %name, %reason, "ignoring unsafe investigation report");
+            return None;
         }
-        return None;
-    }
-    if meta.len() > MAX_REPORT_BYTES {
-        tracing::warn!(path = %path.display(), bytes = meta.len(), "investigation report too large; ignored");
-        return None;
-    }
+    };
     if let (Some(limit), Ok(modified)) = (not_before, meta.modified()) {
         if modified < limit {
             return None;
         }
     }
-    let file = std::fs::File::open(path).ok()?;
-    let mut raw = String::new();
-    file.take(MAX_REPORT_BYTES + 1)
-        .read_to_string(&mut raw)
-        .ok()?;
-    match serde_json::from_str::<Value>(&raw) {
+    let raw = match read_capped(file, MAX_REPORT_BYTES) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!(report = %name, error = %e, "cannot read investigation report; ignored");
+            return None;
+        }
+    };
+    match serde_json::from_slice::<Value>(&raw) {
         Ok(v @ Value::Object(_)) => Some(v),
         Ok(_) => {
-            tracing::warn!(path = %path.display(), "investigation report is not a JSON object; ignored");
+            tracing::warn!(report = %name, "investigation report is not a JSON object; ignored");
             None
         }
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "unparseable investigation report; ignored");
+            tracing::warn!(report = %name, error = %e, "unparseable investigation report; ignored");
             None
         }
     }
 }
 
 /// Find the verdict for investigation `job_id` (alert `alert_id`) in
-/// `group_dir/reports/`: `<job_id>.json`, else `<alert_id>.json` if it was
-/// written after `run_started`.
+/// `groups_dir/<folder>/reports/`: `<job_id>.json`, else `<alert_id>.json`
+/// if it was written after `run_started`.
+///
+/// Blocking (filesystem); async callers use [`load_verdict_async`]. Only
+/// `groups_dir` (operator controlled) may be a symlink: the group folder,
+/// `reports/` and the report itself are never followed.
 pub fn load_verdict(
-    group_dir: &Path,
+    groups_dir: &Path,
+    folder: &str,
     job_id: &str,
     alert_id: &str,
     run_started: SystemTime,
 ) -> Option<Value> {
-    if let Some(v) = report_path(group_dir, job_id).and_then(|p| read_report_file(&p, None)) {
-        return Some(v);
+    if !is_valid_group_folder(folder) {
+        tracing::warn!(folder, "invalid group folder; no verdict read");
+        return None;
     }
-    report_path(group_dir, alert_id).and_then(|p| read_report_file(&p, Some(run_started)))
+    let groups = match open_root(groups_dir) {
+        Ok(fd) => fd,
+        Err(e) => {
+            tracing::warn!(dir = %groups_dir.display(), error = %e, "cannot open groups directory");
+            return None;
+        }
+    };
+    let open_reports = open_dir_at(groups.as_fd(), folder)
+        .and_then(|group| open_dir_at(group.as_fd(), REPORTS_DIR));
+    let reports = match open_reports {
+        Ok(fd) => fd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(folder, error = %e, "cannot open the reports directory; no verdict read");
+            return None;
+        }
+    };
+    read_report_at(reports.as_fd(), job_id, None)
+        .or_else(|| read_report_at(reports.as_fd(), alert_id, Some(run_started)))
+}
+
+/// [`load_verdict`] on the blocking thread pool.
+pub async fn load_verdict_async(
+    groups_dir: PathBuf,
+    folder: String,
+    job_id: String,
+    alert_id: String,
+    run_started: SystemTime,
+) -> Option<Value> {
+    let joined = tokio::task::spawn_blocking(move || {
+        load_verdict(&groups_dir, &folder, &job_id, &alert_id, run_started)
+    })
+    .await;
+    match joined {
+        Ok(verdict) => verdict,
+        Err(e) => {
+            tracing::error!(error = %e, "verdict reader task failed");
+            None
+        }
+    }
 }
 
 fn refang(value: &str) -> String {
@@ -230,48 +287,128 @@ mod tests {
         assert!(!is_safe_report_id("a/b"));
     }
 
+    const FOLDER: &str = "copilot";
+
+    /// `(tempdir, groups_dir, reports_dir)` with the reports dir created.
+    fn layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let groups = dir.path().join("groups");
+        let reports = groups.join(FOLDER).join(REPORTS_DIR);
+        std::fs::create_dir_all(&reports).unwrap();
+        (dir, groups, reports)
+    }
+
     #[test]
     fn loads_job_report_and_ignores_stale_alert_report() {
-        let dir = tempfile::tempdir().unwrap();
-        let reports = dir.path().join(REPORTS_DIR);
-        std::fs::create_dir_all(&reports).unwrap();
+        let (_dir, groups, reports) = layout();
         std::fs::write(reports.join("42.json"), r#"{"verdict":"false_positive"}"#).unwrap();
         let future = SystemTime::now() + Duration::from_secs(3600);
         // The alert-id report predates the run: ignored.
-        assert!(load_verdict(dir.path(), "job-1", "42", future).is_none());
+        assert!(load_verdict(&groups, FOLDER, "job-1", "42", future).is_none());
         // Written during the run: used.
         let past = SystemTime::now() - Duration::from_secs(3600);
         assert_eq!(
-            load_verdict(dir.path(), "job-1", "42", past).unwrap()["verdict"],
+            load_verdict(&groups, FOLDER, "job-1", "42", past).unwrap()["verdict"],
             "false_positive"
         );
         // The job report always wins.
         std::fs::write(reports.join("job-1.json"), r#"{"verdict":"true_positive"}"#).unwrap();
         assert_eq!(
-            load_verdict(dir.path(), "job-1", "42", future).unwrap()["verdict"],
+            load_verdict(&groups, FOLDER, "job-1", "42", future).unwrap()["verdict"],
             "true_positive"
         );
+        // Unsafe ids and folders are never turned into paths.
+        assert!(load_verdict(&groups, FOLDER, "../x", "../y", past).is_none());
+        assert!(load_verdict(&groups, "../etc", "job-1", "42", past).is_none());
+        assert!(load_verdict(&groups, "missing", "job-1", "42", past).is_none());
     }
 
     #[test]
     fn rejects_symlinks_non_objects_and_oversized_reports() {
-        let dir = tempfile::tempdir().unwrap();
-        let reports = dir.path().join(REPORTS_DIR);
-        std::fs::create_dir_all(&reports).unwrap();
+        let (dir, groups, reports) = layout();
         let outside = dir.path().join("secret.json");
         std::fs::write(&outside, r#"{"verdict":"x"}"#).unwrap();
         std::os::unix::fs::symlink(&outside, reports.join("job-s.json")).unwrap();
-        assert!(load_verdict(dir.path(), "job-s", "none", SystemTime::now()).is_none());
+        assert!(load_verdict(&groups, FOLDER, "job-s", "none", SystemTime::now()).is_none());
 
         std::fs::write(reports.join("job-a.json"), "[1,2]").unwrap();
-        assert!(load_verdict(dir.path(), "job-a", "none", SystemTime::now()).is_none());
+        assert!(load_verdict(&groups, FOLDER, "job-a", "none", SystemTime::now()).is_none());
 
         let big = format!(
             r#"{{"x":"{}"}}"#,
             "a".repeat(MAX_REPORT_BYTES as usize + 10)
         );
         std::fs::write(reports.join("job-b.json"), big).unwrap();
-        assert!(load_verdict(dir.path(), "job-b", "none", SystemTime::now()).is_none());
+        assert!(load_verdict(&groups, FOLDER, "job-b", "none", SystemTime::now()).is_none());
+
+        // A hard link to a file elsewhere is not trusted either.
+        std::fs::hard_link(&outside, reports.join("job-h.json")).unwrap();
+        assert!(load_verdict(&groups, FOLDER, "job-h", "none", SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn symlinked_reports_dir_is_not_followed() {
+        let (dir, groups, reports) = layout();
+        // The agent swaps reports/ for a symlink to a host directory that
+        // happens to hold a matching file.
+        let host_dir = dir.path().join("host-reports");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("job-1.json"), r#"{"verdict":"planted"}"#).unwrap();
+        std::fs::remove_dir(&reports).unwrap();
+        std::os::unix::fs::symlink(&host_dir, &reports).unwrap();
+        assert!(load_verdict(&groups, FOLDER, "job-1", "42", SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn symlinked_group_folder_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let groups = dir.path().join("groups");
+        std::fs::create_dir_all(&groups).unwrap();
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(other.join(REPORTS_DIR)).unwrap();
+        std::fs::write(
+            other.join(REPORTS_DIR).join("job-1.json"),
+            r#"{"verdict":"planted"}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&other, groups.join(FOLDER)).unwrap();
+        assert!(load_verdict(&groups, FOLDER, "job-1", "42", SystemTime::now()).is_none());
+    }
+
+    #[tokio::test]
+    async fn fifo_report_does_not_block_the_reader() {
+        let (_dir, groups, reports) = layout();
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            reports.join("job-f.json"),
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .unwrap();
+        // Without O_NONBLOCK the open would wait for a writer forever.
+        let verdict = tokio::time::timeout(
+            Duration::from_secs(5),
+            load_verdict_async(
+                groups.clone(),
+                FOLDER.to_string(),
+                "job-f".to_string(),
+                "none".to_string(),
+                SystemTime::now(),
+            ),
+        )
+        .await
+        .expect("a FIFO must not block the verdict reader");
+        assert!(verdict.is_none());
+
+        std::fs::write(reports.join("job-g.json"), r#"{"verdict":"benign"}"#).unwrap();
+        let verdict = load_verdict_async(
+            groups,
+            FOLDER.to_string(),
+            "job-g".to_string(),
+            "none".to_string(),
+            SystemTime::now(),
+        )
+        .await;
+        assert_eq!(verdict.unwrap()["verdict"], "benign");
     }
 
     #[test]

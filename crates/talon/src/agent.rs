@@ -22,13 +22,16 @@ pub type StartHook = Box<dyn FnOnce(Arc<dyn RunningContainer>) + Send>;
 #[async_trait]
 pub trait ContainerLauncher: Send + Sync {
     /// Run `spec` to completion. Every output frame is sent, in order, to
-    /// `outputs` (the sender is dropped when the run is over); `on_start`
+    /// `outputs` (the sender is dropped when the run is over). The channel
+    /// is bounded ([`crate::output_limits::OUTPUT_CHANNEL_CAPACITY`]): a
+    /// launcher waits for room (backpressure) and drops frames once the
+    /// receiver is gone (the orchestrator aborted the run). `on_start`
     /// receives the container right after it was spawned. Never fails:
     /// problems are reported in the [`RunResult`].
     async fn launch(
         &self,
         spec: RunSpec,
-        outputs: mpsc::UnboundedSender<ContainerOutput>,
+        outputs: mpsc::Sender<ContainerOutput>,
         on_start: StartHook,
     ) -> RunResult;
 
@@ -100,14 +103,18 @@ impl ContainerLauncher for RunnerLauncher {
     async fn launch(
         &self,
         spec: RunSpec,
-        outputs: mpsc::UnboundedSender<ContainerOutput>,
+        outputs: mpsc::Sender<ContainerOutput>,
         on_start: StartHook,
     ) -> RunResult {
         let handler = move |output: ContainerOutput| {
-            // The receiver only disappears when the orchestrator stopped
-            // listening; dropping frames is then the right thing to do.
-            let _ = outputs.send(output);
-            async {}
+            let outputs = outputs.clone();
+            async move {
+                // Bounded: wait until the orchestrator took the previous
+                // frames (backpressure towards the stdout reader). The
+                // receiver only disappears when the orchestrator stopped
+                // listening (run aborted); dropping frames is then right.
+                let _ = outputs.send(output).await;
+            }
         };
         self.runner
             .run(spec, handler, move |handle: ContainerHandle| {
