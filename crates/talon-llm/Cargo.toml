@@ -35,6 +35,8 @@ chrono = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 wiremock = { workspace = true }
+# The gateway's schema sanitizer must keep the TriageReport schema intact.
+talon-intel = { workspace = true }
 
 [lints]
 workspace = true

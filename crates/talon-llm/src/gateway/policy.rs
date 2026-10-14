@@ -9,7 +9,10 @@
 //! so the gateway works from **allowlists**: every request is rebuilt from
 //! the fields below; anything else is dropped (counted in the gateway
 //! stats and logged at `debug`), and allowed fields with a shape the
-//! gateway does not accept are refused with `400`.
+//! gateway does not accept are refused with `400`. JSON schemas that vLLM
+//! compiles into grammars (`response_format`, tool `parameters`) are
+//! rebuilt from a keyword allowlist with clamped bounds as well
+//! ([`super::schema`]).
 //!
 //! The body is parsed once, filtered in place (values are moved, never
 //! cloned) and serialized once by the caller.
@@ -21,6 +24,8 @@ use rand::RngCore;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use super::schema::sanitize_schema;
+
 /// Top-level fields forwarded for `POST /v1/chat/completions`. Everything
 /// else is dropped.
 ///
@@ -29,7 +34,8 @@ use sha2::{Digest, Sha256};
 ///   string or `text` parts only (media parts are refused: vLLM fetches
 ///   their URLs, i.e. SSRF from the vLLM host).
 /// - `tools`, `tool_choice`, `parallel_tool_calls` — `function` tools only,
-///   size-capped.
+///   size-capped; `parameters` go through the JSON-schema sanitizer
+///   (keywords in [`super::SCHEMA_ALLOWED_KEYWORDS`]).
 /// - `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`,
 ///   `frequency_penalty`, `repetition_penalty`, `seed`, `stop` — plain
 ///   sampling knobs; none of them changes the amount of work per token
@@ -38,7 +44,10 @@ use sha2::{Digest, Sha256};
 /// - `n` — forced to `1`.
 /// - `stream`, `stream_options` — `include_usage` is forced on.
 /// - `response_format` — `text`, `json_object` or a size-capped
-///   `json_schema` (no grammar / regex / structural-tag forms).
+///   `json_schema` (no grammar / regex / structural-tag forms) whose schema
+///   goes through the JSON-schema sanitizer (keyword allowlist, no
+///   `pattern`/`$ref`/..., clamped length bounds, capped `enum`s and
+///   `properties`; see [`super::SCHEMA_ALLOWED_KEYWORDS`]).
 /// - `chat_template_kwargs` — `enable_thinking` (bool) only.
 ///
 /// Deliberately **not** forwarded: `user` (unused by vLLM, ends up in its
@@ -215,7 +224,7 @@ pub(crate) struct PolicyOutcome {
 }
 
 impl PolicyOutcome {
-    fn drop_field(&mut self, parent: &str, key: &str) {
+    pub(super) fn drop_field(&mut self, parent: &str, key: &str) {
         self.dropped_count += 1;
         if self.dropped.len() < MAX_RECORDED_DROPS {
             let mut name = String::with_capacity(parent.len() + 1 + key.len().min(64));
@@ -315,7 +324,7 @@ impl RequestPolicy {
                 "n" => n_present = true,
                 "stream_options" => stream_options = Some(value),
                 "response_format" => {
-                    let v = check_response_format(value)?;
+                    let v = check_response_format(value, &mut out)?;
                     obj.insert(key, v);
                 }
                 "chat_template_kwargs" => {
@@ -622,7 +631,9 @@ fn check_tool_calls(i: usize, value: Value, out: &mut PolicyOutcome) -> PolicyRe
 }
 
 /// `tools`: at most [`MAX_TOOLS`] `function` tools, each at most
-/// [`MAX_TOOL_DEFINITION_BYTES`], parameters at most [`MAX_SCHEMA_DEPTH`] deep.
+/// [`MAX_TOOL_DEFINITION_BYTES`], parameters at most [`MAX_SCHEMA_DEPTH`] deep
+/// and rebuilt by [`sanitize_schema`] (vLLM turns them into a grammar for
+/// `tool_choice` `required`/named and `strict` tools).
 fn check_tools(value: Value, out: &mut PolicyOutcome) -> PolicyResult<Value> {
     let Value::Array(tools) = value else {
         return Err("`tools` must be an array".into());
@@ -681,6 +692,8 @@ fn check_tools(value: Value, out: &mut PolicyOutcome) -> PolicyResult<Value> {
                             "`tools[{i}].function.parameters` is nested too deeply"
                         ));
                     }
+                    let value = sanitize_schema(value, "tools[].function.parameters", out)
+                        .map_err(|e| format!("`tools[{i}]`: {e}"))?;
                     f.insert(key, value);
                 }
                 "strict" => {
@@ -763,9 +776,10 @@ fn check_stop(value: Value) -> PolicyResult<Value> {
 }
 
 /// `response_format`: `text`, `json_object`, or `json_schema` with a schema
-/// of at most [`MAX_SCHEMA_BYTES`]. Grammar, regex, structural-tag and any
-/// other forms are refused.
-fn check_response_format(value: Value) -> PolicyResult<Value> {
+/// of at most [`MAX_SCHEMA_BYTES`] and [`MAX_SCHEMA_DEPTH`], rebuilt by
+/// [`sanitize_schema`]. Grammar, regex, structural-tag and any other forms
+/// are refused.
+fn check_response_format(value: Value, out: &mut PolicyOutcome) -> PolicyResult<Value> {
     let Value::Object(mut rf) = value else {
         return Err("`response_format` must be an object".into());
     };
@@ -813,6 +827,8 @@ fn check_response_format(value: Value) -> PolicyResult<Value> {
                                 "`response_format.json_schema.schema` is nested too deeply".into(),
                             );
                         }
+                        let value =
+                            sanitize_schema(value, "response_format.json_schema.schema", out)?;
                         clean.insert(key, value);
                     }
                     _ => {}
@@ -892,6 +908,7 @@ fn serialized_within(v: &Value, limit: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{MAX_SCHEMA_ENUM_VALUES, MAX_SCHEMA_LENGTH_BOUND, MAX_SCHEMA_PROPERTIES};
     use super::*;
 
     fn policy(cap: Option<u32>) -> RequestPolicy {
@@ -1263,6 +1280,97 @@ mod tests {
             b["tool_choice"],
             json!({"type": "function", "function": {"name": "f"}})
         );
+    }
+
+    /// N-6: tool `parameters` are rebuilt by the schema sanitizer (for chat
+    /// and `/tokenize`); drops are counted, caps refuse the request.
+    #[test]
+    fn tool_parameters_are_sanitized() {
+        let p = policy(None);
+        let params = json!({
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "pattern": "^(a|aa)*$", "maxLength": 1e8},
+                "l": {"type": "array", "minItems": 1e8, "items": {"$ref": "#/$defs/x"}}
+            },
+            "$defs": {"x": {"type": "string", "pattern": "(a+)+$"}}
+        });
+        let expected = json!({
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "maxLength": MAX_SCHEMA_LENGTH_BOUND},
+                "l": {"type": "array", "minItems": MAX_SCHEMA_LENGTH_BOUND, "items": {}}
+            }
+        });
+        let tools = json!([{"type": "function", "function": {"name": "f", "parameters": params}}]);
+        let (b, o) = chat(&p, json!({"messages": [], "tools": tools.clone()}));
+        assert_eq!(b["tools"][0]["function"]["parameters"], expected);
+        assert_eq!(o.dropped_count, 3, "{:?}", o.dropped);
+        for d in ["pattern", "$ref", "$defs"] {
+            assert!(
+                o.dropped
+                    .contains(&format!("tools[].function.parameters.{d}")),
+                "{d}: {:?}",
+                o.dropped
+            );
+        }
+
+        let mut t = json!({"messages": user("x"), "tools": tools});
+        let o = p.apply_tokenize(&mut t).unwrap();
+        assert_eq!(t["tools"][0]["function"]["parameters"], expected);
+        assert_eq!(o.dropped_count, 3);
+
+        let values: Vec<Value> = (0..=MAX_SCHEMA_ENUM_VALUES).map(|i| json!(i)).collect();
+        let mut b = json!({"messages": [], "tools": [{"type": "function", "function": {"name": "f",
+            "parameters": {"type": "object", "properties": {"e": {"enum": values}}}}}]});
+        let err = p.apply_chat(&mut b, "l").unwrap_err();
+        assert!(err.contains("tools[0]") && err.contains("enum"), "{err}");
+    }
+
+    /// N-6: `response_format.json_schema.schema` is rebuilt by the schema
+    /// sanitizer; the agent's TriageReport `response_format` (strict and
+    /// guided) passes unchanged.
+    #[test]
+    fn response_format_schema_is_sanitized() {
+        let p = policy(None);
+        let rf = |schema: Value| json!({"type": "json_schema", "json_schema": {"name": "r", "strict": true, "schema": schema}});
+        let (b, o) = chat(
+            &p,
+            json!({"messages": [], "response_format": rf(json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "pattern": "^(a|aa)*$", "format": "regex",
+                    "minLength": 1e8, "maxLength": 4}},
+                "if": {"required": ["id"]}, "then": {"not": {}}
+            }))}),
+        );
+        assert_eq!(
+            b["response_format"],
+            rf(
+                json!({"type": "object", "properties": {"id": {"type": "string", "minLength": 4, "maxLength": 4}}})
+            )
+        );
+        assert_eq!(o.dropped_count, 4, "{:?}", o.dropped);
+        assert!(
+            o.dropped
+                .contains(&"response_format.json_schema.schema.pattern".to_string())
+        );
+
+        let mut props = Map::new();
+        for i in 0..=MAX_SCHEMA_PROPERTIES {
+            props.insert(format!("p{i}"), json!({"type": "integer"}));
+        }
+        let mut b = json!({"messages": [], "response_format": rf(json!({"type": "object", "properties": props}))});
+        assert!(p.apply_chat(&mut b, "l").is_err());
+
+        for guided in [false, true] {
+            let format = talon_intel::report::response_format(guided);
+            let (b, o) = chat(
+                &p,
+                json!({"messages": [], "response_format": format.clone()}),
+            );
+            assert_eq!(o.dropped_count, 0, "{:?}", o.dropped);
+            assert_eq!(b["response_format"], format);
+        }
     }
 
     #[test]

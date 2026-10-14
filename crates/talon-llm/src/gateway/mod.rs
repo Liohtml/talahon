@@ -14,6 +14,8 @@
 //!                              │ body size (413) and JSON value budget
 //!                              │ parameter allowlist (unknown fields dropped,
 //!                              │   media parts / grammar forms refused)
+//!                              │ JSON schemas: keyword allowlist (no pattern,
+//!                              │   $ref, ...), clamped bounds, capped enums
 //!                              │ model pinned to the allow-list
 //!                              │ max_tokens clamped / inserted, n = 1
 //!                              │ per-label cache_salt (no shared prefix cache)
@@ -28,6 +30,7 @@
 //! [`TOKENIZE_ALLOWED_FIELDS`]).
 
 mod policy;
+mod schema;
 mod stats;
 mod tokens;
 
@@ -67,8 +70,12 @@ use crate::sse::SseDecoder;
 use crate::types::Usage;
 
 pub use policy::{
-    CHAT_ALLOWED_FIELDS, MAX_JSON_NODES, MAX_SCHEMA_BYTES, MAX_TOOL_DEFINITION_BYTES, MAX_TOOLS,
-    TOKENIZE_ALLOWED_FIELDS,
+    CHAT_ALLOWED_FIELDS, MAX_JSON_NODES, MAX_SCHEMA_BYTES, MAX_SCHEMA_DEPTH,
+    MAX_TOOL_DEFINITION_BYTES, MAX_TOOLS, TOKENIZE_ALLOWED_FIELDS,
+};
+pub use schema::{
+    MAX_SCHEMA_BRANCHES, MAX_SCHEMA_ENUM_VALUES, MAX_SCHEMA_LENGTH_BOUND, MAX_SCHEMA_PROPERTIES,
+    SCHEMA_ALLOWED_FORMATS, SCHEMA_ALLOWED_KEYWORDS,
 };
 pub use stats::{GatewayStats, LabelStats, MAX_LABELS, OVERFLOW_LABEL};
 /// Connection limits of the gateway's HTTP server (re-exported from
