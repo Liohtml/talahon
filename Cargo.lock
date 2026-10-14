@@ -1702,6 +1702,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "futures",
+ "regex",
  "serde",
  "serde_json",
  "talon-channels",
@@ -1709,7 +1711,6 @@ dependencies = [
  "talon-core",
  "talon-db",
  "talon-http",
- "talon-intel",
  "talon-ipc",
  "talon-llm",
  "talon-router",
@@ -1733,6 +1734,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "futures",
+ "rustix",
  "serde",
  "serde_json",
  "talon-core",
@@ -1748,6 +1750,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -1882,25 +1885,21 @@ dependencies = [
 name = "talon-intel"
 version = "2.0.0"
 dependencies = [
- "aho-corasick",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "hex",
- "ipnet",
  "regex",
  "serde",
  "serde_json",
  "sha2",
  "talon-core",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
  "url",
- "wiremock",
 ]
 
 [[package]]
