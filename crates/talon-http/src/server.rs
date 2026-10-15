@@ -969,7 +969,7 @@ fn parse_investigation_request(obj: &Map<String, Value>) -> Result<Investigation
         Ok(Some(t)) if is_valid_triggered_by(t) => t.to_string(),
         _ => {
             return Err(ApiError::bad_request(
-                "triggered_by must match ^[A-Za-z0-9_-]{1,32}$",
+                "triggered_by must be one of: manual, scheduled, webhook",
             ));
         }
     };

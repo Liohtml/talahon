@@ -20,7 +20,8 @@ Written in Rust · powered by your own vLLM · built to survive hostile input.
 [Quick start](#-quick-start) ·
 [Deployment](#-deployment-guide) ·
 [Operations](#-operations) ·
-[Docs](#-documentation)
+[Docs](#-documentation) ·
+[Credits](#-credits)
 
 </div>
 
@@ -416,7 +417,7 @@ All endpoints except `/health` require `X-Api-Key` or `Authorization: Bearer`.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /investigate` | `{alert_id, customer_code, triggered_by?, template_override?}` → queued investigation, deduplicated per alert |
+| `POST /investigate` | `{alert_id, customer_code, triggered_by?, template_override?}` → queued investigation, deduplicated per alert; `triggered_by` is `manual`, `scheduled` or `webhook` (default) |
 | `GET /investigations`, `GET /investigations/{id}` | Investigation status and structured verdicts |
 | `POST /message` | Analyst chat (SSE stream), per-user lanes via `user_id` |
 | `POST /session/reset` | `{scope, user_id?}` with scope `chat`, `investigate` or `all` |
@@ -465,6 +466,16 @@ audited via `talon_core::audit`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 | [docs/ANON_PROXY.md](docs/ANON_PROXY.md) | Anonymizing proxy: flow, token types, `fields.yaml` |
 | [groups/copilot/prompts/README.md](groups/copilot/prompts/README.md) | Writing investigation templates |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
+
+## 🙏 Credits
+
+Talon 2.0 is an independent Rust rewrite, but it stands on the work of others:
+
+- **[Talon](https://github.com/taylorwalton/talon)** by [SOCFortress](https://www.socfortress.co) (Taylor Walton) — the original AI SOC analyst for CoPilot. Its investigation workflow, alert-type prompt templates, MCP server wrappers, anonymizing proxy and MemPalace integration are the foundation of this project.
+- **[NanoClaw](https://github.com/qwibitai/nanoclaw)** and its contributors — the container-isolated agent framework the original Talon was built on: per-group lanes, IPC, scheduled tasks and group memory.
+- **[CoPilot](https://github.com/socfortress/CoPilot)** by SOCFortress — the SOC platform Talon works for, continued in Rust at [Liohtml/CoPilot](https://github.com/Liohtml/CoPilot).
+- **MCP servers** Talon's agent uses: SOCFortress' [copilot](https://github.com/socfortress/copilot-mcp-server), [Wazuh](https://github.com/socfortress/wazuh-mcp-server), [Velociraptor](https://github.com/socfortress/velociraptor-mcp-server) and [Shuffle](https://github.com/socfortress/shuffle-mcp-server) servers, [cve-mcp-server](https://github.com/mukul975/cve-mcp-server), [opensearch-mcp-server](https://pypi.org/project/opensearch-mcp-server/), [mysql-mcp-server](https://pypi.org/project/mysql-mcp-server/) and [MemPalace](https://pypi.org/project/mempalace/).
+- **[vLLM](https://github.com/vllm-project/vllm)**, **[Wazuh](https://wazuh.com)**, **[OpenSearch](https://opensearch.org)** and **[Velociraptor](https://docs.velociraptor.app)**, which do the heavy lifting underneath.
 
 ## 📄 License
 
