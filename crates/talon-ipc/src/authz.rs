@@ -3,8 +3,7 @@
 //! Every IPC request is authorized by an [`IpcAuthorizer`] — in production
 //! [`FnAuthorizer::security_policy`], i.e. `talon_security::ipc_authz` — and
 //! **additionally** by the built-in [`BaselineAuthorizer`], which encodes the
-//! original TypeScript rules from `src/ipc.ts` tightened to per-lane
-//! isolation (MYTH-03). The effective decision is the conjunction of both:
+//! baseline IPC rules with per-lane isolation (MYTH-03). The effective decision is the conjunction of both:
 //! the baseline can only ever *deny*, so a bug in (or a permissive
 //! replacement of) the policy engine can never widen what a container may
 //! do. A policy that panics fails closed.
@@ -100,8 +99,8 @@ fn own_lane(who: IpcIdentity<'_>, g: &RegisteredGroup) -> bool {
     g.ipc_key() == who.ipc_key && g.folder == who.source_folder
 }
 
-/// The TypeScript authorization rules (`src/ipc.ts`), tightened to per-lane
-/// isolation, always enforced in addition to the configured policy.
+/// The baseline authorization rules with per-lane isolation, always
+/// enforced in addition to the configured policy.
 ///
 /// - message: main may message any JID; others only JIDs registered to
 ///   their own lane (same IPC key *and* folder).
@@ -335,7 +334,7 @@ mod tests {
         }
     }
 
-    // Port of the "IPC message authorization" block of ipc-auth.test.ts.
+    // IPC message authorization.
     #[test]
     fn main_group_can_send_to_any_group() {
         assert!(is_msg_authorized(MAIN, "other@g.us"));
@@ -425,7 +424,7 @@ mod tests {
             jid: "new@g.us".into(),
             name: "New".into(),
             folder: folder.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             requires_trigger: None,
             container_config: None,
             timestamp: None,

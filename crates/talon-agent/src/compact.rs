@@ -10,9 +10,8 @@
 //!    ([`fallback_summary`]) if the model call fails;
 //! 3. archives the full pre-compaction transcript as Markdown into the
 //!    lane-private `<state>/conversations/` (dir 0700, files 0600;
-//!    [`archive_markdown`], [`write_archive`]) — the port of the TypeScript
-//!    PreCompact hook. Unlike the TypeScript runtime, archives never go to
-//!    the group folder: every lane on a folder shares it (MYTH-03);
+//!    [`archive_markdown`], [`write_archive`]). Archives never go to the
+//!    group folder: every lane on a folder shares it (MYTH-03);
 //! 4. replaces the head with [`summary_messages`].
 
 use std::fs::OpenOptions;
@@ -23,7 +22,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use talon_llm::{ChatMessage, Role, estimate_tokens};
 
-/// Messages longer than this are cut in the Markdown archive (TS parity).
+/// Messages longer than this are cut in the Markdown archive.
 const ARCHIVE_MAX_MESSAGE_CHARS: usize = 2_000;
 /// Starting per-message cap when rendering a transcript for summarization.
 const SUMMARY_MESSAGE_CHARS: usize = 6_000;
@@ -254,7 +253,7 @@ pub fn summary_messages(summary: &Summary, tail_starts_with_user: bool) -> Vec<C
 }
 
 /// `summary` -> `summary`, `Investigate Alert 42!` -> `investigate-alert-42`
-/// (lower-case, `[a-z0-9-]`, max 50 chars; TS `sanitizeFilename`).
+/// (lower-case, `[a-z0-9-]`, max 50 chars).
 pub fn sanitize_filename(s: &str) -> String {
     let mut out = String::new();
     let mut dash = false;
@@ -271,8 +270,7 @@ pub fn sanitize_filename(s: &str) -> String {
     trimmed.trim_end_matches('-').to_string()
 }
 
-/// Markdown archive of a transcript (user and assistant text only, like
-/// the TypeScript PreCompact hook).
+/// Markdown archive of a transcript (user and assistant text only).
 pub fn archive_markdown(
     messages: &[ChatMessage],
     title: Option<&str>,
@@ -476,10 +474,10 @@ mod tests {
             ChatMessage::tool_result("1", "hidden"),
             ChatMessage::assistant("y".repeat(3_000)),
         ];
-        let md = archive_markdown(&h, Some("Alert triage"), "Andy", now);
+        let md = archive_markdown(&h, Some("Alert triage"), "Talon", now);
         assert!(md.starts_with("# Alert triage\n\nArchived: Oct 14, 9:47 AM"));
         assert!(md.contains("**User**: hello"));
-        assert!(md.contains(&format!("**Andy**: {}...", "y".repeat(2_000))));
+        assert!(md.contains(&format!("**Talon**: {}...", "y".repeat(2_000))));
         assert!(!md.contains("hidden"));
 
         let archives = dir.path().join("state").join("conversations");

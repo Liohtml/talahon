@@ -1,7 +1,7 @@
-//! The host orchestrator (port of `src/index.ts`).
+//! The host orchestrator.
 //!
-//! [`Orchestrator`] owns the in-memory state the TypeScript module kept in
-//! globals (registered lanes, session ids, message cursors) and implements
+//! [`Orchestrator`] owns the host's in-memory state (registered lanes,
+//! session ids, message cursors) and implements
 //! every host-side callback trait:
 //!
 //! - `talon_core::channel::ChannelHost` — inbound messages, lane
@@ -60,8 +60,7 @@ const MAX_TEMPLATE_BYTES: u64 = 256 * 1024;
 /// Tunables that are not part of `TalonConfig`.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    /// Close a scheduled task's container this long after its result
-    /// (TS `TASK_CLOSE_DELAY_MS`).
+    /// Close a scheduled task's container this long after its result.
     pub task_close_delay: Duration,
     /// Close a `/compact` container this long after it finished.
     pub command_close_delay: Duration,
@@ -107,7 +106,7 @@ pub struct OrchestratorDeps {
     pub settings: Settings,
 }
 
-/// Mutable orchestrator state (TS module globals).
+/// Mutable orchestrator state.
 #[derive(Debug, Default)]
 pub(crate) struct State {
     /// Registered lanes (persisted + in-memory), by JID.
@@ -156,8 +155,7 @@ impl std::fmt::Debug for Orchestrator {
 }
 
 impl Orchestrator {
-    /// Build the orchestrator and load its state from the database (TS
-    /// `loadState`).
+    /// Build the orchestrator and load its state from the database.
     ///
     /// # Errors
     /// Database read failures.
@@ -221,7 +219,7 @@ impl Orchestrator {
             .clone()
     }
 
-    /// The first channel owning `jid` (TS `findChannel`).
+    /// The first channel owning `jid`.
     pub fn find_channel(&self, jid: &str) -> Option<Arc<dyn Channel>> {
         let channels = self.channels.read().unwrap_or_else(PoisonError::into_inner);
         talon_router::find_channel(&channels, jid).cloned()
@@ -281,7 +279,7 @@ impl Orchestrator {
 
     // ---- persistence -----------------------------------------------------
 
-    /// Persist both cursors (TS `saveState`). Failures are logged.
+    /// Persist both cursors. Failures are logged.
     pub(crate) fn save_state(&self) {
         let (last, agent) = {
             let st = self.lock();
@@ -321,7 +319,7 @@ impl Orchestrator {
     }
 
     /// The lane's cursor, recovering it from the last bot reply when it is
-    /// missing (new lane, corrupted state, restart) — TS `getOrRecoverCursor`.
+    /// missing (new lane, corrupted state, restart).
     pub(crate) fn get_or_recover_cursor(&self, jid: &str) -> String {
         let existing = self.cursor(jid);
         if !existing.is_empty() {
@@ -344,8 +342,7 @@ impl Orchestrator {
         }
     }
 
-    /// Record a lane's session (TS `persistSession`). Ephemeral lanes keep
-    /// nothing.
+    /// Record a lane's session. Ephemeral lanes keep nothing.
     pub(crate) fn persist_session(
         &self,
         group: &RegisteredGroup,
@@ -373,8 +370,7 @@ impl Orchestrator {
         }
     }
 
-    /// Drop a lane's session in memory *and* in the database (TS
-    /// `clearSessionFor`).
+    /// Drop a lane's session in memory *and* in the database.
     pub(crate) fn clear_session_for(&self, group: &RegisteredGroup) {
         let key = group.session_key().to_string();
         let had = self.lock().sessions.remove(&key).is_some();
@@ -421,7 +417,7 @@ impl Orchestrator {
     ///   owns the folder (lanes sharing a folder, e.g. `http:copilot:*`) the
     ///   lane stays in memory.
     /// - `create_template`: create `logs/` and copy the `CLAUDE.md` template
-    ///   (TS `registerGroup`, used for IPC registrations).
+    ///   (used for IPC registrations).
     pub(crate) fn register_group_inner(
         &self,
         jid: &str,
@@ -497,8 +493,7 @@ impl Orchestrator {
         }
     }
 
-    /// Copy the `CLAUDE.md` template into a new group folder (fixes #1391
-    /// in TS). Never follows or replaces an existing entry (the folder is
+    /// Copy the `CLAUDE.md` template into a new group folder. Never follows or replaces an existing entry (the folder is
     /// agent-writable, so a planted symlink must not redirect the write:
     /// the file is created with `O_CREAT | O_EXCL | O_NOFOLLOW`), and the
     /// template itself (`groups/main` is writable by the main agent) is
@@ -522,11 +517,11 @@ impl Orchestrator {
             return;
         };
         let name = &self.config.assistant_name;
-        if name != "Andy" {
+        if name != "Talon" {
             content = content
                 .lines()
                 .map(|l| {
-                    if l == "# Andy" {
+                    if l == "# Talon" {
                         format!("# {name}")
                     } else {
                         l.to_string()
@@ -535,7 +530,7 @@ impl Orchestrator {
                 .collect::<Vec<_>>()
                 .join("\n")
                 + if content.ends_with('\n') { "\n" } else { "" };
-            content = content.replace("You are Andy", &format!("You are {name}"));
+            content = content.replace("You are Talon", &format!("You are {name}"));
         }
         match safe_fs::create_new_at(dir, CLAUDE_MD, content.as_bytes()) {
             Ok(()) => tracing::info!(folder = %group.folder, "Created CLAUDE.md from template"),
@@ -607,7 +602,7 @@ fn read_template(groups: BorrowedFd<'_>, template_folder: &str) -> Option<String
     }
 }
 
-/// TS `loadState`: cursors, sessions and registered groups.
+/// Load cursors, sessions and registered groups from the database.
 fn load_state(db: &Db) -> Result<State> {
     let last_timestamp = db.get_router_state(LAST_TIMESTAMP_KEY)?.unwrap_or_default();
     let last_agent_timestamp = match db.get_router_state(LAST_AGENT_TIMESTAMP_KEY)? {

@@ -1,4 +1,4 @@
-//! Scheduled-task execution (the container half of TS `runTask`) and
+//! Scheduled-task execution (the container half of a task run) and
 //! investigation bookkeeping.
 //!
 //! The scheduler resolves the task's group (by the task's chat JID first,

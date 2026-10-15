@@ -410,7 +410,7 @@ pub fn group(name: &str, folder: &str, is_main: bool) -> RegisteredGroup {
     RegisteredGroup {
         name: name.into(),
         folder: folder.into(),
-        trigger: "@Andy".into(),
+        trigger: "@Talon".into(),
         added_at: "2026-01-01T00:00:00.000Z".into(),
         container_config: None,
         requires_trigger: None,

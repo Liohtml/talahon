@@ -944,7 +944,7 @@ async fn prints_script_and_block_without_applying() {
     let text = out.render();
     assert!(text.starts_with("#!/bin/sh\n"));
     assert!(text.contains("\tchain agent_egress {\n"));
-    assert!(text.contains("exit 0\n=== NANOCLAW SETUP: SETUP_EGRESS ==="));
+    assert!(text.contains("exit 0\n=== TALON SETUP: SETUP_EGRESS ==="));
     assert_eq!(crate::status::parse_status_blocks(&text), vec![b]);
     // Nothing was changed.
     assert_eq!(runner.calls(), vec!["ip -o link show dev br-talon"]);

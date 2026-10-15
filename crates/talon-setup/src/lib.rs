@@ -1,8 +1,6 @@
 //! # talon-setup — install, verify and service management
 //!
-//! **Owner: agent A11.** See `docs/RUST_ARCHITECTURE.md` §A11.
-//!
-//! Library behind `talon setup <step> [args...]` (port of `setup/*.ts`).
+//! Library behind `talon setup <step> [args...]`.
 //! Every step prints one machine-readable status block (see [`status`]) that
 //! the setup skill parses, and returns an exit code:
 //!

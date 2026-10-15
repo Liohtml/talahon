@@ -26,8 +26,7 @@
 //! - `refresh_groups` / `register_group`: denied (main only).
 //!
 //! ## Rules for main
-//! - may message any *registered* JID (unregistered JIDs are denied —
-//!   tightened vs. the TypeScript release);
+//! - may message any *registered* JID (unregistered JIDs are denied);
 //! - may schedule for any registered lane, including scripts;
 //! - may pause/resume/cancel/update any task, but `update_task` may not
 //!   change the script of a host-owned task (script injection into host
@@ -354,7 +353,7 @@ mod tests {
         RegisteredGroup {
             name: name.into(),
             folder: folder.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             added_at: "2024-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,
@@ -482,7 +481,7 @@ mod tests {
             jid: jid.into(),
             name: "New Group".into(),
             folder: folder.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             requires_trigger: None,
             container_config: None,
             timestamp: None,
@@ -549,7 +548,7 @@ mod tests {
         assert!(!TaskOwner::Host.is_lane("host"));
     }
 
-    // --- schedule_task (ported from ipc-auth.test.ts) ---
+    // --- schedule_task ---
 
     #[test]
     fn main_can_schedule_for_another_group() {
@@ -917,7 +916,6 @@ mod tests {
 
     #[test]
     fn main_cannot_message_unregistered_jid() {
-        // tightened vs. TS (which allowed it)
         assert!(!authorize_outbound_message(MAIN, "unknown@g.us", &groups()).is_allowed());
         assert!(!authorize_outbound_message(MAIN, "", &groups()).is_allowed());
     }

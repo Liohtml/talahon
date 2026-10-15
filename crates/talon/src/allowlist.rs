@@ -1,9 +1,8 @@
 //! Live view of the sender allowlist.
 //!
-//! The TypeScript host re-read `sender-allowlist.json` on every check, so an
-//! operator could edit it without a restart. [`AllowlistSource`] keeps that
-//! property but only re-parses when the file's modification time or size
-//! changed.
+//! An operator can edit `sender-allowlist.json` without a restart:
+//! [`AllowlistSource`] picks up changes on the next check, but only
+//! re-parses when the file's modification time or size changed.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};

@@ -1,4 +1,4 @@
-//! Step `register` (port of `setup/register.ts`): register a chat (JID) as
+//! Step `register`: register a chat (JID) as
 //! a group, create its folder and `CLAUDE.md`, and optionally rename the
 //! assistant.
 //!
@@ -6,7 +6,7 @@
 //! `--channel` (default: inferred from the JID), `--no-trigger-required`,
 //! `--is-main`, `--assistant-name`.
 //!
-//! Hardening over the TypeScript version: every input is validated (no
+//! Hardening: every input is validated (no
 //! control characters, bounded lengths, quote-free assistant name), the
 //! group folder is resolved traversal-safe, re-registering keeps an existing
 //! group's container config and lane settings, and `CLAUDE.md` files are
@@ -30,7 +30,7 @@ use crate::fsutil::{
 use crate::status::{StatusBlock, StepOutcome};
 
 /// The assistant name the shipped `CLAUDE.md` templates use.
-pub const DEFAULT_ASSISTANT_NAME: &str = "Andy";
+pub const DEFAULT_ASSISTANT_NAME: &str = "Talon";
 
 const MAX_JID_LEN: usize = 256;
 const MAX_NAME_LEN: usize = 200;
@@ -44,7 +44,7 @@ pub struct RegisterRequest {
     pub jid: String,
     /// Display name.
     pub name: String,
-    /// Trigger word, e.g. `@Andy`.
+    /// Trigger word, e.g. `@Talon`.
     pub trigger: String,
     /// Group folder under `groups/`.
     pub folder: String,
@@ -177,8 +177,8 @@ pub fn prepare_group_folder(
     Ok(true)
 }
 
-/// Replace the default assistant name in `content`: the first `# Andy`
-/// heading line and every `You are Andy`.
+/// Replace the default assistant name in `content`: the first `# Talon`
+/// heading line and every `You are Talon`.
 pub fn rename_assistant(content: &str, new_name: &str) -> String {
     // Static patterns: compile cannot fail.
     let heading = Regex::new(&format!(r"(?m)^# {DEFAULT_ASSISTANT_NAME}$"));
@@ -323,7 +323,7 @@ mod tests {
             "--name",
             "SOC Team",
             "--trigger",
-            "@Andy",
+            "@Talon",
             "--folder",
             "soc-team",
         ];
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(r.channel, "telegram");
         assert!(r.requires_trigger);
         assert!(!r.is_main);
-        assert_eq!(r.assistant_name, "Andy");
+        assert_eq!(r.assistant_name, "Talon");
         let r = RegisterRequest::from_args(&args(&[
             "--no-trigger-required",
             "--is-main",
@@ -427,24 +427,24 @@ mod tests {
         assert!(!ctx.db_path().exists(), "nothing written on invalid input");
     }
 
-    // --- templating (ports of register.test.ts) -----------------------------
+    // --- templating ------------------------------------------------------------
 
     #[test]
     fn rename_replaces_heading_and_intro() {
         assert_eq!(
-            rename_assistant("# Andy\n\nYou are Andy, a personal assistant.", "Nova"),
+            rename_assistant("# Talon\n\nYou are Talon, a personal assistant.", "Nova"),
             "# Nova\n\nYou are Nova, a personal assistant."
         );
     }
 
     #[test]
     fn rename_handles_regex_special_names() {
-        let out = rename_assistant("# Andy\n\nYou are Andy.", "C.L.A.U.D.E");
+        let out = rename_assistant("# Talon\n\nYou are Talon.", "C.L.A.U.D.E");
         assert!(out.contains("# C.L.A.U.D.E"));
         assert!(out.contains("You are C.L.A.U.D.E."));
         // `$` in a name is not a capture reference (rejected by validation
         // anyway, but the renamer must stay literal).
-        assert_eq!(rename_assistant("# Andy", "$1"), "# $1");
+        assert_eq!(rename_assistant("# Talon", "$1"), "# $1");
     }
 
     struct Fixture {
@@ -459,12 +459,12 @@ mod tests {
         std::fs::create_dir_all(groups.join("global")).unwrap();
         std::fs::write(
             groups.join("main/CLAUDE.md"),
-            "# Andy\n\nYou are Andy, a personal assistant.\n\n## Admin Context\n\nThis is the **main channel**.",
+            "# Talon\n\nYou are Talon, a personal assistant.\n\n## Admin Context\n\nThis is the **main channel**.",
         )
         .unwrap();
         std::fs::write(
             groups.join("global/CLAUDE.md"),
-            "# Andy\n\nYou are Andy, a personal assistant.",
+            "# Talon\n\nYou are Talon, a personal assistant.",
         )
         .unwrap();
         Fixture { _tmp: tmp, groups }
@@ -484,9 +484,9 @@ mod tests {
     #[test]
     fn copies_global_template_for_non_main() {
         let f = fixture();
-        simulate(&f, "telegram_dev-team", false, "Andy");
+        simulate(&f, "telegram_dev-team", false, "Talon");
         let c = read(&f, "telegram_dev-team");
-        assert!(c.contains("You are Andy"));
+        assert!(c.contains("You are Talon"));
         assert!(!c.contains("Admin Context"));
         assert!(f.groups.join("telegram_dev-team/logs").is_dir());
     }
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn copies_main_template_for_main() {
         let f = fixture();
-        simulate(&f, "whatsapp_main", true, "Andy");
+        simulate(&f, "whatsapp_main", true, "Talon");
         assert!(read(&f, "whatsapp_main").contains("Admin Context"));
     }
 
@@ -507,7 +507,7 @@ mod tests {
             "slack_main",
             "discord_main",
         ] {
-            simulate(&f, folder, true, "Andy");
+            simulate(&f, folder, true, "Talon");
         }
         for folder in [
             "whatsapp_main",
@@ -517,21 +517,21 @@ mod tests {
         ] {
             let c = read(&f, folder);
             assert!(c.contains("Admin Context"));
-            assert!(c.contains("You are Andy"));
+            assert!(c.contains("You are Talon"));
         }
     }
 
     #[test]
     fn non_main_groups_get_global_template() {
         let f = fixture();
-        simulate(&f, "whatsapp_main", true, "Andy");
+        simulate(&f, "whatsapp_main", true, "Talon");
         for folder in ["telegram_friends", "slack_engineering", "discord_general"] {
-            simulate(&f, folder, false, "Andy");
+            simulate(&f, folder, false, "Talon");
         }
         assert!(read(&f, "whatsapp_main").contains("Admin Context"));
         for folder in ["telegram_friends", "slack_engineering", "discord_general"] {
             let c = read(&f, folder);
-            assert!(c.contains("You are Andy"));
+            assert!(c.contains("You are Talon"));
             assert!(!c.contains("Admin Context"));
         }
     }
@@ -539,9 +539,9 @@ mod tests {
     #[test]
     fn custom_name_propagates_everywhere() {
         let f = fixture();
-        simulate(&f, "whatsapp_main", true, "Andy");
-        simulate(&f, "telegram_main", true, "Andy");
-        simulate(&f, "slack_devs", false, "Andy");
+        simulate(&f, "whatsapp_main", true, "Talon");
+        simulate(&f, "telegram_main", true, "Talon");
+        simulate(&f, "slack_devs", false, "Talon");
         simulate(&f, "discord_main", true, "Luna");
         for folder in [
             "main",
@@ -554,20 +554,20 @@ mod tests {
             let c = read(&f, folder);
             assert!(c.contains("# Luna"), "{folder}");
             assert!(c.contains("You are Luna"), "{folder}");
-            assert!(!c.contains("Andy"), "{folder}");
+            assert!(!c.contains("Talon"), "{folder}");
         }
     }
 
     #[test]
     fn never_overwrites_existing_claude_md() {
         let f = fixture();
-        simulate(&f, "slack_main", true, "Andy");
+        simulate(&f, "slack_main", true, "Talon");
         std::fs::write(
             f.groups.join("slack_main/CLAUDE.md"),
             "# Gambi\n\nCustom persona with workspace rules and family context.",
         )
         .unwrap();
-        simulate(&f, "slack_main", true, "Andy");
+        simulate(&f, "slack_main", true, "Talon");
         let c = read(&f, "slack_main");
         assert!(c.contains("Custom persona"));
         assert!(!c.contains("Admin Context"));
@@ -576,13 +576,13 @@ mod tests {
     #[test]
     fn never_overwrites_when_promoted_to_main() {
         let f = fixture();
-        simulate(&f, "whatsapp_casa", false, "Andy");
+        simulate(&f, "whatsapp_casa", false, "Talon");
         std::fs::write(
             f.groups.join("whatsapp_casa/CLAUDE.md"),
             "# Casa\n\nFamily group with PARA system, task management, shopping lists.",
         )
         .unwrap();
-        simulate(&f, "whatsapp_casa", true, "Andy");
+        simulate(&f, "whatsapp_casa", true, "Talon");
         let c = read(&f, "whatsapp_casa");
         assert!(c.contains("PARA system"));
         assert!(!c.contains("Admin Context"));
@@ -591,14 +591,14 @@ mod tests {
     #[test]
     fn preserves_custom_files_across_channels() {
         let f = fixture();
-        simulate(&f, "whatsapp_main", true, "Andy");
-        simulate(&f, "discord_main", false, "Andy");
+        simulate(&f, "whatsapp_main", true, "Talon");
+        simulate(&f, "discord_main", false, "Talon");
         std::fs::write(
             f.groups.join("discord_main/CLAUDE.md"),
             "# Gambi HQ — Research Assistant\n\nResearch workflows for Laura and Ethan.",
         )
         .unwrap();
-        simulate(&f, "discord_main", true, "Andy");
+        simulate(&f, "discord_main", true, "Talon");
         assert!(read(&f, "discord_main").contains("Research Assistant"));
         assert!(read(&f, "whatsapp_main").contains("Admin Context"));
     }
@@ -608,7 +608,7 @@ mod tests {
         let f = fixture();
         std::fs::remove_file(f.groups.join("global/CLAUDE.md")).unwrap();
         std::fs::remove_file(f.groups.join("main/CLAUDE.md")).unwrap();
-        simulate(&f, "discord_general", false, "Andy");
+        simulate(&f, "discord_general", false, "Talon");
         assert!(!f.groups.join("discord_general/CLAUDE.md").exists());
     }
 
@@ -616,25 +616,25 @@ mod tests {
     fn symlinked_claude_md_is_neither_followed_nor_replaced() {
         let f = fixture();
         let outside = f.groups.parent().unwrap().join("authorized_keys");
-        std::fs::write(&outside, "You are Andy ssh-ed25519 AAAA").unwrap();
+        std::fs::write(&outside, "You are Talon ssh-ed25519 AAAA").unwrap();
         std::fs::create_dir_all(f.groups.join("evil")).unwrap();
         std::os::unix::fs::symlink(&outside, f.groups.join("evil/CLAUDE.md")).unwrap();
         // Template copy must not write through the (dangling or not) link.
-        simulate(&f, "evil", false, "Andy");
+        simulate(&f, "evil", false, "Talon");
         assert_eq!(
             std::fs::read_to_string(&outside).unwrap(),
-            "You are Andy ssh-ed25519 AAAA"
+            "You are Talon ssh-ed25519 AAAA"
         );
         // Renaming skips the symlink too.
         simulate(&f, "other", false, "Nova");
         assert_eq!(
             std::fs::read_to_string(&outside).unwrap(),
-            "You are Andy ssh-ed25519 AAAA"
+            "You are Talon ssh-ed25519 AAAA"
         );
         assert!(read(&f, "other").contains("You are Nova"));
     }
 
-    // --- end to end (needs the talon-db implementation, agent A01) ----------
+    // --- end to end (with the real talon-db) ---------------------------------
 
     #[tokio::test]
     async fn registers_group_end_to_end() {
@@ -643,7 +643,7 @@ mod tests {
         std::fs::create_dir_all(root.join("groups/global")).unwrap();
         std::fs::write(
             root.join("groups/global/CLAUDE.md"),
-            "# Andy\n\nYou are Andy.",
+            "# Talon\n\nYou are Talon.",
         )
         .unwrap();
         std::fs::write(root.join(".env"), "SOME_KEY=value\n").unwrap();
@@ -671,7 +671,7 @@ mod tests {
         let db = Db::open(&ctx.db_path()).unwrap();
         let g = db.get_registered_group("tg:-100123").unwrap().unwrap();
         assert_eq!(g.folder, "soc-team");
-        assert_eq!(g.trigger, "@Andy");
+        assert_eq!(g.trigger, "@Talon");
         assert_eq!(g.requires_trigger, Some(true));
         assert!(!g.is_main);
         drop(db);

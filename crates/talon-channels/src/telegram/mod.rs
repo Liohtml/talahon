@@ -1,6 +1,6 @@
 //! Telegram channel: Bot API long polling (`getUpdates`) over raw HTTPS.
 //!
-//! Port of `src/channels/telegram.ts` (which used grammY). Behaviour kept:
+//! Behaviour:
 //! - JIDs are `tg:<chat id>` (negative ids for groups/supergroups).
 //! - `/chatid` and `/ping` are answered by the bot itself and never stored;
 //!   every other `/command` flows through as a normal message.
@@ -16,7 +16,7 @@
 //! - Delivery failures are logged, never returned as errors (the host's turn
 //!   bookkeeping must not roll back because a chat send failed).
 //!
-//! Improvements: the update offset is persisted to a small state file so a
+//! Robustness: the update offset is persisted to a small state file so a
 //! restart neither replays nor loses updates; `retry_after` (429) is
 //! honoured; malformed updates are skipped instead of wedging the poller;
 //! entity offsets are handled in UTF-16 like Telegram defines them; reply
@@ -47,7 +47,7 @@ use self::api::{ApiError, BotApi, Message, Update, User};
 use self::text::{TELEGRAM_MAX_MESSAGE_LEN, chunk_text, utf16_slice};
 use crate::util::{backoff_delay, project_root, secret_value, setting, write_atomic};
 
-/// Env var holding the bot token (same name as the TypeScript release).
+/// Env var holding the bot token.
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
 /// Default Bot API endpoint.
 pub const DEFAULT_TELEGRAM_API_BASE: &str = "https://api.telegram.org";
@@ -117,7 +117,7 @@ impl TelegramConfig {
     /// configured.
     pub fn from_env(env: &EnvFile) -> Option<Self> {
         let token = secret_value(env, TELEGRAM_BOT_TOKEN_ENV)?;
-        let name = setting(env, "ASSISTANT_NAME").unwrap_or_else(|| "Andy".to_string());
+        let name = setting(env, "ASSISTANT_NAME").unwrap_or_else(|| "Talon".to_string());
         let mut cfg = Self::new(token, name);
         cfg.state_path =
             project_root(env).map(|root| root.join("data").join("telegram").join("state.json"));
@@ -187,7 +187,7 @@ impl TelegramChannel {
         .map_err(|e| Error::Channel(e.to_string()))?;
         let assistant_name = config.assistant_name.trim().to_string();
         let assistant_name = if assistant_name.is_empty() {
-            "Andy".to_string()
+            "Talon".to_string()
         } else {
             assistant_name
         };
@@ -620,7 +620,7 @@ impl Inner {
         };
 
         // Translate `@bot_username` mentions into the trigger format: a
-        // Telegram mention (`@andy_ai_bot`) won't match `^@Andy\b`.
+        // Telegram mention (`@talonai_bot`) won't match `^@Talon\b`.
         let mut content = text;
         if let Some(username) = bot_username {
             let wanted = format!("@{}", username.to_lowercase());

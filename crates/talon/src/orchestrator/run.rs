@@ -1,5 +1,5 @@
-//! One agent run (port of `runAgent` in `src/index.ts` and the container
-//! part of `runTask` in `src/task-scheduler.ts`).
+//! One agent run (message runs and the container part of scheduled-task
+//! runs).
 //!
 //! 1. Effective provider: `.env` defaults merged with the group's config.
 //!    Without vLLM (or without the LLM gateway) the run fails before any
@@ -59,8 +59,8 @@ pub const VLLM_NOT_CONFIGURED: &str = "vLLM provider is not configured: set TALO
 pub const GATEWAY_NOT_RUNNING: &str =
     "LLM gateway is not running, so containers cannot reach vLLM (run `talon doctor`)";
 
-/// Errors meaning the stored session no longer exists (TS:
-/// `/no conversation found|ENOENT.*\.jsonl|session.*not found/i`).
+/// Errors meaning the stored session no longer exists
+/// (`/no conversation found|ENOENT.*\.jsonl|session.*not found/i`).
 static STALE_SESSION: LazyLock<Regex> = LazyLock::new(|| {
     // Static pattern: compiling it cannot fail.
     #[allow(clippy::expect_used)]
@@ -83,7 +83,7 @@ pub struct RunOptions {
     /// Resume the lane's stored session (if any).
     pub resume_session: bool,
     /// Persist new session ids and clear stale / foreign-provider sessions
-    /// (message runs; scheduled tasks only borrow the session, as in TS).
+    /// (message runs; scheduled tasks only borrow the session).
     pub manage_session: bool,
 }
 
@@ -233,8 +233,7 @@ impl Orchestrator {
         }
     }
 
-    /// The session a run should resume (TS `resumableSessionId` + the
-    /// provider check).
+    /// The session a run should resume (including the provider check).
     fn resolve_session(
         &self,
         group: &RegisteredGroup,
@@ -504,7 +503,7 @@ mod tests {
         RegisteredGroup {
             name: folder.into(),
             folder: folder.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             added_at: "2026-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,

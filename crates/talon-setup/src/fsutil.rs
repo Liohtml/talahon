@@ -216,7 +216,7 @@ mod tests {
     fn upsert_replaces_first_occurrence_and_keeps_rest() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(".env");
-        std::fs::write(&p, "SOME_KEY=value\nASSISTANT_NAME=\"Andy\"\nOTHER=test\n").unwrap();
+        std::fs::write(&p, "SOME_KEY=value\nASSISTANT_NAME=\"Talon\"\nOTHER=test\n").unwrap();
         upsert_env_line(&p, "ASSISTANT_NAME", "\"Nova\"").unwrap();
         assert_eq!(
             std::fs::read_to_string(&p).unwrap(),

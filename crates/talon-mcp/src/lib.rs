@@ -1,6 +1,7 @@
 //! # talon-mcp — Model Context Protocol over stdio
 //!
-//! **Owner: agent A03.** See `docs/RUST_ARCHITECTURE.md` §A03.
+//! See `docs/RUST_ARCHITECTURE.md` §3.3 (MCP servers under container
+//! privilege separation).
 //!
 //! A native (SDK-free) implementation of MCP revision `2025-06-18`:
 //! JSON-RPC 2.0, one message per line, over any `AsyncRead`/`AsyncWrite`

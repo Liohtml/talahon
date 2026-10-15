@@ -1,11 +1,10 @@
 //! Registered groups.
 //!
-//! Column mapping is identical to the TypeScript release (`name`, `folder`,
-//! `trigger_pattern`, `added_at`, `container_config` JSON,
-//! `requires_trigger`, `is_main`). Lane-only fields that TypeScript kept in
-//! memory (`session_key`, `ipc_key`, `ephemeral_session`,
-//! `trusted_session_commands`) are persisted as JSON in the nullable
-//! `lane_config` column, which TypeScript ignores.
+//! Base column mapping (`name`, `folder`, `trigger_pattern`, `added_at`,
+//! `container_config` JSON, `requires_trigger`, `is_main`), unchanged from
+//! earlier releases. Lane-only fields (`session_key`, `ipc_key`,
+//! `ephemeral_session`, `trusted_session_commands`) are persisted as JSON in
+//! the nullable `lane_config` column, which earlier releases ignore.
 
 use std::collections::HashMap;
 
@@ -151,9 +150,8 @@ impl Db {
     /// folder names ([`Error::Security`] otherwise). Folders are unique: if
     /// another JID already owns `group.folder` this fails with
     /// [`Error::InvalidInput`] instead of silently unregistering that JID
-    /// (which is what the TypeScript `INSERT OR REPLACE` did). Lanes that
-    /// share a folder with their base group stay in memory, as in
-    /// TypeScript. An unset `requires_trigger` is stored as `1`.
+    /// (as a plain `INSERT OR REPLACE` would). Lanes that share a folder
+    /// with their base group stay in memory. An unset `requires_trigger` is stored as `1`.
     pub fn set_registered_group(&self, jid: &str, group: &RegisteredGroup) -> Result<()> {
         if jid.is_empty() {
             return Err(Error::invalid("group jid must not be empty"));
@@ -272,7 +270,7 @@ mod tests {
         RegisteredGroup {
             name: "Family Chat".into(),
             folder: folder.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             added_at: "2024-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,
@@ -284,7 +282,7 @@ mod tests {
         }
     }
 
-    // --- registered group isMain (ports of db.test.ts) ---
+    // --- registered group isMain ---
 
     #[test]
     fn persists_is_main_through_round_trip() {
@@ -347,7 +345,7 @@ mod tests {
                 .unwrap(),
             g
         );
-        // container_config is stored with the TypeScript (camelCase) keys.
+        // container_config is stored with the established (camelCase) keys.
         let raw: String = db
             .with_conn(|c| {
                 c.query_row("SELECT container_config FROM registered_groups", [], |r| {

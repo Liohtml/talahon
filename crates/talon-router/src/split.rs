@@ -1,7 +1,6 @@
 //! Message chunking for channels with a per-message size limit (Telegram:
-//! 4096). New in the Rust rewrite — the TypeScript Telegram channel sliced
-//! the string every 4096 UTF-16 units, which could cut a surrogate pair, a
-//! word, or a code block in half.
+//! 4096). Blindly slicing the string every 4096 UTF-16 units could cut a
+//! surrogate pair, a word, or a code block in half.
 //!
 //! [`split_message`] guarantees:
 //! - every chunk is at most `max_len` long in the chosen [`LengthUnit`]

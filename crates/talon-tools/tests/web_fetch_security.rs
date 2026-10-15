@@ -1,7 +1,6 @@
 //! `web_fetch` wired to the real `talon_security` egress policy and fence.
 //!
-//! The fence test depends on `talon_security::injection::fence_untrusted`
-//! (agent A07); it fails with "not yet implemented" until that lands.
+//! The fence test depends on `talon_security::injection::fence_untrusted`.
 
 #![allow(clippy::unwrap_used)]
 

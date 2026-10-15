@@ -23,7 +23,7 @@ pub(crate) fn group(folder: &str, ipc_key: Option<&str>, is_main: bool) -> Regis
     RegisteredGroup {
         name: folder.into(),
         folder: folder.into(),
-        trigger: "@Andy".into(),
+        trigger: "@Talon".into(),
         added_at: "2024-01-01T00:00:00.000Z".into(),
         container_config: None,
         requires_trigger: None,
@@ -66,7 +66,7 @@ pub(crate) fn copilot_groups() -> HashMap<String, RegisteredGroup> {
     g
 }
 
-/// The three groups of `ipc-auth.test.ts`.
+/// The three groups the authorization tests run against.
 pub(crate) fn groups_fixture() -> HashMap<String, RegisteredGroup> {
     let mut main = group("whatsapp_main", None, true);
     main.name = "Main".into();
@@ -307,7 +307,7 @@ impl IpcHost for FakeHost {
 }
 
 /// Watcher wired to fakes. The policy slot gets a permissive authorizer, so
-/// every test exercises the baseline (TypeScript) rules.
+/// every test exercises the baseline rules.
 pub(crate) struct Harness {
     pub watcher: IpcWatcher,
     pub host: Arc<FakeHost>,

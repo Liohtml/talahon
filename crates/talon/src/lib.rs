@@ -1,9 +1,7 @@
 //! # talon — host orchestrator and CLI
 //!
-//! **Owner: agent A15.** See `docs/RUST_ARCHITECTURE.md` §A15.
-//!
-//! The `talon` binary is the long-running host process (port of
-//! `src/index.ts`) plus the operator CLI:
+//! The `talon` binary is the long-running host process plus the operator
+//! CLI:
 //!
 //! | command | purpose |
 //! |---|---|

@@ -75,6 +75,8 @@ impl std::fmt::Debug for SetupContext {
 
 fn default_config_dir(home: &Path) -> PathBuf {
     let talon = home.join(".config").join("talon");
+    // Legacy config directory of earlier releases, used only while
+    // `~/.config/talon` does not exist.
     let legacy = home.join(".config").join("nanoclaw");
     if !talon.exists() && legacy.exists() {
         legacy

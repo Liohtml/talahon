@@ -1,4 +1,4 @@
-//! Step `environment` (port of `setup/environment.ts`): report everything
+//! Step `environment`: report everything
 //! the remaining steps depend on. Purely informational — `STATUS` is
 //! `success` whenever the probes ran; problems are listed in `ISSUES`.
 //!

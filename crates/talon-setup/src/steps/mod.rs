@@ -1,4 +1,4 @@
-//! The setup steps (one module each, ports of `setup/<step>.ts`) and the
+//! The setup steps (one module each) and the
 //! dispatcher the host CLI (`talon setup <step> [args...]`) calls.
 
 pub mod container;
@@ -22,8 +22,8 @@ pub struct StepArgs {
 }
 
 impl StepArgs {
-    /// Wrap raw arguments; bare `--` separators are dropped (the TypeScript
-    /// entry point accepted `--step x -- --flag`).
+    /// Wrap raw arguments; bare `--` separators are dropped (so
+    /// `--step x -- --flag` is accepted).
     pub fn new<I, S>(args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -140,7 +140,7 @@ impl std::fmt::Display for Step {
 }
 
 /// Run `step`. Internal errors become a `<STEP>` block with
-/// `STATUS: failed` and exit code 1, exactly like the TypeScript entry point.
+/// `STATUS: failed` and exit code 1.
 pub async fn run_step(step: Step, args: &StepArgs, ctx: &SetupContext) -> StepOutcome {
     let result = match step {
         Step::Timezone => timezone::run(args, ctx).await,

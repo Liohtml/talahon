@@ -48,7 +48,7 @@ impl Db {
     }
 
     /// Store (replace) a lane's session id and the provider that produced
-    /// it. Replacing resets the recorded usage, as in the TypeScript release.
+    /// it. Replacing resets the recorded usage.
     pub fn set_session(&self, key: &str, session_id: &str, provider: Option<&str>) -> Result<()> {
         self.with_conn(|conn| {
             conn.prepare_cached(
@@ -166,7 +166,7 @@ mod tests {
         );
     }
 
-    // --- session provider (ports of db.test.ts) ---
+    // --- session provider ---
 
     #[test]
     fn stores_and_returns_the_provider_alongside_the_session() {
@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(db.get_session_provider("grp").unwrap(), None);
     }
 
-    // --- session usage (ports of db.test.ts) ---
+    // --- session usage ---
 
     #[test]
     fn records_the_last_turn_context_size() {

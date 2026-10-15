@@ -1,7 +1,7 @@
 //! Domain model shared by the host and the in-container runtime.
 //!
-//! Serde field names deliberately match the JSON the TypeScript implementation
-//! wrote (a mix of camelCase and snake_case), so existing SQLite rows
+//! Serde field names deliberately match the JSON earlier releases wrote (a
+//! mix of camelCase and snake_case), so existing SQLite rows
 //! (`registered_groups.container_config`) and IPC snapshot files keep parsing
 //! after an in-place upgrade.
 
@@ -466,7 +466,7 @@ impl From<&ScheduledTask> for TaskSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Audit trail (new in the Rust rewrite)
+// Audit trail
 // ---------------------------------------------------------------------------
 
 /// Security-relevant event recorded in the append-only audit log
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn registered_group_json_is_ts_compatible() {
         let g: RegisteredGroup = serde_json::from_str(
-            r#"{"name":"Main","folder":"main","trigger":"@Andy","added_at":"2024-01-01T00:00:00.000Z","isMain":true,"requiresTrigger":false}"#,
+            r#"{"name":"Main","folder":"main","trigger":"@Talon","added_at":"2024-01-01T00:00:00.000Z","isMain":true,"requiresTrigger":false}"#,
         )
         .unwrap();
         assert!(g.is_main);

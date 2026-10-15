@@ -1,6 +1,6 @@
 //! One-shot import of the pre-SQLite JSON state files (`router_state.json`,
-//! `sessions.json`, `registered_groups.json` in the data directory), ported
-//! from `migrateJsonState()` in `src/db.ts`. Each file that parses is renamed
+//! `sessions.json`, `registered_groups.json` in the data directory) written
+//! by earlier releases. Each file that parses is renamed
 //! to `<name>.migrated` before its contents are applied, so the import runs
 //! at most once.
 
@@ -40,7 +40,7 @@ struct RouterStateFile {
 
 /// Read and parse `<data_dir>/<name>`, then rename it to `<name>.migrated`.
 /// Missing, oversized, non-regular or unparseable files yield `None` (and
-/// are left in place), exactly like the TypeScript helper.
+/// are left in place).
 fn take_file<T: DeserializeOwned>(data_dir: &Path, name: &str) -> Option<T> {
     let path = data_dir.join(name);
     let meta = std::fs::symlink_metadata(&path).ok()?;
@@ -127,8 +127,8 @@ mod tests {
         std::fs::write(
             d.join("registered_groups.json"),
             r#"{
-              "main@s.whatsapp.net": {"name":"Main","folder":"main","trigger":"@Andy","added_at":"2024-01-01T00:00:00.000Z","isMain":true},
-              "evil@g.us": {"name":"Evil","folder":"../etc","trigger":"@Andy","added_at":"2024-01-01T00:00:00.000Z"}
+              "main@s.whatsapp.net": {"name":"Main","folder":"main","trigger":"@Talon","added_at":"2024-01-01T00:00:00.000Z","isMain":true},
+              "evil@g.us": {"name":"Evil","folder":"../etc","trigger":"@Talon","added_at":"2024-01-01T00:00:00.000Z"}
             }"#,
         )
         .unwrap();

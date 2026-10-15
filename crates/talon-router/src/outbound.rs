@@ -1,6 +1,5 @@
 //! Outbound text: `<internal>` stripping, channel-dialect formatting and
-//! routing to the owning channel (port of `stripInternalTags`,
-//! `formatOutbound`, `routeOutbound` and `findChannel` in `src/router.ts`).
+//! routing to the owning channel.
 
 use std::sync::Arc;
 
@@ -15,7 +14,7 @@ const INTERNAL_CLOSE: &str = "</internal>";
 /// Remove every `<internal>…</internal>` block (the agent's private notes)
 /// and trim the result.
 ///
-/// Hardening over the TypeScript version: an *unterminated* `<internal>`
+/// Hardening: an *unterminated* `<internal>`
 /// hides everything after it instead of leaking the agent's private notes
 /// to the chat.
 pub fn strip_internal_tags(text: &str) -> String {

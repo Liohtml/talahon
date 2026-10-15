@@ -1,5 +1,4 @@
-//! IPC snapshot writers (port of `writeTasksSnapshot` /
-//! `writeGroupsSnapshot` in `src/container-runner.ts`).
+//! IPC snapshot writers (`current_tasks.json`, `available_groups.json`).
 //!
 //! Snapshots live in the lane's IPC directory, which the agent can write to.
 //! They are therefore written atomically through a freshly created
@@ -253,7 +252,7 @@ mod tests {
             .unwrap();
         assert_eq!(p, tmp.path().join("ipc/copilot-u-alice/current_tasks.json"));
         assert_eq!(ids(&p), vec!["a1", "a2"]);
-        // TS snapshot shape (no chat JIDs of other lanes leak).
+        // Snapshot shape (no chat JIDs of other lanes leak).
         let v = read_json(&p);
         assert_eq!(v[0]["groupFolder"], "copilot");
         assert!(v[0].get("chat_jid").is_none() && v[0].get("chatJid").is_none());
@@ -333,7 +332,7 @@ mod tests {
         assert_eq!(v[0]["id"], "b");
         assert_eq!(v[0]["groupFolder"], "team");
         assert_eq!(v[0]["schedule_type"], "cron");
-        // Pretty-printed like the TS version.
+        // Pretty-printed.
         assert!(fs::read_to_string(&p).unwrap().contains("\n  {"));
     }
 

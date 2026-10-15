@@ -42,8 +42,8 @@ fn task_from_row(
             reason: format!("unknown status {status_raw:?}"),
         }));
     };
-    // TypeScript treated anything but 'group' as isolated; isolated is
-    // also the less privileged mode, so unknown values fall back to it.
+    // Anything but 'group' is treated as isolated; isolated is also the
+    // less privileged mode, so unknown values fall back to it.
     let context_mode = col::opt_text(row, "context_mode")?
         .and_then(|m| ContextMode::parse(&m))
         .unwrap_or_default();
@@ -462,7 +462,7 @@ mod tests {
         }
     }
 
-    // --- task CRUD (ports of db.test.ts) ---
+    // --- task CRUD ---
 
     #[test]
     fn creates_and_retrieves_a_task() {

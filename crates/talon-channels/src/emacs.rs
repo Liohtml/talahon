@@ -1,7 +1,6 @@
-//! Emacs bridge: a tiny HTTP API on `127.0.0.1` that `emacs/nanoclaw.el`
+//! Emacs bridge: a tiny HTTP API on `127.0.0.1` that `emacs/talon.el`
 //! talks to.
 //!
-//! Port of `src/channels/emacs.ts`:
 //! - `POST /api/message {"text": ".."}` -> `{"messageId", "timestamp"}` and
 //!   the text is delivered to the host as a message on `emacs:default`
 //!   (chat metadata first, then the message).
@@ -12,18 +11,17 @@
 //!   and a Markdown-formatting `CLAUDE.md` is bootstrapped in its folder.
 //!
 //! Hardened: the listener is bound to loopback only, a bearer token is
-//! **required** (the TS bridge ran unauthenticated without
-//! `EMACS_AUTH_TOKEN`) and compared in constant time, failures are audited
+//! **required** (the bridge stays disabled without `EMACS_AUTH_TOKEN`)
+//! and compared in constant time, failures are audited
 //! (`http.auth.failed`), bodies are capped, reply timestamps and message ids
 //! are strictly increasing (no message lost or overwritten when two land in
 //! the same millisecond). The server runs on [`talon_net::serve`]
 //! (header-read timeout, global and per-IP connection caps), so a local
 //! slowloris client cannot exhaust the host's file descriptors.
 //!
-//! **Own folder.** The TS bridge symlinked `groups/emacs` to the main
-//! group's folder, so this non-main lane wrote main's files, including the
-//! `CLAUDE.md` that becomes main's system prompt. The lane now runs in its
-//! own real `groups/emacs` directory. A leftover legacy symlink is never
+//! **Own folder.** The lane runs in its own real `groups/emacs` directory,
+//! never a link to the main group's folder (a non-main lane writing there
+//! could rewrite the `CLAUDE.md` that becomes main's system prompt). A leftover legacy symlink is never
 //! followed or deleted: the bridge refuses to start and tells the operator
 //! how to replace it. `CLAUDE.md` is created with `O_CREAT | O_EXCL`, so a
 //! planted (even dangling) symlink can never redirect the write to a host
@@ -65,7 +63,7 @@ pub const EMACS_JID: &str = "emacs:default";
 /// Group folder the Emacs lane runs in: its own real directory under
 /// `groups/`, never a link to another group's folder.
 pub const EMACS_GROUP_FOLDER: &str = "emacs";
-/// Default listen port (same as the TS release).
+/// Default listen port.
 pub const DEFAULT_EMACS_PORT: u16 = 8766;
 /// Env var: listen port.
 pub const EMACS_CHANNEL_PORT_ENV: &str = "EMACS_CHANNEL_PORT";
@@ -432,7 +430,7 @@ impl Channel for EmacsBridgeChannel {
         });
         info!(
             port = addr.port(),
-            "Emacs channel listening — load emacs/nanoclaw.el to connect"
+            "Emacs channel listening — load emacs/talon.el to connect"
         );
         *server = Some(Server {
             addr,

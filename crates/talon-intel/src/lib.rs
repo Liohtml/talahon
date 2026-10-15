@@ -1,6 +1,6 @@
 //! # talon-intel — SOC intelligence engine
 //!
-//! **Owner: agent A05.** See `docs/RUST_ARCHITECTURE.md` §A05.
+//! See `docs/RUST_ARCHITECTURE.md` §3.4 (untrusted data).
 //!
 //! Pure, offline and deterministic: no network, no clock-dependent logic
 //! (except report file names), no model calls. Everything is available as a

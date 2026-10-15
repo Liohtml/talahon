@@ -1,6 +1,6 @@
 [package]
 name = "talon-db"
-description = "SQLite persistence for Talon (schema-compatible with the TypeScript release)"
+description = "SQLite persistence for Talon (migrates databases of earlier releases in place)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

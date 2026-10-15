@@ -1,14 +1,13 @@
 //! Schema creation and idempotent migrations.
 //!
-//! The base tables are the TypeScript `createSchema()` statements verbatim,
-//! followed by the same `ALTER TABLE ... ADD COLUMN` migrations (and their
-//! one-time backfills), so a database written by either implementation can
-//! be opened by the other. Instead of TypeScript's "try ALTER, swallow the
-//! error" pattern, columns are added only when `pragma_table_info` says they
-//! are missing, and the whole migration runs in one `BEGIN IMMEDIATE`
-//! transaction so concurrent openers cannot race.
+//! The base tables keep the shape of databases created by earlier releases,
+//! followed by the established `ALTER TABLE ... ADD COLUMN` migrations (and
+//! their one-time backfills), so an existing database migrates in place.
+//! Columns are added only when `pragma_table_info` says they are missing,
+//! and the whole migration runs in one `BEGIN IMMEDIATE` transaction so
+//! concurrent openers cannot race.
 //!
-//! Additions of the Rust release (all invisible to the TypeScript code):
+//! Later additions (all invisible to code that only knows the base shape):
 //! - `messages.thread_id`, `registered_groups.lane_config` (nullable)
 //! - `idx_messages_chat_ts` (per-chat message queries),
 //!   `idx_scheduled_tasks_chat_jid` (per-lane task snapshots),
@@ -21,7 +20,7 @@ use talon_core::Result;
 
 use crate::{DbOptions, SqlResultExt, bot_prefix_pattern};
 
-/// The TypeScript base schema, verbatim (`src/db.ts` `createSchema`).
+/// The base schema (unchanged from earlier releases).
 const TS_BASE_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS chats (
       jid TEXT PRIMARY KEY,
@@ -92,7 +91,7 @@ const TS_BASE_SCHEMA: &str = r#"
     );
 "#;
 
-/// Tables and indexes introduced by the Rust release.
+/// Tables and indexes added on top of the base schema.
 const RUST_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, timestamp);
     -- Per-lane task snapshots (`Db::get_tasks_for_jids`).
@@ -152,7 +151,7 @@ const RUST_SCHEMA: &str = r#"
     -- Who created a scheduled task over IPC (the source lane's IPC key).
     -- Tasks without a row were created by the host (investigations, seeded
     -- tasks, rows that predate this table) and count as owned by `host`.
-    -- Kept in a side table so the TypeScript `scheduled_tasks` shape is
+    -- Kept in a side table so the base `scheduled_tasks` shape is
     -- untouched; rows follow their task (ON DELETE CASCADE, and
     -- `Db::delete_task` / `Db::create_task` clear them explicitly for
     -- connections without foreign-key enforcement).
@@ -185,13 +184,13 @@ const fn col(
 }
 
 /// Columns that pre-date the migrations but are added defensively if a very
-/// old database lacks them (the TypeScript code would have crashed on it).
+/// old database lacks them.
 const DEFENSIVE_COLUMNS: &[ColumnMigration] = &[
     col("registered_groups", "container_config", "TEXT"),
     col("registered_groups", "requires_trigger", "INTEGER DEFAULT 1"),
 ];
 
-/// Column added by the Rust release with no backfill.
+/// Columns added on top of the base schema, with no backfill.
 const RUST_COLUMNS: &[ColumnMigration] = &[
     col("messages", "thread_id", "TEXT"),
     col("registered_groups", "lane_config", "TEXT"),
@@ -212,8 +211,8 @@ pub(crate) fn migrate(conn: &mut Connection, opts: &DbOptions) -> Result<()> {
     Ok(())
 }
 
-/// The `ALTER TABLE` migrations of `src/db.ts`, in the same order, with the
-/// same one-time backfills (run only when the column was actually added).
+/// The established `ALTER TABLE` migrations, in their original order, with
+/// their one-time backfills (run only when the column was actually added).
 fn ts_migrations(tx: &Transaction<'_>, opts: &DbOptions) -> Result<()> {
     // Sessions: provider (NULL = unknown), last-turn context size.
     add_column_if_missing(tx, &col("sessions", "provider", "TEXT"))?;
@@ -307,8 +306,8 @@ mod tests {
     use super::*;
     use crate::{DB_FILE_NAME, Db};
 
-    /// The oldest TypeScript schema: the base `CREATE TABLE` statements of
-    /// `src/db.ts` without any column that was later added by a migration.
+    /// The oldest legacy schema: the base `CREATE TABLE` statements without
+    /// any column that was later added by a migration.
     const LEGACY_TS_SCHEMA: &str = r#"
         CREATE TABLE chats (
           jid TEXT PRIMARY KEY,
@@ -372,8 +371,8 @@ mod tests {
         );
     "#;
 
-    /// Apply the full TypeScript `createSchema()` (base + every ALTER) the way
-    /// the TypeScript release leaves a current database.
+    /// Apply the full legacy schema (base + every ALTER) the way an earlier
+    /// release leaves a current database.
     fn create_current_ts_db(path: &Path) {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(TS_BASE_SCHEMA).unwrap();
@@ -523,12 +522,12 @@ mod tests {
                  INSERT INTO chats VALUES ('dc:42', 'Discord', '2024-01-01T00:00:04.000Z');
                  INSERT INTO chats VALUES ('tg:12345', 'TG DM', '2024-01-01T00:00:00.000Z');
                  INSERT INTO messages VALUES ('m1', 'room@g.us', 'u', 'U', 'hello', '2024-01-01T00:00:01.000Z', 0);
-                 INSERT INTO messages VALUES ('m2', 'room@g.us', 'b', 'Andy', 'Andy: hi there', '2024-01-01T00:00:02.000Z', 1);
+                 INSERT INTO messages VALUES ('m2', 'room@g.us', 'b', 'Talon', 'Talon: hi there', '2024-01-01T00:00:02.000Z', 1);
                  INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, status, created_at)
                    VALUES ('t1', 'main', 'room@g.us', 'p', 'interval', '60000', '2024-01-01T00:00:00.000Z', 'active', '2024-01-01T00:00:00.000Z');
                  INSERT INTO sessions VALUES ('main', 'sess-legacy');
-                 INSERT INTO registered_groups VALUES ('main@s.whatsapp.net', 'Main', 'main', '@Andy', '2024-01-01T00:00:00.000Z', NULL, 0);
-                 INSERT INTO registered_groups VALUES ('room@g.us', 'Room', 'room', '@Andy', '2024-01-01T00:00:00.000Z', '{\"timeout\":1000}', 1);",
+                 INSERT INTO registered_groups VALUES ('main@s.whatsapp.net', 'Main', 'main', '@Talon', '2024-01-01T00:00:00.000Z', NULL, 0);
+                 INSERT INTO registered_groups VALUES ('room@g.us', 'Room', 'room', '@Talon', '2024-01-01T00:00:00.000Z', '{\"timeout\":1000}', 1);",
             )
             .unwrap();
         }
@@ -631,12 +630,12 @@ mod tests {
                  INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id)
                    VALUES ('m1', 'tg:1', 'u', 'U', 'hi', '2024-01-01T00:00:01.000Z', 0, 0, 'r9');
                  INSERT INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
-                   VALUES ('tg:1', 'TG', 'telegram_main', '@Andy', '2024-01-01T00:00:00.000Z', NULL, 0, 1);",
+                   VALUES ('tg:1', 'TG', 'telegram_main', '@Talon', '2024-01-01T00:00:00.000Z', NULL, 0, 1);",
             )
             .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        let msgs = db.get_messages_since("tg:1", "", "Andy", 10).unwrap();
+        let msgs = db.get_messages_since("tg:1", "", "Talon", 10).unwrap();
         assert_eq!(msgs[0].reply_to_message_id.as_deref(), Some("r9"));
         assert!(db.get_registered_group("tg:1").unwrap().unwrap().is_main);
         assert_eq!(
@@ -644,7 +643,7 @@ mod tests {
             fresh_schema()
         );
 
-        // Writes made by Rust stay readable by the TypeScript statements.
+        // Writes made here stay readable by the base-schema statements.
         db.store_message(&talon_core::types::NewMessage {
             id: "m2".into(),
             chat_jid: "tg:1".into(),
@@ -675,7 +674,7 @@ mod tests {
         assert_eq!((folder.as_str(), is_main), ("telegram_main", 1));
     }
 
-    // Port of src/db-migration.test.ts.
+    // Legacy database migration.
     #[test]
     fn defaults_telegram_backfill_chats_to_direct_messages() {
         let dir = tempfile::tempdir().unwrap();
@@ -722,7 +721,7 @@ mod tests {
             conn.execute_batch(
                 "INSERT INTO chats VALUES ('c', 'c', '2024');
                  INSERT INTO messages VALUES ('1', 'c', 's', 'S', 'Talon: report', '2024-01-01', 1);
-                 INSERT INTO messages VALUES ('2', 'c', 's', 'S', 'Andy: other bot', '2024-01-02', 1);
+                 INSERT INTO messages VALUES ('2', 'c', 's', 'S', 'Nova: other bot', '2024-01-02', 1);
                  INSERT INTO messages VALUES ('3', 'c', 's', 'S', 'Talonx: user', '2024-01-03', 0);",
             )
             .unwrap();

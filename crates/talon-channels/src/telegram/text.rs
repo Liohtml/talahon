@@ -9,8 +9,7 @@ pub const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
 /// Chunks never split a character (surrogate pairs stay together). When a
 /// chunk has to be cut, the cut prefers the last newline in the second half
 /// of the window so paragraphs and code lines stay intact; otherwise it cuts
-/// at the limit (the TypeScript release always cut at the limit). Empty
-/// input yields no chunks.
+/// at the limit. Empty input yields no chunks.
 pub fn chunk_text(text: &str, max_units: usize) -> Vec<&str> {
     // A surrogate pair needs two units; never loop without progress.
     let max_units = max_units.max(2);
@@ -111,9 +110,9 @@ mod tests {
 
     #[test]
     fn utf16_slice_matches_js_substring() {
-        let text = "😂 @andy_ai_bot hi";
+        let text = "😂 @talonai_bot hi";
         // The emoji occupies units 0..2, the space 2, the mention 3..15.
-        assert_eq!(utf16_slice(text, 3, 12).as_deref(), Some("@andy_ai_bot"));
+        assert_eq!(utf16_slice(text, 3, 12).as_deref(), Some("@talonai_bot"));
         assert_eq!(utf16_slice("abc", 1, 5), None);
         assert_eq!(utf16_slice("abc", usize::MAX, 2), None);
         assert_eq!(utf16_slice("abc", 3, 0).as_deref(), Some(""));

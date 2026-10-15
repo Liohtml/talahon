@@ -1,4 +1,4 @@
-//! Container runtime abstraction (port of `src/container-runtime.ts`).
+//! Container runtime abstraction.
 //!
 //! Everything runtime-specific lives here: which binary to call
 //! (`docker` / `podman`), how to check it is up, how to find and stop
@@ -46,7 +46,7 @@ pub const ICC_OPTION: &str = "com.docker.network.bridge.enable_icc";
 /// Bridge driver option naming the Linux bridge interface.
 pub const BRIDGE_NAME_OPTION: &str = "com.docker.network.bridge.name";
 
-/// `docker info` timeout (TS: 10 s).
+/// `docker info` timeout.
 const INFO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for short query commands (`ps`, `network inspect`, `ip`).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -898,7 +898,7 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    // --- pure functions (port of container-runtime.test.ts) ---
+    // --- pure functions ---
 
     #[test]
     fn stop_args_use_grace_and_name() {

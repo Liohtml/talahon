@@ -1,5 +1,4 @@
-//! Ports of `src/task-scheduler.test.ts` plus tests for the Rust
-//! improvements. Wall-clock time follows Tokio's paused clock via
+//! Task scheduler tests. Wall-clock time follows Tokio's paused clock via
 //! [`TokioClock`](crate::TokioClock).
 
 #![allow(clippy::unwrap_used)]
@@ -227,7 +226,7 @@ fn finished(outcome: &TaskRunOutcome) -> &TaskRunReport {
 }
 
 // ---------------------------------------------------------------------------
-// Ported from task-scheduler.test.ts
+// Core scheduler behaviour
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

@@ -21,7 +21,7 @@ fn group(name: &str, folder: &str, is_main: bool) -> RegisteredGroup {
     RegisteredGroup {
         name: name.into(),
         folder: folder.into(),
-        trigger: "@Andy".into(),
+        trigger: "@Talon".into(),
         added_at: "2024-01-01T00:00:00.000Z".into(),
         container_config: None,
         requires_trigger: None,
@@ -33,7 +33,8 @@ fn group(name: &str, folder: &str, is_main: bool) -> RegisteredGroup {
     }
 }
 
-/// Host backed by the real database for registrations (like `index.ts`).
+/// Host backed by the real database for registrations (like the
+/// orchestrator).
 struct DbHost {
     db: Db,
     groups: Mutex<HashMap<String, RegisteredGroup>>,
@@ -311,7 +312,7 @@ async fn register_and_refresh_with_real_policy_and_db() {
         jid: "new@g.us".into(),
         name: "New Group".into(),
         folder: folder.into(),
-        trigger: "@Andy".into(),
+        trigger: "@Talon".into(),
         requires_trigger: None,
         container_config: None,
         timestamp: None,
@@ -594,7 +595,7 @@ async fn register_group_container_config_is_stripped_with_real_db() {
         jid: "new@g.us".into(),
         name: "New Group".into(),
         folder: "new-group".into(),
-        trigger: "@Andy".into(),
+        trigger: "@Talon".into(),
         requires_trigger: None,
         container_config: Some(talon_core::types::ContainerConfig {
             additional_mounts: vec![talon_core::types::AdditionalMount {

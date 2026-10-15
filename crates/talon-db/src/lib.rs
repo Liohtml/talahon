@@ -1,16 +1,16 @@
 //! # talon-db — SQLite persistence
 //!
-//! **Owner: agent A01.** The public API below is the contract other crates
+//! The public API below is the contract other crates
 //! (scheduler, ipc, http, host) are written against. Methods may be added,
 //! but the original signatures must not change without coordinating.
 //!
 //! Properties:
-//! - Schema-compatible with `src/db.ts` of the TypeScript release so an
-//!   existing `store/messages.db` opens and migrates in place (all the
-//!   `ALTER TABLE ... ADD COLUMN` migrations, idempotent, run inside one
-//!   `BEGIN IMMEDIATE` transaction). The TypeScript base tables are created
-//!   verbatim, so a database created here is still readable by the
-//!   TypeScript release.
+//! - Migrates databases created by earlier releases in place: an existing
+//!   `store/messages.db` opens and gets every missing
+//!   `ALTER TABLE ... ADD COLUMN` migration (idempotent, inside one
+//!   `BEGIN IMMEDIATE` transaction). The base tables keep their original
+//!   shape, so a database created here is still readable by earlier
+//!   releases.
 //! - WAL mode, `foreign_keys=ON`, `busy_timeout=5000`, prepared-statement
 //!   cache (`prepare_cached`).
 //! - [`Db`] is cheap to clone and `Send + Sync` (one connection behind a
@@ -29,7 +29,7 @@
 //! - `chats`          — chat metadata and messages
 //! - `tasks`          — scheduled tasks, run logs and task owners
 //! - `state`          — router state and lane sessions
-//! - `groups`         — registered groups (TS column mapping + `lane_config`)
+//! - `groups`         — registered groups (base column mapping + `lane_config`)
 //! - [`audit`]        — hash-chained audit log, [`audit::DbAuditSink`]
 //! - `investigations` — investigation jobs
 //! - `iocs`           — IOC sightings for cross-alert correlation
@@ -69,11 +69,11 @@ pub use talon_core::types::{
 };
 
 /// File name of the database inside the store directory (`store/messages.db`),
-/// unchanged from the TypeScript release.
+/// unchanged from earlier releases.
 pub const DB_FILE_NAME: &str = "messages.db";
 
 /// Default number of messages returned by the message queries when the
-/// caller does not pass an explicit limit (same as the TypeScript default).
+/// caller does not pass an explicit limit.
 pub const DEFAULT_MESSAGE_LIMIT: usize = 200;
 
 /// `busy_timeout` applied to every connection.
@@ -133,14 +133,14 @@ pub struct IocSighting {
 pub struct DbOptions {
     /// Assistant name used by the one-time `is_bot_message` backfill when a
     /// pre-migration database is upgraded (`content LIKE '<name>:%'`).
-    /// Defaults to `Andy`, the TypeScript default `ASSISTANT_NAME`.
+    /// Defaults to `Talon`, the default `ASSISTANT_NAME`.
     pub assistant_name: String,
 }
 
 impl Default for DbOptions {
     fn default() -> Self {
         Self {
-            assistant_name: "Andy".to_string(),
+            assistant_name: "Talon".to_string(),
         }
     }
 }
@@ -295,7 +295,7 @@ pub(crate) fn bot_prefix_pattern(bot_prefix: &str) -> String {
     format!("{}:%", escape_like(bot_prefix))
 }
 
-/// Lenient column readers: rows written by the TypeScript release (or by
+/// Lenient column readers: rows written by earlier releases (or by
 /// hand) may hold NULLs or unexpected storage classes; never fail on them.
 pub(crate) mod col {
     use super::ValueRef;
@@ -417,9 +417,9 @@ mod tests {
 
     #[test]
     fn escape_like_escapes_wildcards() {
-        assert_eq!(escape_like("A_dy%"), "A\\_dy\\%");
+        assert_eq!(escape_like("T_lon%"), "T\\_lon\\%");
         assert_eq!(escape_like("a\\b"), "a\\\\b");
-        assert_eq!(bot_prefix_pattern("Andy"), "Andy:%");
+        assert_eq!(bot_prefix_pattern("Talon"), "Talon:%");
     }
 
     #[test]
@@ -476,7 +476,7 @@ mod tests {
             t.join().unwrap();
         }
 
-        let msgs = db.get_messages_since("c@g.us", "", "Andy", 1000).unwrap();
+        let msgs = db.get_messages_since("c@g.us", "", "Talon", 1000).unwrap();
         assert_eq!(msgs.len(), 200);
         assert_eq!(db.recent_audit(1000, Some("test.")).unwrap().len(), 200);
         assert_eq!(db.verify_audit_chain().unwrap(), None);

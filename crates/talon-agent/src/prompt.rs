@@ -47,7 +47,7 @@ pub const DEFAULT_ASSISTANT_NAME: &str = "Talon";
 /// Name of the intel tool investigations should finish with.
 pub const SUBMIT_TRIAGE_REPORT: &str = "submit_triage_report";
 
-/// Prefix the TypeScript runtime put in front of scheduled-task prompts.
+/// Prefix put in front of scheduled-task prompts.
 pub const SCHEDULED_TASK_PREFIX: &str = "[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]";
 
 /// Appended (as a user message) when the per-turn tool budget is spent.
@@ -175,7 +175,7 @@ pub fn build_system_prompt(inputs: &SystemPromptInputs) -> String {
     let p = &inputs.paths;
     let mut s = String::with_capacity(16 * 1024);
     s.push_str(&format!(
-        "You are {name}, an AI assistant running inside Talon, an autonomous security-operations agent platform (SOCFortress CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
+        "You are {name}, an AI assistant running inside Talon, an autonomous security-operations agent platform (CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
     ));
 
     if let Some(global) = read_instructions(&p.global.join(INSTRUCTIONS_FILE)) {
@@ -430,7 +430,7 @@ mod tests {
 
     fn inputs(root: &Path) -> SystemPromptInputs {
         SystemPromptInputs {
-            assistant_name: "Andy".into(),
+            assistant_name: "Talon".into(),
             group_folder: "main".into(),
             is_main: true,
             paths: AgentPaths::under(root),
@@ -453,7 +453,7 @@ mod tests {
         let a = build_system_prompt(&i);
         let b = build_system_prompt(&i);
         assert_eq!(a, b, "system prompt must be byte-stable");
-        assert!(a.starts_with("You are Andy"));
+        assert!(a.starts_with("You are Talon"));
         let g = a.find("GLOBAL RULES").unwrap();
         let gr = a.find("GROUP RULES").unwrap();
         let f = a.find("## Untrusted data").unwrap();

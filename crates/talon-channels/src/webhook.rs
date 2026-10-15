@@ -1,10 +1,10 @@
 //! Outbound webhook channel: POSTs agent output (typically scheduled-task
 //! digests) as JSON to a configured URL.
 //!
-//! Port of `src/channels/webhook.ts`. Kept: the `webhook:copilot` JID bound
-//! to the `copilot` folder and registered in memory at connect time, the
-//! `{"text", "timestamp"}` body, `WEBHOOK_URL` / `WEBHOOK_SECRET`, and
-//! never surfacing delivery failures as errors.
+//! The `webhook:copilot` JID is bound to the `copilot` folder and registered
+//! in memory at connect time; the body is `{"text", "timestamp"}`, the
+//! configuration `WEBHOOK_URL` / `WEBHOOK_SECRET`, and delivery failures are
+//! never surfaced as errors.
 //!
 //! Hardened:
 //! - **Own lane keys.** The lane shares the `copilot` folder with the
@@ -14,9 +14,9 @@
 //! - **Signed, not bearer.** With a secret, every request carries
 //!   `X-Talon-Timestamp: <unix seconds>` and
 //!   `X-Talon-Signature: sha256=<hex HMAC-SHA256(secret, "<timestamp>.<body>")>`;
-//!   the secret itself never goes over the wire (the TS release sent it as
-//!   `Authorization: Bearer`, still available via `WEBHOOK_LEGACY_BEARER=true`
-//!   for old receivers). `X-Talon-Delivery` is a per-message UUID receivers
+//!   the secret itself never goes over the wire (sending it as
+//!   `Authorization: Bearer` is still available via
+//!   `WEBHOOK_LEGACY_BEARER=true` for old receivers). `X-Talon-Delivery` is a per-message UUID receivers
 //!   can use to drop retried duplicates.
 //! - **Egress policy.** Unless the URL host is listed in
 //!   `WEBHOOK_ALLOWED_HOSTS` (exact or `*.suffix`), the URL is checked with
@@ -89,7 +89,7 @@ pub struct WebhookConfig {
     /// Hosts (exact or `*.suffix`) trusted by the operator: no egress-policy
     /// check (e.g. an internal CoPilot on a private address).
     pub allowed_hosts: Vec<String>,
-    /// Also send `Authorization: Bearer <secret>` like the TS release.
+    /// Also send `Authorization: Bearer <secret>` (for old receivers).
     pub legacy_bearer: bool,
     /// Retries after the first attempt.
     pub max_retries: u32,
@@ -390,7 +390,7 @@ impl Channel for WebhookChannel {
             ephemeral_session: true,
             trusted_session_commands: false,
         };
-        // In-memory only, like the TS `opts.registerGroup`.
+        // In-memory only: the registration is not persisted.
         self.host.register_group(WEBHOOK_JID, group, false).await;
         self.host
             .on_chat_metadata(ChatMetadata {

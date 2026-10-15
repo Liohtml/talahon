@@ -1,10 +1,10 @@
 //! # talon-http — CoPilot HTTP API channel
 //!
-//! **Owner: agent A13.** See `docs/RUST_ARCHITECTURE.md` §A13.
+//! See `docs/RUST_ARCHITECTURE.md` §3.4 (untrusted data) and §3.5 (audit).
 //!
-//! Rust port of `src/channels/http.ts` (+ `src/palace-client.ts`): an axum
-//! server that SOCFortress CoPilot talks to, exposed to the host as a
-//! [`talon_core::channel::Channel`] owning every `http:copilot*` JID.
+//! An axum server that CoPilot talks to (plus the MemPalace bridge), exposed
+//! to the host as a [`talon_core::channel::Channel`] owning every
+//! `http:copilot*` JID.
 //!
 //! ## Lanes
 //! - `http:copilot` — the shared chat lane (callers that name no user).

@@ -4,7 +4,7 @@
 //! tool's runner (scrubbed environment, own process group, killed on
 //! timeout) with a 30 s budget. Its **last non-empty stdout line** must be
 //! `{"wakeAgent": bool, "data"?: any}`. A failing script, missing output or
-//! invalid JSON means "don't wake" (TypeScript parity).
+//! invalid JSON means "don't wake".
 
 use std::path::Path;
 use std::time::Duration;

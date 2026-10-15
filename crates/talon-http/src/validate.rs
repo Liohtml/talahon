@@ -2,8 +2,7 @@
 //!
 //! Everything the CoPilot API accepts ends up in a prompt, a SQL statement
 //! the agent is told to run, a filesystem path or a MemPalace wing, so each
-//! field is checked against a tight, allocation-free charset instead of the
-//! TS release's "truthy" checks.
+//! field is checked against a tight, allocation-free charset.
 
 use serde_json::Value;
 
@@ -27,7 +26,7 @@ pub const MAX_QUERY_CHARS: usize = 1_024;
 /// Max length of an investigation id.
 pub const MAX_INVESTIGATION_ID_LEN: usize = 128;
 
-/// MemPalace rooms a lesson may be filed under (TS `VALID_LESSON_TYPES`).
+/// MemPalace rooms a lesson may be filed under.
 pub const LESSON_TYPES: [&str; 4] = ["environment", "false_positives", "assets", "threat_intel"];
 
 fn is_ident_byte(b: u8) -> bool {

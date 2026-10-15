@@ -30,9 +30,8 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Verify a presented API key. **Fails closed**: returns false when
-/// `expected` is empty/whitespace (an unset key must never authorize, unlike
-/// the TS release where an empty `HTTP_API_KEY` matched an empty header) or
-/// when `provided` is `None`/empty.
+/// `expected` is empty/whitespace (an unset key must never authorize, not
+/// even an empty header) or when `provided` is `None`/empty.
 ///
 /// Both values are hashed with SHA-256 before the constant-time comparison,
 /// so not even the key length leaks through timing. Surrounding whitespace

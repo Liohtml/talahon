@@ -1,4 +1,4 @@
-//! MemPalace bridge (port of `src/palace-client.ts`).
+//! MemPalace bridge.
 //!
 //! CoPilot never talks to MemPalace directly; the HTTP channel runs one
 //! palace process per request, writes one JSON request to its stdin and
@@ -106,7 +106,7 @@ pub trait PalaceRunner: Send + Sync {
     }
 }
 
-/// `add_drawer` request for a teach-the-palace lesson (TS `addLesson`).
+/// `add_drawer` request for a teach-the-palace lesson.
 pub fn add_lesson_request(
     customer_code: &str,
     lesson_type: &str,
@@ -123,7 +123,7 @@ pub fn add_lesson_request(
     })
 }
 
-/// `search` request (TS `searchPalace`). `room: None` searches every room.
+/// `search` request. `room: None` searches every room.
 pub fn search_request(customer_code: &str, room: Option<&str>, query: &str, limit: u32) -> Value {
     let mut req = json!({
         "op": "search",
@@ -137,7 +137,7 @@ pub fn search_request(customer_code: &str, room: Option<&str>, query: &str, limi
     req
 }
 
-/// `delete_drawer` request (TS `forgetLesson`).
+/// `delete_drawer` request that forgets a lesson.
 pub fn forget_request(drawer_id: &str) -> Value {
     json!({ "op": "delete_drawer", "drawer_id": drawer_id })
 }

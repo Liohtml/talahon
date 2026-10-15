@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-/// `talon` — automated AI SOC analyst for SOCFortress CoPilot.
+/// `talon` — automated AI SOC analyst for CoPilot.
 #[derive(Debug, Parser)]
 #[command(name = "talon", version, about, long_about = None)]
 pub struct Cli {

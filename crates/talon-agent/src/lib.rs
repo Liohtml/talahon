@@ -1,8 +1,7 @@
 //! # talon-agent — in-container agent runtime
 //!
-//! **Owner: agent A14 (phase 2).** See `docs/RUST_ARCHITECTURE.md` §3.1–3.4
-//! and §A14. Replaces the TypeScript `container/agent-runner` (Claude Agent
-//! SDK) with a native vLLM agent loop.
+//! See `docs/RUST_ARCHITECTURE.md` §3.1–3.4. Runs the agent turn inside the
+//! container with a native vLLM agent loop.
 //!
 //! The binary has two modes:
 //!

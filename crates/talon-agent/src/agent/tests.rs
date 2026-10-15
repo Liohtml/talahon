@@ -148,7 +148,7 @@ impl Harness {
             },
             archive: ArchiveOptions {
                 dir: Some(self.conversations()),
-                assistant_name: "Andy".into(),
+                assistant_name: "Talon".into(),
                 timezone: chrono_tz::UTC,
             },
             investigation: false,
@@ -371,7 +371,7 @@ async fn threshold_compaction_summarizes_archives_and_rewrites() {
     assert_eq!(archived.len(), 1);
     assert!(archived[0].ends_with("-old-alert-work.md"), "{archived:?}");
     let md = std::fs::read_to_string(h.conversations().join(&archived[0])).unwrap();
-    assert!(md.contains("**Andy**: answer 0"));
+    assert!(md.contains("**Talon**: answer 0"));
     // Transcript rewritten: summary + ack + kept turn + new turn.
     let (_, loaded) = SessionStore::open(&h.sessions(), agent.session_id()).unwrap();
     assert_eq!(loaded.len(), 6);

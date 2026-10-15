@@ -1,4 +1,4 @@
-//! Markdown -> channel-native text styles (port of `src/text-styles.ts`).
+//! Markdown -> channel-native text styles.
 //!
 //! The agent writes standard Markdown. Each channel dialect renders it
 //! differently:
@@ -12,9 +12,8 @@
 //! | `Plain`                    | every marker stripped (via [`parse_signal_styles`])|
 //!
 //! Code (fenced blocks and inline code spans) is never touched by marker
-//! substitution. The regex-with-lookaround rules of the TypeScript version are
-//! implemented as small linear scanners (the `regex` crate has no
-//! lookbehind), with identical results on the ported test-suite.
+//! substitution. The conversion rules are implemented as small linear
+//! scanners (the `regex` crate has no lookbehind).
 
 use serde::{Deserialize, Serialize};
 use talon_core::channel::ChannelType;
@@ -131,8 +130,8 @@ fn split_protected_regions(text: &str) -> Vec<Segment<'_>> {
 }
 
 fn transform_segment(text: &str, slack: bool) -> String {
-    // Order matters: italic before bold (see the TypeScript comment — the
-    // italic rule never matches `**bold**`, but would re-convert `*bold*`).
+    // Order matters: italic before bold (the italic rule never matches
+    // `**bold**`, but would re-convert `*bold*`).
     let t = convert_italic(text);
     let t = convert_bold(&t);
     let t = map_lines(&t, convert_heading_line);

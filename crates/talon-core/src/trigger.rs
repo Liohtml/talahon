@@ -1,4 +1,4 @@
-//! Trigger-word matching (`@Andy hello`).
+//! Trigger-word matching (`@Talon hello`).
 
 use regex::{Regex, RegexBuilder};
 
@@ -29,10 +29,10 @@ mod tests {
 
     #[test]
     fn matches_case_insensitively_at_start() {
-        let re = build_trigger_pattern("@Andy", "Andy");
-        assert!(re.is_match("@andy what's up"));
-        assert!(!re.is_match("hey @Andy"));
-        assert!(!re.is_match("@Andyx"));
+        let re = build_trigger_pattern("@Talon", "Talon");
+        assert!(re.is_match("@talon what's up"));
+        assert!(!re.is_match("hey @Talon"));
+        assert!(!re.is_match("@Talonx"));
     }
 
     #[test]

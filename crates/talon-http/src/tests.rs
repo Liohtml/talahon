@@ -1,5 +1,5 @@
-//! Router-level tests (ports of `src/channels/http.test.ts` plus the new
-//! endpoints and hardening).
+//! Router-level tests of the CoPilot HTTP channel: endpoints, lanes and
+//! hardening.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -99,8 +99,7 @@ async fn bearer_and_x_api_key_are_accepted() {
 
 #[tokio::test]
 async fn unset_key_fails_closed() {
-    // The TS release compared `provided !== HTTP_API_KEY`, so an empty key
-    // matched an empty header.
+    // An unset key must never match, not even an empty header.
     let h = Harness::with_config(|c| c.api_key = crate::ApiKey::unset());
     for key in [None, Some(""), Some("anything")] {
         let res = h.send(request("GET", "/status", None, key)).await;
@@ -264,7 +263,7 @@ async fn non_object_json_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// Lanes (ports of `per-user lanes`, `lane registration`, `idle lane sweep`)
+// Lanes (per-user lanes, lane registration, idle lane sweep)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -530,7 +529,7 @@ async fn sweep_leaves_the_anon_and_investigation_lanes_alone() {
 }
 
 // ---------------------------------------------------------------------------
-// POST /session/reset (port of `session reset scoping`)
+// POST /session/reset (session reset scoping)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -669,7 +668,7 @@ async fn reset_rejects_unknown_scopes_and_bad_json() {
 }
 
 // ---------------------------------------------------------------------------
-// POST /message + SSE (ports of the writer-isolation cases end to end)
+// POST /message + SSE (the writer-isolation cases end to end)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1888,8 +1887,7 @@ async fn digest_seeding_is_idempotent() {
 // Real talon-db backend
 // ---------------------------------------------------------------------------
 
-/// End-to-end against the real `talon_db::Db` (implemented by A01
-/// concurrently; fails with a `todo!()` panic until that lands).
+/// End-to-end against the real `talon_db::Db`.
 #[tokio::test]
 async fn real_db_backed_investigation_round_trip() {
     let db = talon_db::Db::open_in_memory().unwrap();
