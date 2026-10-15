@@ -1,6 +1,11 @@
 # Talon × CoPilot Integration
 
-> **Status:** In progress — MCP write-back tools under development in CoPilot.
+> **Status:** Live. CoPilot's side of this integration — the Talon connector
+> (`/api/talon/*`) and the write-back API (`/api/ai_analyst/*`) — is served by
+> CoPilot's Rust service (CoPilot `crates/copilot-talon`,
+> `crates/copilot-ai-analyst`, see CoPilot `docs/architecture/RUST_MIGRATION.md`),
+> built on the same toolchain and conventions as this workspace. The wire
+> contract is typed and test-pinned on the CoPilot side (§ Wire contract).
 
 This document describes the architecture for integrating the Talon AI analyst with the SOCfortress CoPilot application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
 
@@ -19,17 +24,17 @@ This document describes the architecture for integrating the Talon AI analyst wi
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  CoPilot (FastAPI)                  │
+│        CoPilot (Rust, in front of FastAPI)          │
 │                                                     │
 │  Alert created ──► POST /investigate ──────────────┐│
 │                                                    ││
-│  GET /nanoclaw/status   ◄──── Talon HTTP API       ││
-│  GET /nanoclaw/jobs/:id ◄──── Talon HTTP API       ││
+│  GET /api/talon/status ◄──── Talon HTTP API        ││
+│  GET /api/talon/jobs/{alert_id} (CoPilot DB)       ││
 │                                                    ││
 │  MCP write-back tools:                             ││
-│    POST /api/v1/ai-analyst/jobs       ◄────────────┘│
-│    POST /api/v1/ai-analyst/reports                  │
-│    POST /api/v1/ai-analyst/iocs                     │
+│    POST /api/ai_analyst/jobs          ◄────────────┘│
+│    POST /api/ai_analyst/reports                     │
+│    POST /api/ai_analyst/iocs                        │
 │                                                     │
 │  MySQL ──────────────────────────────────────────── │
 │    ai_analyst_job                                   │
@@ -45,7 +50,7 @@ This document describes the architecture for integrating the Talon AI analyst wi
 │    POST /investigate   ← CoPilot triggers this      │
 │    POST /message       ← ad-hoc analyst prompts     │
 │    GET  /status        ← queue + job overview       │
-│    GET  /jobs/:alertId ← per-alert report status    │
+│    GET  /investigations[/{id}] ← job status         │
 │    GET  /health                                     │
 │                                                     │
 │  Scheduled task (every 15 min)                      │
@@ -197,7 +202,12 @@ CREATE TABLE ai_analyst_ioc (
 
 The agent has **read-only** access to MySQL. All writes go through CoPilot REST API endpoints exposed as MCP tools in the agent's environment. CoPilot validates the payload and persists results.
 
-> **Status:** MCP tools under development in CoPilot. Talon-side integration pending.
+> **Status:** Live. The tools are served by CoPilot's Rust service (crate
+> `copilot-ai-analyst`), byte-for-byte compatible with the former FastAPI
+> routes. A status update (`PATCH /api/ai_analyst/jobs/{job_id}`) for a job
+> that does not exist yet is auto-created from the `copilot-inv-<alert>-<ms>` id
+> only for an **admin** CoPilot account (`COPILOT_USERNAME`): an analyst token
+> gets 403 on a job id it cannot attribute yet (fail-closed tenancy).
 
 ### MCP Tools (from `github.com/socfortress/copilot-mcp-server`)
 
@@ -243,17 +253,36 @@ The agent has **read-only** access to MySQL. All writes go through CoPilot REST 
 
 ## Talon HTTP API
 
-Endpoints on the HTTP channel (default port `3100`) that CoPilot can call or display:
+Endpoints on the HTTP channel (default port `3100`, `crates/talon-http`).
+Authentication: `X-Api-Key` (or `Authorization: Bearer`) with `HTTP_API_KEY`;
+errors are `{"error": "…"}`.
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /health` | Liveness check |
-| `GET /status` | Queue depth, active containers, last N completed jobs |
-| `GET /jobs/:alertId` | Job status and report link for a specific alert |
-| `POST /investigate` | Trigger a deep investigation for `{ alert_id, customer_code }` |
-| `POST /message` | Ad-hoc prompt from an analyst — routes to the copilot agent |
+| Endpoint | Description | CoPilot route that uses it |
+|----------|-------------|----------------------------|
+| `GET /health` | Liveness (no auth) | connector verification |
+| `GET /status` | Uptime, lanes/sessions, scheduled tasks, queue | `GET /api/talon/status`, `GET /api/talon/session/context` |
+| `POST /investigate` | Queue an investigation `{alert_id, customer_code, triggered_by?, template_override?}` → 202 `{job_id, status, template_override, deduplicated}` (200 when deduplicated) | `POST /api/talon/investigate`, `POST /api/ai_analyst/reports/{id}/replay`, ingest auto-trigger, Customer Portal requests |
+| `GET /investigations[/{id}]` | Recent investigations / one job by **job id** | — |
+| `GET /templates` | Prompt templates for overrides | `GET /api/talon/templates` |
+| `POST /message` | Chat, answered as SSE `data: {"type":"text","content":…}` … `data: {"type":"done"}` | `POST /api/talon/message` (lane = the CoPilot user) |
+| `POST /session/reset` | Clear a lane `{scope, user_id?}` → `{cleared, lanes}` | `POST /api/talon/session/reset` |
+| `POST /palace/lesson`, `GET /palace/search`, `POST /palace/forget` | MemPalace proxy (503 unless configured) | palace drainer, `GET /api/ai_analyst/palace_lessons/customer/{code}`, one-off sweeper |
 
-> **Status:** `/investigate`, `/status`, and `/jobs/:alertId` are planned. `/message` and `/health` exist today.
+There is no per-alert job endpoint on Talon: CoPilot answers
+`GET /api/talon/jobs/{alert_id}` from its own `ai_analyst_job` table.
+
+### Wire contract
+
+Talon parses these bodies by hand and builds its responses with `json!`, so
+the shapes are typed on the CoPilot side instead: CoPilot
+`crates/copilot-talon/src/contract.rs` defines every request and response
+above (`InvestigateRequest`, `InvestigateAccepted`, `Investigation`,
+`MessageRequest`, `SseFrame`, `SessionResetRequest`, `TemplateInfo`,
+`PalaceLessonRequest`, `ErrorBody`, …) plus Talon's validation rules for
+customer codes and template names, with tests pinning the exact JSON. **A
+change to any of these endpoints here needs the matching change there** —
+the CoPilot tests fail otherwise rather than CoPilot getting a 400 in
+production.
 
 ---
 
