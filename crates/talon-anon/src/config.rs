@@ -51,9 +51,10 @@ use yaml_rust2::{Yaml, YamlLoader, yaml::Hash};
 
 use crate::text::fold;
 
-/// The shipped `siem/anon_proxy/fields.yaml`, embedded at build time. Used
-/// by `talon-anon-proxy` when `--fields` is not given.
-pub const DEFAULT_FIELDS_YAML: &str = include_str!("../../../siem/anon_proxy/fields.yaml");
+/// The shipped field list (`crates/talon-anon/fields.yaml`, kept identical to
+/// `siem/anon_proxy/fields.yaml`), embedded at build time. Used by
+/// `talon-anon-proxy` when `--fields` is not given.
+pub const DEFAULT_FIELDS_YAML: &str = include_str!("../fields.yaml");
 
 /// Default prefix for internal IP addresses (Python: `internal_ip_token_prefix`).
 pub const DEFAULT_IP_PREFIX: &str = "IP_INT";
@@ -810,6 +811,24 @@ mod tests {
     #[test]
     fn builtin_config_compiles() {
         assert!(CompiledConfig::builtin().unwrap().category_count() >= 4);
+    }
+
+    /// The embedded copy and the runtime copy that `siem/anon-opensearch-mcp.sh`
+    /// passes with `--fields` must not drift. Skipped outside the repository
+    /// (a crate downloaded from crates.io has no `siem/` next to it).
+    #[test]
+    fn embedded_fields_match_siem_copy() {
+        let siem = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../siem/anon_proxy/fields.yaml");
+        if !siem.parent().is_some_and(std::path::Path::is_dir) {
+            return;
+        }
+        let runtime = std::fs::read_to_string(&siem).unwrap();
+        assert!(
+            runtime == DEFAULT_FIELDS_YAML,
+            "siem/anon_proxy/fields.yaml differs from crates/talon-anon/fields.yaml; \
+             edit one and copy it over the other"
+        );
     }
 
     #[test]

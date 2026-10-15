@@ -1,10 +1,19 @@
 [package]
-name = "talon-agent"
+name = "talahon-agent"
 description = "In-container agent runtime: vLLM agent loop, MCP tools, sessions, compaction"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities"]
+
+[lib]
+name = "talon_agent"
 
 [dependencies]
 talon-core = { workspace = true }

@@ -1,5 +1,5 @@
 //! Analyse a raw alert read from stdin and print the prompt block and the
-//! full JSON analysis: `cargo run -p talon-intel --example analyze < alert.json`.
+//! full JSON analysis: `cargo run -p talahon-intel --example analyze < alert.json`.
 
 use std::io::Read;
 

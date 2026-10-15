@@ -37,8 +37,6 @@ FROM ${RUST_IMAGE} AS rust-builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-# talon-anon embeds the shipped field list at compile time.
-COPY siem/anon_proxy/fields.yaml ./siem/anon_proxy/fields.yaml
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
