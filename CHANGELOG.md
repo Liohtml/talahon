@@ -15,3 +15,4 @@ All notable changes to Talon are documented in this file.
 - Anonymizing MCP proxy in Rust (`talon-anon-proxy`).
 - HTTP API: `POST /investigate`, `GET /investigations`, `GET /investigations/{id}`, `POST /message` (SSE), `GET /status`, `GET /metrics`, templates, evals and MemPalace endpoints; investigation deduplication.
 - Independent adversarial security review (three rounds, see `docs/MYTHOS_REVIEW.md`) with all findings fixed.
+- Dependencies: `rustls` 0.23.46 (RUSTSEC-2026-0346 to -0349); `fields.yaml` is parsed with `yaml-rust2` (safe Rust) instead of the unmaintained `serde_yaml`/`unsafe-libyaml`. CI checks advisories with `cargo deny`.

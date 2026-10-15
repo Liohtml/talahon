@@ -46,8 +46,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_yaml::{Mapping, Value as YValue};
 use talon_core::{Error, Result};
+use yaml_rust2::{Yaml, YamlLoader, yaml::Hash};
 
 use crate::text::fold;
 
@@ -212,19 +212,24 @@ fn cfg_err(msg: impl Into<String>) -> Error {
     Error::Config(format!("fields.yaml: {}", msg.into()))
 }
 
-fn scalar_string(v: &YValue) -> Option<String> {
+fn scalar_string(v: &Yaml) -> Option<String> {
     match v {
-        YValue::String(s) => Some(s.clone()),
-        YValue::Number(n) => Some(n.to_string()),
-        YValue::Bool(b) => Some(b.to_string()),
+        Yaml::String(s) | Yaml::Real(s) => Some(s.clone()),
+        Yaml::Integer(n) => Some(n.to_string()),
+        Yaml::Boolean(b) => Some(b.to_string()),
         _ => None,
     }
 }
 
-fn get_list(m: &Mapping, key: &str) -> Result<Option<Vec<String>>> {
-    match m.get(key) {
-        None | Some(YValue::Null) => Ok(None),
-        Some(YValue::Sequence(seq)) => seq
+/// Look up a string key in a YAML mapping.
+fn lookup<'a>(m: &'a Hash, key: &str) -> Option<&'a Yaml> {
+    m.get(&Yaml::String(key.to_string()))
+}
+
+fn get_list(m: &Hash, key: &str) -> Result<Option<Vec<String>>> {
+    match lookup(m, key) {
+        None | Some(Yaml::Null) => Ok(None),
+        Some(Yaml::Array(seq)) => seq
             .iter()
             .map(|x| {
                 scalar_string(x).ok_or_else(|| cfg_err(format!("`{key}` entries must be scalars")))
@@ -235,31 +240,30 @@ fn get_list(m: &Mapping, key: &str) -> Result<Option<Vec<String>>> {
     }
 }
 
-fn get_bool(m: &Mapping, key: &str) -> Result<Option<bool>> {
-    match m.get(key) {
-        None | Some(YValue::Null) => Ok(None),
-        Some(YValue::Bool(b)) => Ok(Some(*b)),
+fn get_bool(m: &Hash, key: &str) -> Result<Option<bool>> {
+    match lookup(m, key) {
+        None | Some(Yaml::Null) => Ok(None),
+        Some(Yaml::Boolean(b)) => Ok(Some(*b)),
         Some(_) => Err(cfg_err(format!("`{key}` must be true or false"))),
     }
 }
 
-fn get_string(m: &Mapping, key: &str) -> Result<Option<String>> {
-    match m.get(key) {
-        None | Some(YValue::Null) => Ok(None),
+fn get_string(m: &Hash, key: &str) -> Result<Option<String>> {
+    match lookup(m, key) {
+        None | Some(Yaml::Null) => Ok(None),
         Some(v) => scalar_string(v)
             .map(Some)
             .ok_or_else(|| cfg_err(format!("`{key}` must be a string"))),
     }
 }
 
-fn get_usize(m: &Mapping, key: &str) -> Result<Option<usize>> {
-    match m.get(key) {
-        None | Some(YValue::Null) => Ok(None),
-        Some(YValue::Number(n)) => n
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
+fn get_usize(m: &Hash, key: &str) -> Result<Option<usize>> {
+    match lookup(m, key) {
+        None | Some(Yaml::Null) => Ok(None),
+        Some(Yaml::Integer(n)) => usize::try_from(*n)
             .map(Some)
-            .ok_or_else(|| cfg_err(format!("`{key}` must be a non-negative integer"))),
+            .map_err(|_| cfg_err(format!("`{key}` must be a non-negative integer"))),
+        Some(Yaml::Real(_)) => Err(cfg_err(format!("`{key}` must be a non-negative integer"))),
         Some(_) => Err(cfg_err(format!("`{key}` must be an integer"))),
     }
 }
@@ -276,23 +280,27 @@ impl FieldsConfig {
     /// Parse YAML text. An empty document yields the defaults (detectors
     /// only, like the Python proxy without a field list).
     pub fn from_yaml_str(text: &str) -> Result<Self> {
-        let root: YValue = serde_yaml::from_str(text).map_err(|e| cfg_err(e.to_string()))?;
+        let mut docs = YamlLoader::load_from_str(text).map_err(|e| cfg_err(e.to_string()))?;
+        if docs.len() > 1 {
+            return Err(cfg_err("expected a single YAML document"));
+        }
+        let root = docs.pop().unwrap_or(Yaml::Null);
         let mut cfg = Self::default();
         let top = match &root {
-            YValue::Null => return Ok(cfg),
-            YValue::Mapping(m) => m,
+            Yaml::Null => return Ok(cfg),
+            Yaml::Hash(m) => m,
             _ => return Err(cfg_err("top level must be a mapping")),
         };
 
-        match top.get("categories") {
-            None | Some(YValue::Null) => {}
-            Some(YValue::Mapping(cats)) => {
+        match lookup(top, "categories") {
+            None | Some(Yaml::Null) => {}
+            Some(Yaml::Hash(cats)) => {
                 for (k, v) in cats {
                     let name = scalar_string(k)
                         .ok_or_else(|| cfg_err("category names must be scalars"))?;
                     let (prefix, description, fields, value_pattern) = match v {
-                        YValue::Null => (None, None, Vec::new(), None),
-                        YValue::Mapping(cm) => (
+                        Yaml::Null => (None, None, Vec::new(), None),
+                        Yaml::Hash(cm) => (
                             get_string(cm, "token_prefix")?,
                             get_string(cm, "description")?,
                             get_list(cm, "fields")?.unwrap_or_default(),
@@ -866,6 +874,30 @@ mod tests {
         let c =
             FieldsConfig::from_yaml_str("categories:\n  x: null\npreserve_fields: null\n").unwrap();
         assert!(c.categories[0].fields.is_empty());
+    }
+
+    #[test]
+    fn yaml_edge_cases() {
+        // Several documents are ambiguous: refuse instead of picking one.
+        assert!(FieldsConfig::from_yaml_str("keep_values: [a]\n---\nkeep_values: [b]\n").is_err());
+        // Only non-negative integers are lengths.
+        assert!(FieldsConfig::from_yaml_str("sweep_min_length: -1").is_err());
+        assert!(FieldsConfig::from_yaml_str("sweep_min_length: 2.5").is_err());
+        assert_eq!(
+            FieldsConfig::from_yaml_str("sweep_min_length: 0")
+                .unwrap()
+                .sweep_min_length,
+            1
+        );
+        // Anchors and aliases resolve to the anchored list.
+        let c = FieldsConfig::from_yaml_str(
+            "preserve_fields: &shared [rule.id, rule.level]\nverbatim_fields: *shared\n",
+        )
+        .unwrap();
+        assert_eq!(c.verbatim_fields, vec!["rule.id", "rule.level"]);
+        // Numbers and booleans in lists are kept as their text.
+        let c = FieldsConfig::from_yaml_str("keep_values: [42, 1.5, true]").unwrap();
+        assert_eq!(c.keep_values, vec!["42", "1.5", "true"]);
     }
 
     #[test]
