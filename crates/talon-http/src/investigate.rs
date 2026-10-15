@@ -157,7 +157,9 @@ Alert to investigate:
 - triggered_by: {triggered_by}{override_line}
 
 Steps:
-1. Skip Step 0 deduplication — this job has already been registered by the caller with id="{job_id}". Call UpdateAiAnalystJobTool(job_id="{job_id}", status="running") immediately.
+1. Skip Step 0 deduplication — Talon already deduplicated this request and assigned the job id. Register the job in CoPilot and mark it running, in this order:
+   a. mcp__copilot__CreateAiAnalystJobTool(id="{job_id}", alert_id={alert_id}, customer_code="{customer_code}", triggered_by="{triggered_by}")
+   b. mcp__copilot__UpdateAiAnalystJobTool(job_id="{job_id}", status="running")
 2. Resolve the alert source and target document via MySQL before any OpenSearch query. The alert_id passed here is CoPilot's internal DB counter and is NOT a field on raw SIEM documents — searching OpenSearch for it returns nothing, and falling back to a time-window query will pick up unrelated noise (typically the agent's own container-startup events) and produce a report about the wrong event. Run exactly this query via mcp__mysql__mysql_query:
 
      SELECT a.id, a.alert_name, a.source, a.alert_creation_time,
@@ -377,6 +379,15 @@ mod tests {
         assert!(p.contains("SIEM correlation).\n3b. Complete Step 5.5"));
         assert!(p.contains(r#"submit_triage_report with report_id="copilot-inv-1234-1""#));
         assert!(p.contains("for step 4b. Talon records this structured verdict on the investigation.\n4. Write back"));
+        // The agent registers the job itself, carrying the real trigger, before
+        // marking it running (CoPilot's auto-create would record "webhook").
+        let create = p
+            .find(r#"CreateAiAnalystJobTool(id="copilot-inv-1234-1", alert_id=1234, customer_code="acme", triggered_by="webhook")"#)
+            .unwrap();
+        let running = p
+            .find(r#"UpdateAiAnalystJobTool(job_id="copilot-inv-1234-1", status="running")"#)
+            .unwrap();
+        assert!(create < running);
     }
 
     #[test]
