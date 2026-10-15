@@ -27,7 +27,7 @@ use anyhow::{Context as _, bail};
 
 use super::StepArgs;
 use crate::context::{SETUP_LOG, SetupContext};
-use crate::fsutil::{exists_nofollow, write_atomic};
+use crate::fsutil::write_atomic;
 use crate::platform::{Platform, ServiceManager};
 use crate::runner::{CommandOutput, CommandSpec};
 use crate::status::{StatusBlock, StepOutcome};
@@ -36,9 +36,6 @@ use crate::status::{StatusBlock, StepOutcome};
 pub const SERVICE_NAME: &str = "talon";
 /// launchd label.
 pub const LAUNCHD_LABEL: &str = "com.talon";
-/// Service unit name used by earlier releases; reported as `LEGACY_SERVICE`
-/// when such a unit is still installed.
-pub const LEGACY_SERVICE_NAME: &str = "nanoclaw";
 /// Open-file limit (soft and hard) of the service process
 /// (`LimitNOFILE=`, launchd `NumberOfFiles`, `ulimit -n`).
 pub const MAX_OPEN_FILES: u32 = 65536;
@@ -605,7 +602,6 @@ async fn setup_systemd(
     std::fs::create_dir_all(&unit_dir)
         .with_context(|| format!("creating {}", unit_dir.display()))?;
     let unit_path = unit_dir.join(format!("{SERVICE_NAME}.service"));
-    let legacy_present = exists_nofollow(&unit_dir.join(format!("{LEGACY_SERVICE_NAME}.service")));
 
     let write_unit = |h: Hardening| -> anyhow::Result<()> {
         let unit = systemd_unit(&spec_for(ctx, h))?;
@@ -689,9 +685,6 @@ async fn setup_systemd(
     .field("HARDENING", hardening.as_str());
     if stale {
         block.set("DOCKER_GROUP_STALE", true);
-    }
-    if legacy_present {
-        block.set("LEGACY_SERVICE", format!("{LEGACY_SERVICE_NAME}.service"));
     }
     block.set("LINGER_ENABLED", linger);
     block.set("STATUS", "success");
@@ -1011,12 +1004,6 @@ mod tests {
         let mut ctx = ctx_with_binary(dir.path(), runner.clone());
         ctx.platform.has_systemd = true;
         ctx.platform.uid = Some(1000);
-        std::fs::create_dir_all(ctx.home_dir.join(".config/systemd/user")).unwrap();
-        std::fs::write(
-            ctx.home_dir.join(".config/systemd/user/nanoclaw.service"),
-            "",
-        )
-        .unwrap();
 
         let out = run(&StepArgs::default(), &ctx).await.unwrap();
         let b = out.block.unwrap();
@@ -1024,7 +1011,6 @@ mod tests {
         assert_eq!(b.get("SERVICE_LOADED"), Some("true"));
         assert_eq!(b.get("HARDENING"), Some("strict"));
         assert_eq!(b.get("LINGER_ENABLED"), Some("true"));
-        assert_eq!(b.get("LEGACY_SERVICE"), Some("nanoclaw.service"));
         assert_eq!(b.get("DOCKER_GROUP_STALE"), None);
         let unit = std::fs::read_to_string(ctx.home_dir.join(".config/systemd/user/talon.service"))
             .unwrap();

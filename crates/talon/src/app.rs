@@ -362,9 +362,6 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
     )
     .map_err(|e| anyhow!("cannot open database: {e}"))?;
     tracing::info!("Database initialized");
-    if let Err(e) = db.migrate_json_state(&config.data_dir) {
-        tracing::warn!(error = %e, "legacy JSON state import failed");
-    }
     let audit: SharedAuditSink = Arc::new(DbAuditSink::new(db.clone()));
     log_audit_head(&db, "startup");
     audit.record(event(

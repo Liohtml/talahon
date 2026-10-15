@@ -29,8 +29,7 @@ pub struct TalonConfig {
     pub groups_dir: PathBuf,
     /// Runtime data: IPC namespaces, sessions (`data/`).
     pub data_dir: PathBuf,
-    /// `~/.config/talon` (falls back to `~/.config/nanoclaw`, the legacy
-    /// config directory of earlier releases, if only that exists).
+    /// `~/.config/talon`.
     pub config_dir: PathBuf,
     pub mount_allowlist_path: PathBuf,
     pub sender_allowlist_path: PathBuf,
@@ -77,14 +76,7 @@ impl TalonConfig {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| "/root".into());
-        let talon_cfg = home.join(".config").join("talon");
-        // Legacy config directory of earlier releases.
-        let legacy_cfg = home.join(".config").join("nanoclaw");
-        let config_dir = if !talon_cfg.exists() && legacy_cfg.exists() {
-            legacy_cfg
-        } else {
-            talon_cfg
-        };
+        let config_dir = home.join(".config").join("talon");
 
         let tz_name = [env.get("TZ"), Some("UTC".to_string())]
             .into_iter()

@@ -2,7 +2,7 @@
 
 > **Status:** In progress — MCP write-back tools under development in CoPilot.
 
-This document describes the architecture for integrating the Talon AI analyst with the CoPilot application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
+This document describes the architecture for integrating the Talon AI analyst with the [CoPilot](https://github.com/Liohtml/CoPilot) application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
 
 ---
 
@@ -13,13 +13,15 @@ This document describes the architecture for integrating the Talon AI analyst wi
 - **The agent never writes directly to MySQL.** The MySQL MCP tool is read-only. Agent write-back goes through a CoPilot REST API, which validates and persists results. This keeps the database boundary clean and auditable.
 - **Both trigger paths produce identical output.** Whether an investigation is started by a real-time `POST /investigate` call or the 15-minute scheduled task, the agent runs the same workflow and writes back through the same API.
 
+> **API contract:** CoPilot's Rust backend pins Talon's HTTP API (requests, responses, auth) in its `copilot-talon` crate (`crates/copilot-talon/src/contract.rs`). Change both sides together.
+
 ---
 
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  CoPilot (FastAPI)                  │
+│                       CoPilot                       │
 │                                                     │
 │  Alert created ──► POST /investigate ──────────────┐│
 │                                                    ││

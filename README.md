@@ -26,7 +26,7 @@ Written in Rust · powered by your own vLLM · built to survive hostile input.
 
 ---
 
-Talon runs next to [CoPilot](https://github.com/socfortress/CoPilot) and
+Talon runs next to [CoPilot](https://github.com/Liohtml/CoPilot) and
 investigates every alert like a Tier 1/2 analyst: it pulls the raw event from
 your Wazuh/OpenSearch SIEM, extracts and enriches indicators, maps them to
 MITRE ATT&CK, correlates across your environment and writes a structured
@@ -243,7 +243,7 @@ egress firewall and service installation, which a production setup needs.
 - Linux host (macOS works for development) with Docker or Podman
 - Rust 1.85+ (`rustup`) to build the host binary
 - A **vLLM** server reachable from the host ([docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md))
-- OpenSearch/Wazuh SIEM and a CoPilot instance (MySQL/MariaDB + FastAPI)
+- OpenSearch/Wazuh SIEM and a [CoPilot](https://github.com/Liohtml/CoPilot) instance with its MySQL/MariaDB database
 
 ### 1. Build
 

@@ -74,15 +74,7 @@ impl std::fmt::Debug for SetupContext {
 }
 
 fn default_config_dir(home: &Path) -> PathBuf {
-    let talon = home.join(".config").join("talon");
-    // Legacy config directory of earlier releases, used only while
-    // `~/.config/talon` does not exist.
-    let legacy = home.join(".config").join("nanoclaw");
-    if !talon.exists() && legacy.exists() {
-        legacy
-    } else {
-        talon
-    }
+    home.join(".config").join("talon")
 }
 
 impl SetupContext {
@@ -258,21 +250,6 @@ mod tests {
         ctx.stdin = StdinSource::Text("abc".into());
         assert_eq!(ctx.read_stdin(10).await.unwrap(), "abc");
         assert!(ctx.read_stdin(2).await.is_err());
-    }
-
-    #[test]
-    fn legacy_config_dir_is_used_when_only_it_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".config/nanoclaw")).unwrap();
-        assert_eq!(
-            default_config_dir(dir.path()),
-            dir.path().join(".config/nanoclaw")
-        );
-        std::fs::create_dir_all(dir.path().join(".config/talon")).unwrap();
-        assert_eq!(
-            default_config_dir(dir.path()),
-            dir.path().join(".config/talon")
-        );
     }
 
     #[test]

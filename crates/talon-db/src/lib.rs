@@ -33,7 +33,6 @@
 //! - [`audit`]        — hash-chained audit log, [`audit::DbAuditSink`]
 //! - `investigations` — investigation jobs
 //! - `iocs`           — IOC sightings for cross-alert correlation
-//! - `json_migration` — one-shot import of the pre-SQLite JSON state files
 
 #![warn(missing_docs)]
 
@@ -51,7 +50,6 @@ mod chats;
 mod groups;
 mod investigations;
 mod iocs;
-mod json_migration;
 mod schema;
 mod state;
 mod tasks;
@@ -59,7 +57,6 @@ mod tasks;
 pub use audit::{AUDIT_GENESIS_HASH, DbAuditSink, audit_event_hash, canonical_json};
 pub use investigations::INVESTIGATION_STATUSES;
 pub use iocs::{MAX_IOC_TYPE_LEN, MAX_IOC_VALUE_LEN};
-pub use json_migration::JsonMigrationReport;
 pub use tasks::MAX_TASK_OWNER_LEN;
 
 // Re-exported so callers can name every type of this API through talon-db.
