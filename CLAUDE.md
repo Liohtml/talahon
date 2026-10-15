@@ -17,7 +17,7 @@ One host process (`talon`) receives alerts and chat through channels (CoPilot HT
 | `crates/talon-container/` | `docker run` args, mounts, output parser |
 | `crates/talon-security/` | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
 | `crates/talon-intel/` | IOC / MITRE / triage / report engine and intel tools |
-| `crates/talon-http/` | CoPilot HTTP API channel |
+| `crates/talon-http/` | CoPilot HTTP API channel (its contract is pinned on the CoPilot side in [Liohtml/CoPilot](https://github.com/Liohtml/CoPilot) `crates/copilot-talon/src/contract.rs`; change both together) |
 | `container/` | Agent image (`Dockerfile`, `entrypoint.sh`, `build.sh`) |
 | `groups/{name}/CLAUDE.md` | Per-group agent instructions and memory |
 | `groups/copilot/prompts/` | Alert-type investigation templates |
