@@ -57,40 +57,24 @@ and `talon-security`, are a frozen contract. Implementations fill in the
 
 ---
 
-## 2. Rules for every agent (parallel development)
+## 2. Engineering rules
 
-Fifteen agents work in **one shared working tree** at the same time.
-
-- **Only edit files inside the directories you own** (listed in your section).
-  Never edit `talon-core`, the root `Cargo.toml`, `Cargo.lock` by hand, or
-  another agent's crate. If you need something from another crate that is not
-  there yet, write a small local adapter/trait in your own crate and say so in
-  your final report.
-- New dependencies: prefer `{ workspace = true }` entries already declared in
-  the root `Cargo.toml`. If you need a crate that isn't declared, add it to
-  **your own** `Cargo.toml` with an explicit version.
-- Build/test **only your package**: `cargo check -p <crate>`,
-  `cargo test -p <crate>`, `cargo clippy -p <crate> --all-targets -- -D warnings`,
-  `cargo fmt -p <crate>`. Never run workspace-wide cargo commands, `cargo clean`,
-  or `cargo update`. Cargo serializes builds on a lock ("Blocking waiting for
-  file lock") — that is normal, just wait.
-- If a compile error comes from a crate you don't own, it is another agent's
-  work in progress: retry a bit later, don't "fix" it.
-- **Do not `git commit`, `git add`, `git stash` or `git checkout`.** The lead
-  integrates and commits.
-- The TypeScript sources in `src/`, `container/agent-runner/`, `setup/` are the
-  behavioural reference. Port behaviour faithfully (including the tests in
-  `*.test.ts` — port them to Rust tests), then harden and improve.
-- Quality bar: no `unsafe`, no `unwrap()/expect()` outside tests (except on
-  provably infallible static values, with a comment), no panics on external
-  input, `tracing` for logs (never log secrets or full prompts at `info`),
-  doc comments on every public item, unit tests for every module, clippy clean
-  with `-D warnings`, rustfmt clean.
+- No `unsafe` (workspace lint `unsafe_code = "forbid"`), no
+  `unwrap()/expect()` outside tests (except on provably infallible static
+  values, with a comment), no panics on external input.
+- `tracing` for logs; never log secrets or full prompts at `info`. All log
+  output passes through the redactor.
+- Doc comments on every public item, unit tests for every module, clippy clean
+  with `-D warnings`, rustfmt clean. CI enforces fmt, clippy and the full test
+  suite with `--locked`.
 - Async: tokio. Long-running loops take a `tokio_util::sync::CancellationToken`.
   Blocking work (SQLite, filesystem walks) is short or goes through
   `spawn_blocking`.
-- Finish with a short report: public API summary, what you ported, what you
-  improved, known gaps, test count.
+- `talon-core` is the cross-crate contract. Change it deliberately and update
+  host and agent together.
+- Talon 2.0 replaced the TypeScript 1.x implementation (`src/`,
+  `container/agent-runner/`, `setup/`). Module docs that say "port of
+  `src/...ts`" refer to that code, which is available in the git history.
 
 ---
 
@@ -171,7 +155,11 @@ Kinds: `http.auth.failed`, `http.investigate`, `ipc.message.denied`,
 
 ---
 
-## 4. Agent assignments
+## 4. Crate design notes
+
+The rewrite was built by fifteen parallel agents (A01–A15) followed by an
+adversarial security review. Their assignments below double as per-crate
+design notes.
 
 ### Phase 1 (parallel)
 

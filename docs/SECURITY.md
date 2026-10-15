@@ -128,4 +128,8 @@ findings, proofs of concept and their fixes are tracked in
 
 ## Reporting
 
-Report vulnerabilities privately to SOCFortress (info@socfortress.co).
+Report vulnerabilities in this repository privately through GitHub's
+**Security → Report a vulnerability** (private vulnerability reporting), not
+as a public issue. Include affected versions, a reproduction and the impact.
+Issues in CoPilot or other SOCFortress components belong to SOCFortress
+(info@socfortress.co).

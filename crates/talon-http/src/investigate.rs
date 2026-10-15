@@ -283,11 +283,12 @@ pub const DIGEST_PROMPT: &str = r#"You are running as a scheduled SOC monitor. F
 
    d. DETECT ALERT TYPE from the raw event:
       - List available templates: ls /workspace/group/prompts/
-      - If Ollama is available, pass the template filenames + alert summary
+      - Compare the template filenames with the alert summary
         (rule_description, rule_groups, data_win_system_eventID, agent_name)
-        and ask it to pick the best matching filename or return NULL
-      - Fallback if Ollama unavailable: match rule_groups values or
-        data_win_system_eventID against available filenames
+        and pick the best matching filename, or none if nothing fits
+        (selection_method="hints")
+      - Fallback: match rule_groups values or data_win_system_eventID
+        against the available filenames (selection_method="fallback")
 
       NOTE: Graylog flattens all fields with underscores — use
       rule_groups, rule_description, data_win_system_eventID, agent_name.

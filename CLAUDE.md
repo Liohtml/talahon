@@ -51,7 +51,7 @@ vLLM only (`TALON_VLLM_*` in `.env`, see [docs/PROVIDER_SELECTION.md](docs/PROVI
 
 ## Skills
 
-The skills under `.claude/skills/` were written for the TypeScript NanoClaw/Talon 1.x codebase (they patch `src/*.ts`). Do not apply feature skills to this Rust workspace; port the feature into the relevant crate instead. Operational guidance in `/setup` and `/debug` maps to `talon setup <step>` and `talon doctor`.
+`.claude/skills/` contains only generic helpers (`get-qodo-rules`, `qodo-pr-resolver`). The NanoClaw skills of Talon 1.x patched TypeScript sources and were removed with them; add features by porting them into the relevant crate. For installation and troubleshooting use `talon setup <step>` and `talon doctor`.
 
 ## Container Build Cache
 

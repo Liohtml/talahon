@@ -1,8 +1,6 @@
 # Changelog
 
-All notable changes to Talon (formerly based on NanoClaw) are documented in this file.
-
-For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
+All notable changes to Talon are documented in this file. Entries before 2.0.0 refer to the TypeScript release that was based on NanoClaw.
 
 ## [2.0.0] - 2026-10-14 — Talon 2.0 (Rust rewrite)
 
@@ -17,6 +15,7 @@ For detailed release notes, see the [full changelog on the documentation site](h
 - Anonymizing proxy rewritten in Rust (`talon-anon-proxy`) with more token classes and detectors; map format unchanged.
 - New HTTP endpoints: `GET /investigations`, `GET /investigations/{id}`, `GET /metrics`; investigation deduplication.
 - Independent adversarial security review (three rounds, see `docs/MYTHOS_REVIEW.md`) with all findings fixed.
+- Removed the TypeScript implementation (`src/`, `container/agent-runner/`, `setup/`, npm tooling), the Ollama MCP wrapper, OneCLI scripts and the NanoClaw skills that patched TypeScript sources; they remain available in the git history.
 - [UPGRADE] Reset `groups/*/prompts/` and `groups/copilot/notifications.md` from git after upgrading (they are read-only inside containers now; anything planted earlier would be trusted). Per-user CoPilot sessions start fresh (new lane keys). `sudo chown -R 61008:61008 mempalace-data`.
 
 ## [1.2.36] - 2026-03-26

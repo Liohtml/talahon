@@ -1,131 +1,77 @@
 # Contributing to Talon
 
-Talon is a SOCfortress product. Contributions are welcome but reviewed with a security-first lens — this tool processes live SOC alert data and runs with access to customer SIEM environments.
+Talon processes live SOC alert data and runs with access to customer SIEM
+environments. Contributions are welcome, and every change is reviewed with a
+security-first lens.
 
-## Before You Start
+## Before you start
 
-1. **Check for existing work.** Search open PRs and issues before starting:
-   ```bash
-   gh pr list --repo taylorwalton/talon --search "<your topic>"
-   gh issue list --repo taylorwalton/talon --search "<your topic>"
-   ```
+1. **Check for existing work.** Search open pull requests and issues first.
+2. **One thing per PR.** One fix, one capability, one improvement — don't mix
+   unrelated changes.
+3. **No real customer data.** Never put alert data, credentials, hostnames,
+   IP addresses or customer names into issues, PRs, fixtures or example output.
+4. **Security issues are not public issues.** Report them privately (see
+   [docs/SECURITY.md](docs/SECURITY.md#reporting)).
 
-2. **One thing per PR.** One bug fix, one capability, one improvement. Don't mix unrelated changes.
+## What we accept
 
-3. **No real customer data.** Never include actual alert data, credentials, hostnames, IPs, or customer names in issues, PRs, or example output.
-
-## What We Accept
-
-### Source code changes
-
-**Accepted:**
+**Welcome:**
 - Bug fixes and security fixes
-- Improvements to the anonymising proxy (`siem/anon_proxy/`) — new field types, tokenisation rules, edge cases
-- MemPalace integration improvements — room taxonomy, init reliability, MCP tool coverage
+- Detection and enrichment improvements in `talon-intel` (IOC types, MITRE
+  mappings, triage scoring) with tests
+- Anonymizer improvements (`talon-anon`, `siem/anon_proxy/fields.yaml`)
+- New investigation templates in `groups/copilot/prompts/` (no code needed)
 - Investigation workflow improvements in `groups/copilot/CLAUDE.md`
-- Container build reliability fixes
+- New channels or MCP integrations that follow the existing security contracts
 - Documentation fixes
 
 **Not accepted:**
-- Broad feature additions that change core NanoClaw behaviour — these belong in skills
-- Changes that weaken the anonymising proxy or expose PII to the cloud model
-- Anything that bypasses the mount allowlist security layer
+- Changes that weaken a security boundary: the mount allowlist, container
+  hardening, the LLM gateway, lane isolation, prompt-injection fencing or the
+  anonymizing proxy
+- Cloud model providers that send SIEM data off the operator's infrastructure
+- `unsafe` code
 
-### Skills
-
-Talon inherits the NanoClaw skill system. Skills are markdown files (with optional supporting code) that teach Claude how to do something new.
-
-#### Container skills (most common for SOC work)
-
-These run inside the agent container and extend what the SOC agent can do during an investigation.
-
-**Location:** `container/skills/<name>/`
-
-**Examples:** new investigation templates, IOC enrichment workflows, reporting formats
-
-**Guidelines:**
-- Follow the SKILL.md frontmatter format (see below)
-- Use `allowed-tools` frontmatter to scope tool permissions
-- Keep them focused — the agent shares its context window across all container skills
-- Do not hardcode customer-specific values — use env vars or CLAUDE.md annotations
-
-#### Operational skills (host-side workflows)
-
-Instruction-only workflows that run on the host via Claude Code.
-
-**Location:** `.claude/skills/<name>/`
-
-**Examples:** `/setup`, `/debug`, onboarding a new CoPilot customer
-
-#### Feature skills (branch-based)
-
-Larger capabilities that require source code changes. Code lives on a `skill/*` branch; the SKILL.md on `main` contains setup instructions.
-
-**Contributing a feature skill:**
-1. Fork and branch from `main`
-2. Make the code changes
-3. Add a SKILL.md in `.claude/skills/<name>/` — step 1 of the instructions should be merging the branch
-4. Open a PR
-
-### SKILL.md format
-
-```markdown
----
-name: my-skill
-description: What this skill does and when to use it.
----
-
-Instructions here...
-```
-
-- `name`: lowercase, alphanumeric + hyphens, max 64 chars
-- `description`: required — used by Claude to decide when to invoke the skill
-- Keep SKILL.md under 500 lines — move detail to separate reference files
-- Put code in separate files, not inline in the markdown
-
-## Security Considerations
-
-Because Talon handles live security data, contributions touching these areas get extra scrutiny:
-
-| Area | Concern |
-|---|---|
-| `siem/anon_proxy/` | Must not leak PII fields to the cloud model |
-| `siem/anon_proxy/fields.yaml` | New fields must be correctly categorised (token vs preserve) |
-| `mempalace/` | Palace data must never be committed to the repo |
-| `mount-allowlist.json` | Changes that widen write access need justification |
-| MCP server wrappers | Must follow the `_is_native_exec` pattern for container compatibility |
-| `.mcp.json` | New servers must be vetted — they run with container-level access |
-
-## Testing
-
-Test on a real (or realistic) CoPilot environment before submitting. For MCP changes, verify the server starts cleanly inside the container:
+## Development
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | \
-  docker run --rm -i --entrypoint bash nanoclaw-agent \
-  /workspace/extra/<your-tool>/<your-tool>-mcp.sh 2>/dev/null
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+./container/build.sh            # when you touch container/ or talon-agent
 ```
 
-For anonymising proxy changes, confirm tokens round-trip correctly through `deanonymize`.
+CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings` and `cargo test --workspace --locked`; all three must
+pass.
 
-## Pull Requests
+### Code rules
 
-### Description format
+- No `unsafe` (workspace lint) and no `unwrap`/`expect` outside tests.
+- Document public items.
+- Treat everything that comes from an alert, a log line, a web page, a tool
+  result or a container as hostile: fence it with
+  `talon_security::injection::fence_untrusted` before it reaches the model,
+  and never derive identity or permissions from its contents.
+- Record security decisions through `talon_core::audit`.
+- `talon-core` is the host ↔ container contract. Change it deliberately and
+  update both the host (`talon`) and the agent (`talon-agent`) in the same PR.
+- Add tests for every behaviour change; security fixes need a regression test
+  that fails without the fix.
 
-- **What** — what the PR adds or changes
-- **Why** — the motivation
-- **How it works** — brief explanation of the approach
-- **How it was tested** — what you ran to verify it
-- **Security impact** — does this touch PII handling, mounts, or MCP servers?
+## Investigation templates
 
-Keep it concise. A few clear sentences beat lengthy paragraphs.
+Templates in `groups/copilot/prompts/` are plain text and need no code
+changes. See [groups/copilot/prompts/README.md](groups/copilot/prompts/README.md)
+for naming, the variables that are substituted and how the agent selects a
+template.
 
-### Before opening
+## Pull requests
 
-- `Closes #123` in the description if it resolves an open issue
-- No real customer data anywhere in the diff, test output, or description
-- Run `npm run build` and confirm the container builds cleanly
-
----
-
-*Talon is developed and maintained by [SOCfortress](https://www.socfortress.co).*
+- Describe what changed and why, and how you tested it.
+- Keep the PR description free of credentials, internal hostnames and
+  customer data.
+- Update `CHANGELOG.md` for user-visible changes and the docs for changed
+  behaviour or configuration.

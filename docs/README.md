@@ -1,15 +1,12 @@
-# NanoClaw Documentation
+# Talon Documentation
 
-The official documentation is at **[docs.nanoclaw.dev](https://docs.nanoclaw.dev)**.
-
-The files in this directory are original design documents and developer references. For the most current and accurate information, use the documentation site.
-
-| This directory | Documentation site |
+| Document | Contents |
 |---|---|
-| [SPEC.md](SPEC.md) | [Architecture](https://docs.nanoclaw.dev/concepts/architecture) |
-| [SECURITY.md](SECURITY.md) | [Security model](https://docs.nanoclaw.dev/concepts/security) |
-| [REQUIREMENTS.md](REQUIREMENTS.md) | [Introduction](https://docs.nanoclaw.dev/introduction) |
-| [skills-as-branches.md](skills-as-branches.md) | [Skills system](https://docs.nanoclaw.dev/integrations/skills-system) |
-| [DEBUG_CHECKLIST.md](DEBUG_CHECKLIST.md) | [Troubleshooting](https://docs.nanoclaw.dev/advanced/troubleshooting) |
-| [docker-sandboxes.md](docker-sandboxes.md) | [Docker Sandboxes](https://docs.nanoclaw.dev/advanced/docker-sandboxes) |
-| [APPLE-CONTAINER-NETWORKING.md](APPLE-CONTAINER-NETWORKING.md) | [Container runtime](https://docs.nanoclaw.dev/advanced/container-runtime) |
+| [RUST_ARCHITECTURE.md](RUST_ARCHITECTURE.md) | Architecture, crate map, host ↔ container protocol, security contracts |
+| [SECURITY.md](SECURITY.md) | Trust model, boundaries, residual risks, vulnerability reporting |
+| [MYTHOS_REVIEW.md](MYTHOS_REVIEW.md) | Adversarial security review: findings, proofs of concept, fixes |
+| [PROVIDER_SELECTION.md](PROVIDER_SELECTION.md) | vLLM setup, model and parser choice, gateway settings |
+| [COPILOT_INTEGRATION.md](COPILOT_INTEGRATION.md) | CoPilot integration, MySQL schema, MCP tool reference |
+| [ANON_PROXY.md](ANON_PROXY.md) | Anonymizing proxy: flow, token types, `fields.yaml` |
+| [provider-examples/](provider-examples/) | Per-group `container.json` example for vLLM |
+| [../groups/copilot/prompts/README.md](../groups/copilot/prompts/README.md) | Writing alert-type investigation templates |
