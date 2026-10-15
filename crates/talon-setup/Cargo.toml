@@ -1,0 +1,29 @@
+[package]
+name = "talon-setup"
+description = "Installation, environment checks, group registration and service management for Talon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+talon-core = { workspace = true }
+talon-db = { workspace = true }
+talon-security = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+# Private (0700) directory for the nftables ruleset applied by `egress --apply`.
+tempfile = { workspace = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

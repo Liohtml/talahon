@@ -1,0 +1,33 @@
+[package]
+name = "talon-scheduler"
+description = "Per-group container queue and scheduled-task runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+talon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+talon-db = { workspace = true }
+tokio-util = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+# Descriptor-relative IPC input writes (openat/mkdirat/renameat with
+# O_NOFOLLOW) so a container cannot redirect host writes into another lane's
+# `input/` by swapping path components (MYTH-02). Safe API, no `unsafe`.
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# `test-util` enables `tokio::time::pause` / `#[tokio::test(start_paused = true)]`.
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

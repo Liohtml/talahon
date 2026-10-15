@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Talon launchd agent (macOS). Preferred: `talon setup service`, which
+  writes this file with escaped paths. Manual install:
+
+    sed -e "s|{{TALON_BIN}}|$(pwd)/target/release/talon|g" \
+        -e "s|{{PROJECT_ROOT}}|$(pwd)|g" \
+        -e "s|{{HOME}}|$HOME|g" \
+        launchd/com.talon.plist > ~/Library/LaunchAgents/com.talon.plist
+    mkdir -p logs
+    launchctl load ~/Library/LaunchAgents/com.talon.plist
+
+  Secrets (TALON_VLLM_API_KEY, HTTP_API_KEY, bot tokens) belong in
+  {{PROJECT_ROOT}}/.env, never in EnvironmentVariables below: the plist is
+  world-readable and its environment is inherited by child processes.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.talon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{TALON_BIN}}</string>
+        <string>run</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{{PROJECT_ROOT}}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Umask</key>
+    <integer>23</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:{{HOME}}/.local/bin</string>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{{PROJECT_ROOT}}/logs/talon.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{PROJECT_ROOT}}/logs/talon.error.log</string>
+</dict>
+</plist>

@@ -1,18 +1,24 @@
-<!-- contributing-guide: v1 -->
-## Type of Change
+## Type of change
 
-- [ ] **Feature skill** - adds a channel or integration (source code changes + SKILL.md)
-- [ ] **Utility skill** - adds a standalone tool (code files in `.claude/skills/<name>/`, no source changes)
-- [ ] **Operational/container skill** - adds a workflow or agent skill (SKILL.md only, no source changes)
-- [ ] **Fix** - bug fix or security fix to source code
-- [ ] **Simplification** - reduces or simplifies source code
-- [ ] **Documentation** - docs, README, or CONTRIBUTING changes only
+- [ ] **Fix** — bug fix
+- [ ] **Security** — hardening or vulnerability fix
+- [ ] **Feature** — new capability (channel, tool, MCP integration, intel)
+- [ ] **Investigation content** — templates or workflow in `groups/copilot/`
+- [ ] **Refactor / performance**
+- [ ] **Documentation**
 
 ## Description
 
 
-## For Skills
+## Testing
 
-- [ ] SKILL.md contains instructions, not inline code (code goes in separate files)
-- [ ] SKILL.md is under 500 lines
-- [ ] I tested this skill on a fresh clone
+- [ ] `cargo fmt --all --check`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
+- [ ] Container image rebuilt (`./container/build.sh`) if `container/` or `talon-agent` changed
+
+## Security checklist
+
+- [ ] Untrusted data is fenced before it reaches the model
+- [ ] No security boundary is weakened (mounts, container flags, gateway, lane isolation)
+- [ ] No credentials, customer data or internal hostnames in code, fixtures or this description

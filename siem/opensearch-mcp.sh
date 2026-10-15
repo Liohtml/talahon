@@ -1,29 +1,40 @@
 #!/usr/bin/env bash
-# OpenSearch MCP Server wrapper for NanoClaw SIEM.
+# OpenSearch MCP server wrapper for Talon (SIEM).
 #
-# Two execution paths:
+# Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Inside the NanoClaw agent container with per-MCP isolation enabled
-#      (the default for non-main groups). The wrapper detects an isolated
-#      secret file at /etc/mcp-secrets/siem.env and uses sudo to drop privs
-#      to mcp-siem (a dedicated non-privileged uid) before sourcing it.
-#      The agent (running as node uid) cannot read /etc/mcp-secrets/siem.env.
+#   1. Talon agent container. `talon-agent supervise` starts this script
+#      directly as the dedicated `mcp-siem` user (`"runAs": "mcp-siem"` in the
+#      group's .mcp.json). The entrypoint staged the credentials at
+#      /etc/mcp-secrets/siem.env (owner mcp-siem, mode 0600) — nobody else,
+#      including the agent, can read them; the visible siem/.env is shadowed
+#      with /dev/null. Only the image's system install is executed here.
 #
-#   2. Legacy / host fallback. When the isolated secret file isn't present
-#      (host install with `claude` from siem/ dir, or older container
-#      without the isolation pattern), the wrapper falls back to sourcing
-#      siem/.env directly from this script's directory.
+#   2. Dev / host. No /etc/mcp-secrets/siem.env: source siem/.env next to this
+#      script and prefer the local venv.
 #
-# This script is called by Claude Code as the MCP server command.
-# Do not run it directly — use `claude` from the siem/ directory instead.
+# Started by the agent runtime as an MCP server command; not for direct use.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Never let an (agent-writable) working directory shadow Python modules.
+cd /
+export PYTHONSAFEPATH=1
 
 LOCAL_MCP="$SCRIPT_DIR/.venv/bin/opensearch-mcp-server"
 SYSTEM_MCP="/opt/opensearch-mcp/bin/opensearch-mcp-server"
 ISOLATED_ENV="/etc/mcp-secrets/siem.env"
+TAG="[opensearch-mcp]"
+
+_err() { echo "$TAG ERROR: $*" >&2; }
+
+_load_env() {
+    set -a
+    # shellcheck source=/dev/null
+    source "$1"
+    set +a
+}
 
 _is_native_exec() {
     local bin="$1"
@@ -36,40 +47,40 @@ _is_native_exec() {
     return 0
 }
 
-# === Container path: isolated mcp-siem uid ===
-# /etc/mcp-secrets/siem.env is owned by mcp-siem:mcp-siem with mode 600.
-# `sudo -n -u mcp-siem` drops privs (NOPASSWD configured at build time).
-# `-E` would preserve env, but we don't need it — the secret is sourced
-# AFTER the priv drop, inside the new shell, so only mcp-siem ever reads it.
-if [[ -f "$ISOLATED_ENV" ]] && [[ -x "$SYSTEM_MCP" ]] && command -v sudo >/dev/null 2>&1; then
-    exec sudo -n -u mcp-siem /bin/bash -c "
-        set -a
-        source '$ISOLATED_ENV'
-        set +a
-        exec '$SYSTEM_MCP'
-    "
+# === Container: isolated mcp-siem account ===
+if [[ -e "$ISOLATED_ENV" ]]; then
+    if [[ "$(id -u)" == "0" ]]; then
+        _err "refusing to run as root; the supervisor must start this server as mcp-siem"
+        exit 1
+    fi
+    if [[ ! -r "$ISOLATED_ENV" ]]; then
+        _err "$ISOLATED_ENV is not readable by uid $(id -u); set \"runAs\": \"mcp-siem\" in .mcp.json"
+        exit 1
+    fi
+    _load_env "$ISOLATED_ENV"
+    if [[ ! -x "$SYSTEM_MCP" ]]; then
+        _err "opensearch-mcp-server is not installed in the image (rebuild: container/build.sh)"
+        exit 1
+    fi
+    exec "$SYSTEM_MCP"
 fi
 
-# === Fallback: legacy path (host install, or container without isolation) ===
+# === Dev / host: local .env ===
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/.env"
-    set +a
+    _load_env "$SCRIPT_DIR/.env"
 else
-    echo "[opensearch-mcp] ERROR: .env not found at $SCRIPT_DIR/.env" >&2
-    echo "[opensearch-mcp] Run setup.sh first and fill in your OpenSearch credentials." >&2
+    _err ".env not found at $SCRIPT_DIR/.env"
+    _err "Run setup.sh first and fill in your OpenSearch credentials."
     exit 1
 fi
 
 if _is_native_exec "$LOCAL_MCP"; then
     exec "$LOCAL_MCP"
 elif [[ -x "$SYSTEM_MCP" ]]; then
-    # System venv pre-installed in the NanoClaw container image
     exec "$SYSTEM_MCP"
 else
-    echo "[opensearch-mcp] ERROR: opensearch-mcp-server not found." >&2
-    echo "[opensearch-mcp]   In a container: rebuild the image (container/build.sh)" >&2
-    echo "[opensearch-mcp]   On the host: run siem/setup.sh" >&2
+    _err "opensearch-mcp-server not found."
+    _err "  In a container: rebuild the image (container/build.sh)"
+    _err "  On the host: run siem/setup.sh"
     exit 1
 fi

@@ -1,109 +1,112 @@
-# Agent Provider Selection
+# Model Provider: vLLM
 
-Talon supports two agent providers: **Anthropic** (default, cloud) and **Ollama** (fully-local / air-gapped). Switching is `.env`-driven for single-tenant installs, with an optional per-group override for multi-tenant deployments.
+Talon 2.0 runs its agents against a **vLLM** server through vLLM's
+OpenAI-compatible API (`/v1/chat/completions` with tool calling and
+structured outputs). Ollama and the Anthropic/Claude Agent SDK path of the
+TypeScript release are gone: the agent loop is now native Rust
+(`crates/talon-agent`), so any model vLLM can serve with a working tool-call
+parser can drive an investigation.
 
 ## TL;DR
 
 ```bash
-# /opt/talon/.env  (or repo root .env in dev)
-
-# Default — Anthropic via OneCLI gateway. Leave unset, no action needed.
-# TALON_PROVIDER=anthropic
-
-# Air-gapped — redirect Claude SDK at a local Ollama instance.
-TALON_PROVIDER=ollama
-TALON_OLLAMA_BASE_URL=http://host.docker.internal:11434
-TALON_OLLAMA_MODEL=llama3.3:70b
-TALON_OLLAMA_API_KEY=ollama   # optional, defaults to "ollama"
+# /opt/talon/.env
+TALON_VLLM_BASE_URL=http://vllm.internal:8000
+TALON_VLLM_MODEL=Qwen/Qwen3-32B
+TALON_VLLM_FAST_MODEL=Qwen/Qwen3-8B        # optional: compaction / extraction
+TALON_VLLM_MAX_CONTEXT=131072              # model context window (tokens)
+TALON_VLLM_API_KEY=...                     # only if vLLM runs with --api-key
 ```
 
-Restart Talon. Every group inherits the provider.
+Restart Talon. Every group inherits the provider; per-group overrides live in
+the group's `containerConfig.vllm` (see `crates/talon-core/src/types.rs`).
 
-## How it works under the hood
+## Starting vLLM
 
-Ollama 0.4+ speaks the Anthropic `/v1/messages` API natively. When `TALON_PROVIDER=ollama`, the container-runner:
+Tool calling must be enabled server-side, with the parser matching the model
+family:
 
-1. Skips the OneCLI credential gateway (no upstream secrets to inject).
-2. Injects `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` env vars so the Claude Agent SDK redirects to Ollama.
-3. Injects `NO_PROXY` for the Ollama host so any HTTPS_PROXY doesn't intercept the redirect.
-4. Upserts `model` into the per-group `.claude/settings.json` so the SDK picks the local Ollama model.
-5. Routes `api.anthropic.com` to `127.0.0.1` via `--add-host` to fail-closed on escape attempts.
+```bash
+vllm serve Qwen/Qwen3-32B \
+  --served-model-name Qwen/Qwen3-32B \
+  --enable-auto-tool-choice --tool-call-parser hermes \
+  --reasoning-parser qwen3 \
+  --enable-prefix-caching \
+  --max-model-len 131072 \
+  --api-key "$VLLM_API_KEY"
+```
 
-When `TALON_PROVIDER=anthropic` (or unset), none of the above happens — the existing OneCLI gateway path handles authentication.
+| Model family | `--tool-call-parser` | Notes |
+|---|---|---|
+| Qwen2.5 / Qwen3 (instruct) | `hermes` | Qwen3: add `--reasoning-parser qwen3`; `TALON_VLLM_ENABLE_THINKING` toggles thinking |
+| Llama 3.1 / 3.3 | `llama3_json` | 70B recommended for full investigations |
+| Mistral / Mistral-Small | `mistral` | |
+| DeepSeek-V3 / R1 distills | `deepseek_v3` / `hermes` | |
 
-## Per-group overrides (multi-tenant)
+If a model or server emits tool calls as plain text anyway (Hermes
+`<tool_call>`, Mistral `[TOOL_CALLS]`, Llama `<|python_tag|>`, fenced JSON),
+`talon-llm` recovers them client-side and only accepts tools that were
+actually offered.
 
-For the rare case where one customer should run a different provider, drop a `container.json` into the group folder. See `docs/provider-examples/`. Per-group settings take precedence over `.env` defaults.
+**Prefix caching matters.** Talon keeps the system prompt byte-stable across
+turns (volatile data such as the current time goes into the first user
+message), so `--enable-prefix-caching` turns most of each turn's prompt into
+cache hits. Cache hits are reported back to the host as
+`cache_read_input_tokens`.
+
+## How requests flow
+
+```
+talon-agent (container) ──Bearer <per-run token>──▶ talon LLM gateway (host) ──Bearer <vLLM key>──▶ vLLM
+```
+
+The host starts an LLM gateway (`crates/talon-llm`, default
+`TALON_LLM_GATEWAY_PORT=3001`, bound to the docker bridge address on Linux).
+For every container run it issues a short-lived token and passes the
+endpoint to the container **over stdin** — never in environment variables, so
+it is invisible to `docker inspect` and to tool subprocesses. The gateway:
+
+- validates the per-run token (stored only as a SHA-256 digest; revoked when
+  the run ends),
+- injects the real vLLM API key, which never enters a container,
+- pins the model to the configured allow-list (unknown model -> default),
+- clamps `max_tokens`, forces `n = 1`, strips server-side knobs such as
+  `chat_template`, `logits_processors`, `best_of`, `vllm_xargs`,
+- rate-limits and concurrency-limits per token, caps body size,
+- counts usage per group and audits authentication failures.
+
+## Settings
+
+| Key | Default | Meaning |
+|---|---|---|
+| `TALON_VLLM_BASE_URL` | — | vLLM server URL (required) |
+| `TALON_VLLM_MODEL` | — | served model name (required) |
+| `TALON_VLLM_FAST_MODEL` | `MODEL` | auxiliary model for compaction / summarisation |
+| `TALON_VLLM_MAX_CONTEXT` | 32768 | context window; drives compaction (~75 %) |
+| `TALON_VLLM_MAX_OUTPUT` | — | max output tokens per completion |
+| `TALON_VLLM_TEMPERATURE`, `TALON_VLLM_TOP_P` | server default | sampling |
+| `TALON_VLLM_ENABLE_THINKING` | — | `chat_template_kwargs.enable_thinking` |
+| `TALON_VLLM_TIMEOUT_SECS` | — | per-request timeout |
+| `TALON_VLLM_API_KEY` | — | secret; read from `.env` only, held by the gateway |
+| `TALON_LLM_GATEWAY_PORT` | 3001 | gateway port |
+| `TALON_LLM_GATEWAY_BIND` | auto | override the auto-detected bind address |
+| `TALON_BLOCKED_HOSTS` | — | hosts routed to 127.0.0.1 in every container |
+
+Legacy `TALON_PROVIDER=ollama|anthropic` and `TALON_OLLAMA_*` values are
+ignored with a warning; stored group configs with `"provider":"ollama"` are
+tolerated and fall back to the `.env` vLLM defaults.
 
 ## Model selection
 
-Native long-context models (no YaRN tricks needed):
+Practical floor for the full SOC investigation flow (10 MCP servers, 100+
+tools, multi-step reasoning) is a strong ~30B instruct model; 70B-class or
+large MoE models give the most reliable tool discipline. Pair a large primary
+model with a small `TALON_VLLM_FAST_MODEL` for compaction to keep long
+sessions cheap.
 
-| Model | Native ctx | Tool reliability | Min VRAM (Q4) |
-|-------|-----------|------------------|----------------|
-| `llama3.1:8b` | 128K | OK for simple flows; struggles on 100+ tool selection | ~6 GB |
-| `qwen2.5:14b-instruct-1m` | 1M | Solid | ~10 GB |
-| `qwen2.5:32b-instruct` | 32K native (no extension) | Reliable, self-corrects schemas | ~25 GB |
-| `llama3.3:70b` | 128K | Best general-purpose, full Claude Code scaffold | ~50-60 GB |
-
-Avoid `*-coder` variants — broken tool templates emit stringified JSON instead of `tool_use` blocks.
-
-## Latency expectations
-
-For the SOC-analyst preset (full Claude Code system prompt + 10 MCP servers + 100+ tool schemas):
-
-| Stack | Per-turn (warm, with MCP tool) |
-|-------|--------------------------------|
-| Anthropic Claude (cloud) | 3-15 s |
-| Ollama on H200 (70B) | 60-100 s |
-| Ollama on A100 80GB (70B) | 80-120 s |
-| Ollama on consumer 24GB (8B) | 10-20 s but tool discipline weak |
-
-The cloud-vs-local gap is structural (no server-side prompt cache, no batching, no proprietary kernels). For interactive triage, Anthropic mode is the right default. For scheduled investigations or compliance-driven air-gap, Ollama works.
-
-## Operator workflow examples
-
-**Switching to Ollama:**
+## Verifying
 
 ```bash
-cat >> /opt/talon/.env <<'EOF'
-TALON_PROVIDER=ollama
-TALON_OLLAMA_BASE_URL=http://host.docker.internal:11434
-TALON_OLLAMA_MODEL=llama3.3:70b
-EOF
-
-# Restart (macOS)
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
-
-# Restart (Linux)
-systemctl --user restart nanoclaw
-```
-
-**Switching back to Anthropic:**
-
-```bash
-# Remove the Ollama lines from .env, then restart.
-# The container-runner will strip the leftover `model` field from
-# .claude/settings.json on next spawn — no manual cleanup needed.
-```
-
-## Failure modes & defenses
-
-- **Ollama endpoint unreachable**: Container hangs and gets reaped by Talon's idle timeout. No fallback to Anthropic — fail-closed.
-- **`api.anthropic.com` reachable from container**: Routed to 127.0.0.1 — DNS fails, request errors. Defense in depth.
-- **Model emits hallucinated tool results**: Inspect the per-session JSONL at `data/sessions/<group>/.claude/projects/-workspace-group/<sessionId>.jsonl` — look for `tool_use` blocks vs plain text content. If only text, the model isn't calling tools (use a larger model).
-
-## Verification smoke
-
-```bash
-# Unit: provider arg derivation (5 cases)
-node scripts/smoke-provider-args.mjs
-
-# Unit: .env loading + merge precedence (8 cases)
-node scripts/smoke-env-provider.mjs
-
-# Live: send a message via HTTP channel and watch container logs
-curl -sS -X POST http://localhost:3100/message \
-  -H 'x-api-key: <your HTTP_API_KEY>' -H 'content-type: application/json' \
-  -d '{"message":"Reply with: PROVIDER-OK","sender":"smoketest"}'
+talon setup vllm      # probes <base>/v1/models, checks MODEL and FAST_MODEL are served
+talon doctor          # environment + container + gateway + vLLM in one report
 ```

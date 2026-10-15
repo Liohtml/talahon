@@ -1,0 +1,41 @@
+[package]
+name = "talon-http"
+description = "CoPilot HTTP API channel (investigations, SSE chat, status, palace)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+talon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+talon-db = { workspace = true }
+talon-security = { workspace = true }
+talon-net = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+# Descriptor-relative, no-follow reads of agent-writable directories (MYTH-10).
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

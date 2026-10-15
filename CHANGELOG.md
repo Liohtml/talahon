@@ -1,8 +1,22 @@
 # Changelog
 
-All notable changes to NanoClaw will be documented in this file.
+All notable changes to Talon are documented in this file. Entries before 2.0.0 refer to the TypeScript release that was based on NanoClaw.
 
-For detailed release notes, see the [full changelog on the documentation site](https://docs.nanoclaw.dev/changelog).
+## [2.0.0] - 2026-10-14 — Talon 2.0 (Rust rewrite)
+
+- [BREAKING] Complete rewrite in Rust (Cargo workspace under `crates/`): host orchestrator `talon` and in-container runtime `talon-agent` replace the Node.js host and the Claude Agent SDK runner. Existing `store/messages.db` databases are migrated in place.
+- [BREAKING] Model provider is now **vLLM** (OpenAI-compatible API, tool calling, guided JSON decoding). Ollama and Anthropic modes are removed; configure `TALON_VLLM_*` (see `docs/PROVIDER_SELECTION.md`).
+- [BREAKING] CLI: `talon run | setup <step> | doctor | audit verify|tail | version`. Service label `com.talon` / unit `talon`.
+- [BREAKING] Unset `HTTP_API_KEY` now rejects every request except `/health`; the Emacs bridge requires `EMACS_AUTH_TOKEN`; webhooks to private addresses need `WEBHOOK_ALLOWED_HOSTS`.
+- Host LLM gateway with per-run tokens (the vLLM key never enters a container), model pinning, parameter stripping, rate limits.
+- Privilege-separated container: root supervisor runs each MCP server as its own `mcp-*` user; agent runs unprivileged; cap-drop ALL, no-new-privileges, read-only rootfs, `--init`, resource limits; no sudo or node in the image.
+- Prompt-injection fencing and detection, secret redaction, SSRF-safe egress, hardened IPC, hash-chained audit log (`talon audit verify`).
+- New offline intelligence engine (`talon-intel`): IOC extraction, MITRE ATT&CK mapping, command-line analysis, triage scoring, correlation, structured `submit_triage_report` verdicts.
+- Anonymizing proxy rewritten in Rust (`talon-anon-proxy`) with more token classes and detectors; map format unchanged.
+- New HTTP endpoints: `GET /investigations`, `GET /investigations/{id}`, `GET /metrics`; investigation deduplication.
+- Independent adversarial security review (three rounds, see `docs/MYTHOS_REVIEW.md`) with all findings fixed.
+- Removed the TypeScript implementation (`src/`, `container/agent-runner/`, `setup/`, npm tooling), the Ollama MCP wrapper, OneCLI scripts and the NanoClaw skills that patched TypeScript sources; they remain available in the git history.
+- [UPGRADE] Reset `groups/*/prompts/` and `groups/copilot/notifications.md` from git after upgrading (they are read-only inside containers now; anything planted earlier would be trusted). Per-user CoPilot sessions start fresh (new lane keys). `sudo chown -R 61008:61008 mempalace-data`.
 
 ## [1.2.36] - 2026-03-26
 

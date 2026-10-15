@@ -1,15 +1,15 @@
-# NanoClaw × CoPilot Integration
+# Talon × CoPilot Integration
 
 > **Status:** In progress — MCP write-back tools under development in CoPilot.
 
-This document describes the architecture for integrating the NanoClaw AI analyst with the SOCfortress CoPilot application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
+This document describes the architecture for integrating the Talon AI analyst with the SOCfortress CoPilot application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
 
 ---
 
 ## Design Principles
 
-- **CoPilot is the database of record.** All investigation results, job status, and extracted IOCs are stored in CoPilot's MySQL database — not in NanoClaw's SQLite store.
-- **NanoClaw is the AI brain.** It detects alert types, loads the right analysis template, queries the SIEM, runs threat intel, and produces structured reports.
+- **CoPilot is the database of record.** All investigation results, job status, and extracted IOCs are stored in CoPilot's MySQL database — not in Talon's SQLite store.
+- **Talon is the AI brain.** It detects alert types, loads the right analysis template, queries the SIEM, runs threat intel, and produces structured reports.
 - **The agent never writes directly to MySQL.** The MySQL MCP tool is read-only. Agent write-back goes through a CoPilot REST API, which validates and persists results. This keeps the database boundary clean and auditable.
 - **Both trigger paths produce identical output.** Whether an investigation is started by a real-time `POST /investigate` call or the 15-minute scheduled task, the agent runs the same workflow and writes back through the same API.
 
@@ -19,12 +19,12 @@ This document describes the architecture for integrating the NanoClaw AI analyst
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   CoPilot (FastAPI)                  │
+│                  CoPilot (FastAPI)                  │
 │                                                     │
 │  Alert created ──► POST /investigate ──────────────┐│
 │                                                    ││
-│  GET /nanoclaw/status   ◄──── NanoClaw HTTP API    ││
-│  GET /nanoclaw/jobs/:id ◄──── NanoClaw HTTP API    ││
+│  GET /nanoclaw/status   ◄──── Talon HTTP API       ││
+│  GET /nanoclaw/jobs/:id ◄──── Talon HTTP API       ││
 │                                                    ││
 │  MCP write-back tools:                             ││
 │    POST /api/v1/ai-analyst/jobs       ◄────────────┘│
@@ -39,7 +39,7 @@ This document describes the architecture for integrating the NanoClaw AI analyst
           │  read-only MCP              ▲ REST write-back
           ▼                             │
 ┌─────────────────────────────────────────────────────┐
-│                  NanoClaw (Node.js)                  │
+│                    Talon (Rust)                     │
 │                                                     │
 │  HTTP channel (port 3100)                           │
 │    POST /investigate   ← CoPilot triggers this      │
@@ -54,7 +54,7 @@ This document describes the architecture for integrating the NanoClaw AI analyst
 │                                                     │
 │  Copilot container agent                            │
 │    groups/copilot/CLAUDE.md   ← investigation flow  │
-│    groups/copilot/prompts/    ← per-alert templates  │
+│    groups/copilot/prompts/    ← per-alert templates │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -68,7 +68,7 @@ CoPilot calls this endpoint immediately when an alert is created (or when an ana
 
 **Request:**
 ```json
-POST http://nanoclaw:3100/investigate
+POST http://talon:3100/investigate
 {
   "alert_id": 1234,
   "customer_code": "acme",
@@ -76,7 +76,7 @@ POST http://nanoclaw:3100/investigate
 }
 ```
 
-**NanoClaw behaviour:**
+**Talon behaviour:**
 1. Creates a job row in `ai_analyst_job` (status = `pending`) via the CoPilot write-back API
 2. Enqueues the investigation into the copilot group container
 3. Returns `{ "job_id": "..." }` immediately (investigation runs async)
@@ -197,7 +197,7 @@ CREATE TABLE ai_analyst_ioc (
 
 The agent has **read-only** access to MySQL. All writes go through CoPilot REST API endpoints exposed as MCP tools in the agent's environment. CoPilot validates the payload and persists results.
 
-> **Status:** MCP tools under development in CoPilot. NanoClaw-side integration pending.
+> **Status:** MCP tools under development in CoPilot. Talon-side integration pending.
 
 ### MCP Tools (from `github.com/socfortress/copilot-mcp-server`)
 
@@ -241,7 +241,7 @@ The agent has **read-only** access to MySQL. All writes go through CoPilot REST 
 
 ---
 
-## NanoClaw HTTP API
+## Talon HTTP API
 
 Endpoints on the HTTP channel (default port `3100`) that CoPilot can call or display:
 
@@ -259,11 +259,11 @@ Endpoints on the HTTP channel (default port `3100`) that CoPilot can call or dis
 
 ## CoPilot UI Integration (Planned)
 
-Once the write-back API and NanoClaw endpoints are in place, CoPilot can surface:
+Once the write-back API and Talon endpoints are in place, CoPilot can surface:
 
 - **Alert detail page** — "AI Analysis" tab: severity badge, summary, full report, IOC table
 - **Alert list** — status column: `⚡ Analyzed` / `⏳ Analyzing` / `✗ Failed` / `—`
-- **Dashboard widget** — NanoClaw queue: N running, N completed today, N failed
+- **Dashboard widget** — Talon queue: N running, N completed today, N failed
 - **IOC browser** — filter by `vt_verdict = 'malicious'` across all AI-discovered IOCs
 - **"Analyze with AI" button** — calls `POST /investigate`, shows a spinner, auto-refreshes
 
@@ -287,11 +287,11 @@ Analyst reads AI report in CoPilot UI
   │
   ├─► Teach the palace (free-text lesson + room dropdown)
   │     CoPilot queues the lesson in ai_analyst_palace_lesson
-  │     Async drainer POSTs to NanoClaw → POST /palace/lesson
-  │     NanoClaw wraps the MemPalace MCP call (mempalace_add_drawer / mempalace_kg_add)
+  │     Async drainer POSTs to Talon → POST /palace/lesson
+  │     Talon wraps the MemPalace MCP call (mempalace_add_drawer / mempalace_kg_add)
   │
   ├─► Re-run with different template
-  │     CoPilot → POST /investigate (NanoClaw) with template_override
+  │     CoPilot → POST /investigate (Talon) with template_override
   │     New job runs, side-by-side diff shown in UI
   │
   └─► Flag template issue (missed step, wrong choice, etc.)
@@ -327,7 +327,7 @@ The reviewer writes prose; the system handles MCP tool names, wing/room routing,
 │   • Threat intel — IOC seen in this environment     │
 │ Lesson: [ DC01 runs SCCM patching at 02:00, expect │
 │           svchost children in that window        ] │
-│ Similar existing lessons: (CoPilot → GET /palace/search on NanoClaw) │
+│ Similar existing lessons: (CoPilot → GET /palace/search on Talon) │
 │ Durability: ( ) one-off  (•) durable                │
 │ [ Save to palace ]                                 │
 └─────────────────────────────────────────────────────┘
@@ -394,17 +394,17 @@ CREATE TABLE ai_analyst_palace_lesson (
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/ai_analyst/reports/{report_id}/review` | Submit a review (rubric + thumbs + template verdict) |
-| `POST /api/ai_analyst/reports/{report_id}/replay` | Trigger `POST /investigate` on NanoClaw with `template_override` |
+| `POST /api/ai_analyst/reports/{report_id}/replay` | Trigger `POST /investigate` on Talon with `template_override` |
 | `POST /api/ai_analyst/palace_lessons` | Queue a teach-the-palace lesson for async ingestion |
 | `GET /api/ai_analyst/reviews/customer/{customer_code}` | Feed the Feedback Dashboard |
-| `GET /api/ai_analyst/palace_lessons/customer/{customer_code}` | List already-ingested lessons for the UI's similar-lessons preview (proxies `GET /palace/search` on NanoClaw) |
+| `GET /api/ai_analyst/palace_lessons/customer/{customer_code}` | List already-ingested lessons for the UI's similar-lessons preview (proxies `GET /palace/search` on Talon) |
 
 **Async palace ingestion drainer (CoPilot-side)**
 
-MemPalace itself runs inside NanoClaw — CoPilot does not hold an MCP client and does not talk to the palace directly. Instead, a lightweight CoPilot worker drains `ai_analyst_palace_lesson` where `status = 'pending'` and POSTs each row to the NanoClaw HTTP endpoint:
+MemPalace itself runs inside Talon — CoPilot does not hold an MCP client and does not talk to the palace directly. Instead, a lightweight CoPilot worker drains `ai_analyst_palace_lesson` where `status = 'pending'` and POSTs each row to the Talon HTTP endpoint:
 
 ```
-POST http://nanoclaw:3100/palace/lesson
+POST http://talon:3100/palace/lesson
 Authorization: Bearer <HTTP_API_KEY>
 {
   "customer_code": "acme",
@@ -414,18 +414,18 @@ Authorization: Bearer <HTTP_API_KEY>
 }
 ```
 
-On a `2xx` response the worker marks the row `ingested`; on failure it retries with backoff and marks `failed` after N attempts. CoPilot's responsibility ends at the HTTP call — NanoClaw owns the MemPalace write, room/wing routing, and durability metadata.
+On a `2xx` response the worker marks the row `ingested`; on failure it retries with backoff and marks `failed` after N attempts. CoPilot's responsibility ends at the HTTP call — Talon owns the MemPalace write, room/wing routing, and durability metadata.
 
-Similarly, the **live similar-lessons preview** in the teach-the-palace UI is served by CoPilot proxying to NanoClaw's `GET /palace/search` rather than hitting MemPalace directly.
+Similarly, the **live similar-lessons preview** in the teach-the-palace UI is served by CoPilot proxying to Talon's `GET /palace/search` rather than hitting MemPalace directly.
 
-### NanoClaw (Talon) side
+### Talon side
 
 **Eval output alongside every investigation**
 
 The copilot agent writes a structured eval file at the end of Step 6 of the workflow. One per investigation, siblings to the transcript in `groups/copilot/logs/`:
 
 ```
-groups/copilot/evals/<alert_id>-<job_id>.json
+data/sessions/copilot-investigate/evals/<alert_id>-<job_id>.json   # /home/agent/.talon/evals/ inside the container
 ```
 
 ```json
@@ -435,12 +435,11 @@ groups/copilot/evals/<alert_id>-<job_id>.json
   "customer_code": "acme",
   "alert_name": "Suspicious PowerShell",
   "template_used": "sysmon_event_1.txt",
-  "selection_method": "ollama",
+  "selection_method": "hints",
   "template_override": null,
   "tools_called": [
     "mcp__mysql__query",
     "mcp__opensearch_anon__get_document",
-    "mcp__ollama__ollama_generate",
     "mcp__velociraptor__GetAgentInfo",
     "mcp__velociraptor__CollectArtifactTool:Windows.System.Pslist"
   ],
@@ -448,28 +447,27 @@ groups/copilot/evals/<alert_id>-<job_id>.json
   "ioc_count": 4,
   "severity": "Suspicious",
   "duration_sec": 87,
-  "ollama_model": "qwen2.5:7b",
   "palace_lessons_recalled": 2
 }
 ```
 
 The CoPilot Feedback Dashboard reads these to compute selection-accuracy and tool-usage stats without parsing transcripts.
 
-**New HTTP endpoints on the NanoClaw channel**
+**New HTTP endpoints on the Talon channel**
 
-NanoClaw is the sole owner of MemPalace — every palace interaction from CoPilot goes through these endpoints, not through an MCP client on the CoPilot side.
+Talon is the sole owner of MemPalace — every palace interaction from CoPilot goes through these endpoints, not through an MCP client on the CoPilot side.
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /investigate` *(extended)* | Now accepts `template_override: "<filename>"` — agent skips Step 2.5 selection and loads that template directly |
-| `POST /palace/lesson` | Wraps `mempalace_add_drawer`. Body: `{ customer_code, lesson_type, lesson_text, durability }`. NanoClaw maps `customer_code → wing` and `lesson_type → room`, writes the drawer, and returns `{ drawer_id, ingested_at }`. Called by CoPilot's async drainer. |
+| `POST /palace/lesson` | Wraps `mempalace_add_drawer`. Body: `{ customer_code, lesson_type, lesson_text, durability }`. Talon maps `customer_code → wing` and `lesson_type → room`, writes the drawer, and returns `{ drawer_id, ingested_at }`. Called by CoPilot's async drainer. |
 | `GET /palace/search` | Wraps `mempalace_search`. Query: `?customer_code=<code>&room=<room>&query=<text>&limit=<n>`. Powers the similar-lessons preview in the teach-the-palace UI. |
 | `GET /evals/:alertId` | Returns the eval JSON for a given alert — used by the CoPilot dashboard |
 
 **Investigation workflow changes**
 
-- **Step 2.5** — if the job was created with `template_override`, skip Ollama ranking and filename fallback; load the override directly. Log `selection_method: "override"` in the eval.
-- **Step 6 (end of write-back)** — write the eval JSON to `groups/copilot/evals/`.
+- **Step 2.5** — if the job was created with `template_override`, skip template ranking and filename fallback; load the override directly. Log `selection_method: "override"` in the eval.
+- **Step 6 (end of write-back)** — write the eval JSON to `data/sessions/copilot-investigate/evals/` (the investigation lane's private state dir, `/home/agent/.talon/evals/` in the container).
 - **Step 0.5 enhancement** — record how many palace lessons were recalled into the eval; powers the "hit rate" metric on the dashboard.
 
 **MemPalace room taxonomy for reviews**
@@ -510,23 +508,23 @@ Reviews can generate lessons fast. Two guards keep the palace useful:
 
 | # | Item | Owner | Status |
 |---|------|-------|--------|
-| 1 | Alert-type prompt templates (`sysmon_event_1.txt`) | NanoClaw | ✅ Done |
-| 2 | Investigation workflow + index mapping step (CLAUDE.md) | NanoClaw | ✅ Done |
-| 3 | Upgraded scheduled task (full investigation per alert) | NanoClaw | ✅ Done |
+| 1 | Alert-type prompt templates (`sysmon_event_1.txt`) | Talon | ✅ Done |
+| 2 | Investigation workflow + index mapping step (CLAUDE.md) | Talon | ✅ Done |
+| 3 | Upgraded scheduled task (full investigation per alert) | Talon | ✅ Done |
 | 4 | MySQL schema: `ai_analyst_job/report/ioc` tables | CoPilot | ✅ Done |
 | 5 | CoPilot write-back REST API endpoints | CoPilot | ✅ Done |
-| 6 | CoPilot MCP server (`copilot-mcp-server`) + NanoClaw integration | Both | ✅ Done |
-| 7 | Scheduled task deduplication + full write-back with real tool names | NanoClaw | ✅ Done |
-| 8 | `POST /investigate` endpoint in NanoClaw | NanoClaw | ✅ Done |
-| 9 | `GET /status` endpoint in NanoClaw | NanoClaw | ✅ Done |
-| 10 | Additional prompt templates (events 3, 7, 11, 22) | NanoClaw | ✅ Done |
+| 6 | CoPilot MCP server (`copilot-mcp-server`) + Talon integration | Both | ✅ Done |
+| 7 | Scheduled task deduplication + full write-back with real tool names | Talon | ✅ Done |
+| 8 | `POST /investigate` endpoint in Talon | Talon | ✅ Done |
+| 9 | `GET /status` endpoint in Talon | Talon | ✅ Done |
+| 10 | Additional prompt templates (events 3, 7, 11, 22) | Talon | ✅ Done |
 | 11 | CoPilot UI: alert analysis tab + status badges | CoPilot | ✅ Done |
-| 12 | Eval JSON output per investigation (`groups/copilot/evals/`) + `GET /evals/:alertId` endpoint | NanoClaw | ✅ Done |
-| 13 | `template_override` param on `POST /investigate` | NanoClaw | ✅ Done |
-| 14 | NanoClaw palace HTTP endpoints: `POST /palace/lesson` + `GET /palace/search` wrapping MemPalace MCP tools | NanoClaw | ✅ Done |
+| 12 | Eval JSON output per investigation (`data/sessions/copilot-investigate/evals/`) + `GET /evals/:alertId` endpoint | Talon | ✅ Done |
+| 13 | `template_override` param on `POST /investigate` | Talon | ✅ Done |
+| 14 | Talon palace HTTP endpoints: `POST /palace/lesson` + `GET /palace/search` wrapping MemPalace MCP tools | Talon | ✅ Done |
 | 15 | Review MySQL tables (`ai_analyst_review`, `ai_analyst_ioc_review`, `ai_analyst_palace_lesson`) | CoPilot | ✅ Done |
 | 16 | CoPilot REST endpoints: review submit, replay, palace lesson queue | CoPilot | ✅ Done |
-| 17 | CoPilot async palace drainer (POSTs queued lessons to NanoClaw `/palace/lesson`) | CoPilot | ✅ Done |
+| 17 | CoPilot async palace drainer (POSTs queued lessons to Talon `/palace/lesson`) | CoPilot | ✅ Done |
 | 18 | CoPilot UI: inline review panel + teach-the-palace | CoPilot | ✅ Done |
 | 19 | CoPilot UI: re-run / A-B template comparison modal | CoPilot | ✅ Done |
 | 20 | CoPilot UI: feedback dashboard (selection accuracy, flagged steps, lesson hit rate) | CoPilot | ✅ Done |

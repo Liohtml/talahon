@@ -1,0 +1,21 @@
+{
+  "_comment": "PER-GROUP OVERRIDE (rare). Single-tenant installs set TALON_VLLM_* in /opt/talon/.env and need no per-group config. This is a group's containerConfig: a dedicated model on the gateway's vLLM upstream (add it to the gateway allow-list), tighter resource limits and extra fail-closed host blocks. The vLLM API key is never stored here; it lives only in .env (TALON_VLLM_API_KEY) and is held by the host LLM gateway.",
+
+  "timeout": 900000,
+  "provider": "vllm",
+  "vllm": {
+    "baseUrl": "http://vllm.internal:8000",
+    "model": "meta-llama/Llama-3.3-70B-Instruct",
+    "fastModel": "Qwen/Qwen3-8B",
+    "maxContextTokens": 131072,
+    "temperature": 0.2
+  },
+  "memory": "6g",
+  "cpus": 2,
+  "pidsLimit": 512,
+  "blockedHosts": [
+    "api.openai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com"
+  ]
+}

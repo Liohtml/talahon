@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
-# Wazuh MCP Server wrapper for NanoClaw.
+# Wazuh MCP server wrapper for Talon.
 #
-# Two execution paths:
+# Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Inside the NanoClaw agent container with per-MCP isolation enabled.
-#      The wrapper detects an isolated secret at /etc/mcp-secrets/wazuh.env
-#      and uses sudo to drop privs to mcp-wazuh before sourcing it. The
-#      agent (running as node uid) cannot read /etc/mcp-secrets/wazuh.env.
+#   1. Talon agent container. `talon-agent supervise` starts this script
+#      directly as `mcp-wazuh` (`"runAs": "mcp-wazuh"` in .mcp.json). The
+#      credentials were staged at /etc/mcp-secrets/wazuh.env (owner
+#      mcp-wazuh, mode 0600); the visible wazuh-mcp/.env is shadowed with
+#      /dev/null. Only the image's system install is executed here.
 #
-#   2. Legacy / host fallback. When the isolated secret isn't present
-#      (host install or older container), the wrapper falls back to
-#      sourcing wazuh-mcp/.env directly.
-#
-# This script is called by Claude Code as the MCP server command.
+#   2. Dev / host. Source wazuh-mcp/.env next to this script.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd /
+export PYTHONSAFEPATH=1
 
 LOCAL_MCP="$SCRIPT_DIR/.venv/bin/wazuh-mcp-server"
 SYSTEM_MCP="/opt/wazuh-mcp/bin/wazuh-mcp-server"
 ISOLATED_ENV="/etc/mcp-secrets/wazuh.env"
+TAG="[wazuh-mcp]"
+
+_err() { echo "$TAG ERROR: $*" >&2; }
+
+_load_env() {
+    set -a
+    # shellcheck source=/dev/null
+    source "$1"
+    set +a
+}
 
 _is_native_exec() {
     local bin="$1"
@@ -33,25 +42,30 @@ _is_native_exec() {
     return 0
 }
 
-# === Container path: isolated mcp-wazuh uid ===
-if [[ -f "$ISOLATED_ENV" ]] && [[ -x "$SYSTEM_MCP" ]] && command -v sudo >/dev/null 2>&1; then
-    exec sudo -n -u mcp-wazuh /bin/bash -c "
-        set -a
-        source '$ISOLATED_ENV'
-        set +a
-        exec '$SYSTEM_MCP'
-    "
+# === Container: isolated mcp-wazuh account ===
+if [[ -e "$ISOLATED_ENV" ]]; then
+    if [[ "$(id -u)" == "0" ]]; then
+        _err "refusing to run as root; the supervisor must start this server as mcp-wazuh"
+        exit 1
+    fi
+    if [[ ! -r "$ISOLATED_ENV" ]]; then
+        _err "$ISOLATED_ENV is not readable by uid $(id -u); set \"runAs\": \"mcp-wazuh\" in .mcp.json"
+        exit 1
+    fi
+    _load_env "$ISOLATED_ENV"
+    if [[ ! -x "$SYSTEM_MCP" ]]; then
+        _err "wazuh-mcp-server is not installed in the image (rebuild: container/build.sh)"
+        exit 1
+    fi
+    exec "$SYSTEM_MCP"
 fi
 
-# === Fallback: legacy path ===
+# === Dev / host: local .env ===
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/.env"
-    set +a
+    _load_env "$SCRIPT_DIR/.env"
 else
-    echo "[wazuh-mcp] ERROR: .env not found at $SCRIPT_DIR/.env" >&2
-    echo "[wazuh-mcp] Run setup.sh first and fill in your Wazuh credentials." >&2
+    _err ".env not found at $SCRIPT_DIR/.env"
+    _err "Run setup.sh first and fill in your Wazuh credentials."
     exit 1
 fi
 
@@ -60,8 +74,8 @@ if _is_native_exec "$LOCAL_MCP"; then
 elif [[ -x "$SYSTEM_MCP" ]]; then
     exec "$SYSTEM_MCP"
 else
-    echo "[wazuh-mcp] ERROR: wazuh-mcp-server not found." >&2
-    echo "[wazuh-mcp]   In a container: rebuild the image (container/build.sh)" >&2
-    echo "[wazuh-mcp]   On the host: run wazuh-mcp/setup.sh" >&2
+    _err "wazuh-mcp-server not found."
+    _err "  In a container: rebuild the image (container/build.sh)"
+    _err "  On the host: run wazuh-mcp/setup.sh"
     exit 1
 fi

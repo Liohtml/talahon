@@ -19,8 +19,8 @@ Template selection happens in **Step 2.5** of the investigation workflow (see [.
    agent_name)                                │
                                               ▼
                                  ┌──────────────────────────┐
-                                 │  2. Ollama picks best    │
-                                 │     filename (or NULL)   │
+                                 │  2. investigation_hints  │
+                                 │     names candidates     │
                                  └────────────┬─────────────┘
                                               │  NULL / unavailable
                                               ▼
@@ -44,13 +44,13 @@ Template selection happens in **Step 2.5** of the investigation workflow (see [.
 
 The agent runs `ls /workspace/group/prompts/` inside the container. Every `.txt` file in this directory becomes a candidate. No registration file, no index — the filesystem is the registry.
 
-### Step 2 — Ollama-ranked selection (preferred)
+### Step 2 — Hint-based selection (preferred)
 
-If a local Ollama model is available, the agent passes the candidate filenames plus a summary of the alert (rule description, rule groups, event ID, agent) to the model and asks for the best match — or `NULL` if nothing fits. The system prompt instructs Ollama to be conservative.
+The agent calls the built-in `investigation_hints` tool with the alert's `rule_groups` and event ID. It is deterministic and offline (implemented in `crates/talon-intel`), reproduces the filename-matching rules below, and also returns the key investigation points of the matching template. The model then confirms the candidate against the raw event.
 
 ### Step 3 — Filename pattern fallback
 
-If Ollama is unavailable or returns `NULL`, the agent matches against:
+If no hint matches, the agent matches against:
 
 | Alert signal | Matches filename |
 |---|---|
@@ -157,7 +157,7 @@ author: ...
    ```
 
 5. **Test the selection.** With the container running, trigger an investigation on an alert that should match your new template. Verify:
-   - Ollama (or the fallback) picks the new filename.
+   - `investigation_hints` (or the fallback) picks the new filename. If you want the hint engine to know your template's guidance, add it to `crates/talon-intel/src/hints.rs`.
    - The template's steps execute end-to-end.
    - `{{ alert }}` and other placeholders substitute correctly.
 
@@ -195,8 +195,7 @@ author: ...
 **My template isn't being picked.**
 - Confirm it's in `/workspace/group/prompts/` inside the container (mounted from `groups/copilot/prompts/` on the host).
 - Check the filename matches something in the alert (`rule_groups`, `data_win_system_eventID`, or a keyword in `rule_description`).
-- If Ollama is selecting and returns `NULL` consistently, the description in frontmatter may be too vague — make it more specific.
-- Check the investigation log in `groups/copilot/logs/` for the filename Ollama returned.
+- Check `template_used` / `selection_method` in the eval JSON (`GET /evals/:alertId`) to see which template the agent chose and how.
 
 **Placeholders appear literally in output.**
 - The agent substitutes variables before following the template. If you see raw `{{ alert }}` in a report, the substitution step was skipped — usually because the agent read the template but didn't treat it as a template. Make sure the placeholders match the exact spelling in the table above.

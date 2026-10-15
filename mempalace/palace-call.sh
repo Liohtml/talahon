@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-shot MemPalace helper invoked by NanoClaw's node process.
+# One-shot MemPalace helper for the host /palace/* endpoints (run inside a
+# locked-down container as mcp-palace) and for local development.
 #
 # Wraps palace_call.py with the same venv-resolution logic as
 # mempalace-mcp.sh so the script works both on the host (developer machine)
@@ -11,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
+if [[ -r "$SCRIPT_DIR/.env" ]]; then
     set -a
     # shellcheck source=/dev/null
     source "$SCRIPT_DIR/.env"

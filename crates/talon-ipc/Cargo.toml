@@ -1,0 +1,33 @@
+[package]
+name = "talon-ipc"
+description = "Host-side IPC watcher with authorization (container -> host requests)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+talon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+talon-db = { workspace = true }
+talon-security = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+# fd-relative filesystem access (openat/unlinkat/renameat with O_NOFOLLOW) so a
+# compromised container cannot redirect host-side IPC file handling through
+# symlink swaps. Already in the lockfile (via tempfile); safe API, no `unsafe`.
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

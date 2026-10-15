@@ -1,41 +1,42 @@
 #!/usr/bin/env bash
-# MemPalace MCP server wrapper for Talon
+# MemPalace MCP server wrapper for Talon.
 #
-# Provides the SOC agent with persistent semantic memory — past alert
-# investigations, asset metadata, false positive records, and IOC history
-# are stored in a local ChromaDB + SQLite knowledge graph and retrieved
-# via semantic search at the start of each investigation.
+# Gives the SOC agent persistent semantic memory — past investigations, asset
+# metadata, false-positive records and IOC history in a local ChromaDB +
+# SQLite knowledge graph, retrieved by semantic search.
 #
-# Palace data is stored at mempalace-data/palace/ (mounted read-write into
-# the container). This directory is gitignored and persists across restarts.
+# Palace data lives in mempalace-data/palace/ (mounted read-write at
+# /workspace/extra/mempalace-data; the account running this server must be
+# able to write there).
 #
-# This script is called by Claude Code as the MCP server command.
+# Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
+#
+#   1. Talon agent container. `talon-agent supervise` starts this script
+#      directly as `mcp-palace` (`"runAs": "mcp-palace"` in .mcp.json). An
+#      optional mempalace/.env is staged at /etc/mcp-secrets/palace.env
+#      (owner mcp-palace, mode 0600).
+#   2. Dev / host. Source mempalace/.env next to this script when present.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd /
+export PYTHONSAFEPATH=1
 
-# Load optional .env (palace path override, etc.)
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
+ISOLATED_ENV="/etc/mcp-secrets/palace.env"
+TAG="[mempalace-mcp]"
+
+_err() { echo "$TAG ERROR: $*" >&2; }
+
+_load_env() {
     set -a
     # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/.env"
+    source "$1"
     set +a
-fi
+}
 
-# Palace data directory — persistent, read-write, outside the config dir
-# Inside container: /workspace/extra/mempalace-data/palace
-# On host:         mempalace-data/palace (relative to project root)
-PALACE_PATH="${MEMPALACE_PALACE_PATH:-/workspace/extra/mempalace-data/palace}"
-export MEMPALACE_PALACE_PATH="$PALACE_PATH"
-
-# Ensure the palace directory exists before starting the server
-mkdir -p "$PALACE_PATH"
-
-LOCAL_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
-SYSTEM_PYTHON="/opt/mempalace/bin/python3"
-
-# Check if a binary is native to the current OS (handles macOS venv in Linux container)
+# Check if a binary is native to the current OS (handles a macOS venv
+# mounted into the Linux container).
 _is_native_exec() {
     local bin="$1"
     [[ -x "$bin" ]] || return 1
@@ -47,43 +48,74 @@ _is_native_exec() {
     return 0
 }
 
-if _is_native_exec "$LOCAL_PYTHON"; then
-    PYTHON="$LOCAL_PYTHON"
-elif [[ -x "$SYSTEM_PYTHON" ]]; then
+LOCAL_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
+SYSTEM_PYTHON="/opt/mempalace/bin/python3"
+
+if [[ -e "$ISOLATED_ENV" ]]; then
+    # === Container: isolated mcp-palace account ===
+    if [[ "$(id -u)" == "0" ]]; then
+        _err "refusing to run as root; the supervisor must start this server as mcp-palace"
+        exit 1
+    fi
+    if [[ ! -r "$ISOLATED_ENV" ]]; then
+        _err "$ISOLATED_ENV is not readable by uid $(id -u); set \"runAs\": \"mcp-palace\" in .mcp.json"
+        exit 1
+    fi
+    _load_env "$ISOLATED_ENV"
+    PYTHON="$SYSTEM_PYTHON"
+elif [[ -d /etc/mcp-secrets ]]; then
+    # === Container without a palace .env: image install only ===
     PYTHON="$SYSTEM_PYTHON"
 else
-    echo "[mempalace-mcp] ERROR: python3 not found." >&2
-    echo "[mempalace-mcp]   In a container: rebuild the image (container/build.sh)" >&2
-    echo "[mempalace-mcp]   On the host: run mempalace/setup.sh" >&2
+    # === Dev / host ===
+    if [[ -f "$SCRIPT_DIR/.env" ]]; then
+        _load_env "$SCRIPT_DIR/.env"
+    fi
+    if _is_native_exec "$LOCAL_PYTHON"; then
+        PYTHON="$LOCAL_PYTHON"
+    else
+        PYTHON="$SYSTEM_PYTHON"
+    fi
+fi
+
+if [[ ! -x "$PYTHON" ]]; then
+    _err "python3 for mempalace not found ($PYTHON)."
+    _err "  In a container: rebuild the image (container/build.sh)"
+    _err "  On the host: run mempalace/setup.sh"
     exit 1
 fi
 
-# Auto-initialize the palace on first run.
-# Creates the ChromaDB collection and SQLite knowledge graph tables so the
-# MCP server can immediately read and write without a separate init step.
-#
-# The MCP server does _collection = _get_collection() at import time (no
-# create=True), so if the ChromaDB collection doesn't exist yet every tool
-# call returns a "No palace found" error.  We must create it first.
+# Palace data directory — persistent, read-write, outside the config dir.
+#   Container: /workspace/extra/mempalace-data/palace
+#   Host:      set MEMPALACE_PALACE_PATH (e.g. <project>/mempalace-data/palace)
+PALACE_PATH="${MEMPALACE_PALACE_PATH:-/workspace/extra/mempalace-data/palace}"
+export MEMPALACE_PALACE_PATH="$PALACE_PATH"
+
+if ! mkdir -p "$PALACE_PATH" 2>/dev/null || [[ ! -w "$PALACE_PATH" ]]; then
+    _err "palace directory $PALACE_PATH is not writable by uid $(id -u)."
+    _err "  Make mempalace-data/ writable for the account running this server."
+    exit 1
+fi
+
+# Auto-initialize the palace on first run: the MCP server opens the ChromaDB
+# collection at import time without create=True, so it must exist first.
 SENTINEL="$PALACE_PATH/.initialized"
 if [[ ! -f "$SENTINEL" ]]; then
-    echo "[mempalace-mcp] Initializing palace at $PALACE_PATH..." >&2
+    echo "$TAG Initializing palace at $PALACE_PATH..." >&2
     "$PYTHON" - <<'PYEOF'
-import os, sys
+import sys
 try:
     import chromadb
     from mempalace.palace_graph import MempalaceConfig
     from mempalace.knowledge_graph import KnowledgeGraph
 
     config = MempalaceConfig()
-    # Create ChromaDB collection (idempotent)
     client = chromadb.PersistentClient(path=config.palace_path)
     client.get_or_create_collection(config.collection_name)
-    # Create SQLite knowledge graph tables (idempotent)
     KnowledgeGraph()
     print(f"[mempalace-mcp] Palace initialized at {config.palace_path}", file=sys.stderr)
 except Exception as e:
-    # Non-fatal: the MCP server may still start and handle init errors itself
+    # Non-fatal: the MCP server may still start and handle init errors itself.
     print(f"[mempalace-mcp] Warning: init returned: {e}", file=sys.stderr)
 PYEOF
     touch "$SENTINEL"

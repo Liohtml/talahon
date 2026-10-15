@@ -1,0 +1,110 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/liohtml/talahon"
+authors = ["SOCFortress", "Talon contributors"]
+
+[workspace.dependencies]
+# --- internal crates ---
+talon-core = { path = "crates/talon-core" }
+talon-db = { path = "crates/talon-db" }
+talon-llm = { path = "crates/talon-llm" }
+talon-mcp = { path = "crates/talon-mcp" }
+talon-tools = { path = "crates/talon-tools" }
+talon-intel = { path = "crates/talon-intel" }
+talon-anon = { path = "crates/talon-anon" }
+talon-security = { path = "crates/talon-security" }
+talon-container = { path = "crates/talon-container" }
+talon-scheduler = { path = "crates/talon-scheduler" }
+talon-ipc = { path = "crates/talon-ipc" }
+talon-router = { path = "crates/talon-router" }
+talon-channels = { path = "crates/talon-channels" }
+talon-http = { path = "crates/talon-http" }
+talon-setup = { path = "crates/talon-setup" }
+talon-net = { path = "crates/talon-net" }
+
+# --- async runtime ---
+tokio = { version = "1.47", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync", "fs"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# --- serialization ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# --- errors / logging ---
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+# --- time / scheduling ---
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+croner = "2"
+
+# --- storage ---
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# --- networking ---
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+axum = { version = "0.8", features = ["macros"] }
+tower = { version = "0.5", features = ["util", "limit", "timeout"] }
+tower-http = { version = "0.6", features = ["trace", "limit", "cors", "timeout"] }
+url = "2"
+bytes = "1"
+http = "1"
+
+# --- text / matching ---
+regex = "1"
+aho-corasick = "1"
+globset = "0.4"
+walkdir = "2"
+ipnet = "2"
+
+# --- crypto / ids ---
+subtle = "2"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1", features = ["derive"] }
+
+# --- cli ---
+clap = { version = "4", features = ["derive", "env"] }
+
+# --- testing ---
+tempfile = "3"
+wiremock = "0.6"
+pretty_assertions = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1

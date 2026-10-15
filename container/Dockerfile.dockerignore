@@ -1,0 +1,23 @@
+# Build-context filter for container/Dockerfile (context = repository root).
+# BuildKit picks up `<Dockerfile>.dockerignore` automatically; build.sh passes
+# it explicitly to podman/buildah. Allowlist: everything is excluded except
+# what the image build needs.
+
+*
+
+!Cargo.toml
+!Cargo.lock
+!crates/
+!siem/anon_proxy/fields.yaml
+!container/entrypoint.sh
+!container/mysql-tools/
+
+# Never ship build output or secrets, even from allowlisted directories.
+**/target
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/api.config.yaml
+**/.git

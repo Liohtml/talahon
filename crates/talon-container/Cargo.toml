@@ -1,0 +1,31 @@
+[package]
+name = "talon-container"
+description = "Container runtime: hardened docker/podman launch, mounts, output parsing, snapshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+talon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+talon-security = { workspace = true }
+tokio-util = { workspace = true }
+chrono = { workspace = true }
+# Safe (no `unsafe`, no libc FFI in our code) getuid/getgid for RUN_UID/RUN_GID
+# and O_NOFOLLOW/O_NONBLOCK opens of agent-influenced files (`fs`).
+rustix = { version = "1.1", default-features = false, features = ["std", "process", "fs"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Paused-clock tests of the timeout / stop-escalation logic.
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
