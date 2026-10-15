@@ -27,7 +27,7 @@ You will also see MiTRE ATT&CK techniques associated with the alert, which will 
 
 5. **Proactively Respond**: If you identify a base64 encoded string in the `data.win.eventdata.commandLine`, decode it and analyze the content. This could provide additional insights into the nature of the threat.
 
-6. **Hash Analysis**: Extract the file hashes from `data.win.eventdata.hashes` (MD5, SHA1, SHA256). Look up any SHA256 hash on VirusTotal: WebFetch https://www.virustotal.com/gui/file/<hash>
+6. **Hash Analysis**: Extract the file hashes from `data.win.eventdata.hashes` (MD5, SHA1, SHA256). Look up any SHA256 hash on VirusTotal with `mcp__cve__virustotal_lookup` (fallback: `web_fetch https://www.virustotal.com/gui/file/<hash>`)
 
 7. **Live Forensics — Velociraptor artifact recommendations**: If the alert is **suspicious or worse** after Steps 1–6 (VT verdict ≥ suspicious, unusual parent/child chain, decoded base64 reveals malicious intent, etc.), collect live evidence from the affected host. Skip this step for clean verdicts.
 

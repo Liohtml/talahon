@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NanoClaw Velociraptor MCP — one-time setup
+# Talon Velociraptor MCP — one-time setup
 #
 # What this does:
 #   1. Creates a Python virtual environment (.venv/) to avoid host Python conflicts
@@ -10,7 +10,7 @@
 #   1. Copy your Velociraptor api.config.yaml into this directory (velociraptor-mcp/)
 #   2. Edit .env and set VELOCIRAPTOR_API_KEY=api.config.yaml (filename only — the
 #      wrapper script resolves it to an absolute path automatically)
-#   3. Restart NanoClaw
+#   3. Restart Talon
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 ENV_FILE="$SCRIPT_DIR/.env"
 MCP_WRAPPER="$SCRIPT_DIR/velociraptor-mcp.sh"
 
-echo "=== NanoClaw Velociraptor MCP Setup ==="
+echo "=== Talon Velociraptor MCP Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -90,8 +90,8 @@ echo ""
 if [[ ! -f "$SCRIPT_DIR/api.config.yaml" ]]; then
     echo "Next steps:"
     echo "  1. Copy your Velociraptor api.config.yaml into velociraptor-mcp/"
-    echo "  2. Restart NanoClaw"
+    echo "  2. Restart Talon"
 else
-    echo "Restart NanoClaw to pick up the Velociraptor MCP server."
+    echo "Restart Talon to pick up the Velociraptor MCP server."
 fi
 echo ""

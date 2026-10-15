@@ -1,6 +1,6 @@
 # Talon 2.0
 
-Automated AI SOC analyst for the SOCFortress CoPilot stack, written in Rust. See [README.md](README.md) for setup and [docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md) for the architecture and security contracts.
+Automated AI SOC analyst for the CoPilot SOC stack, written in Rust. See [README.md](README.md) for setup and [docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md) for the architecture and security contracts.
 
 ## Quick Context
 
@@ -51,7 +51,7 @@ vLLM only (`TALON_VLLM_*` in `.env`, see [docs/PROVIDER_SELECTION.md](docs/PROVI
 
 ## Skills
 
-`.claude/skills/` contains only generic helpers (`get-qodo-rules`, `qodo-pr-resolver`). The NanoClaw skills of Talon 1.x patched TypeScript sources and were removed with them; add features by porting them into the relevant crate. For installation and troubleshooting use `talon setup <step>` and `talon doctor`.
+`.claude/skills/` contains only generic helpers (`get-qodo-rules`, `qodo-pr-resolver`). Add features directly in the relevant crate. For installation and troubleshooting use `talon setup <step>` and `talon doctor`.
 
 ## Container Build Cache
 

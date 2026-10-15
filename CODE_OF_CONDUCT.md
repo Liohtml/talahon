@@ -1,27 +1,27 @@
 # Code of Conduct
 
-Talon is a security tool built for SOC teams. These guidelines exist to keep contributions focused, professional, and safe.
+Talon is a security tool built for SOC teams. These guidelines keep
+contributions focused, professional and safe.
 
 ## Expectations
 
-- **Be direct and technical.** This is a professional security tooling project. Keep discussions focused on the work.
-- **Responsible disclosure.** If you find a security vulnerability in Talon itself, report it privately to the SOCfortress team before opening a public issue.
-- **No weaponisation.** Contributions that add capabilities designed to attack, surveil, or harm systems without authorization will be rejected and reported.
-- **Respect customer data.** This tool processes real SOC alert data, often containing sensitive customer information. Do not include real PII, credentials, or customer data in issues, PRs, or examples.
+- **Be direct and technical.** Keep discussions focused on the work.
+- **Responsible disclosure.** Report vulnerabilities in Talon privately (see
+  [docs/SECURITY.md](docs/SECURITY.md#reporting)) before anything is
+  discussed in public.
+- **No weaponisation.** Contributions that add capabilities designed to
+  attack, surveil or harm systems without authorization are rejected.
+- **Respect customer data.** Talon processes real SOC alert data. Never put
+  real PII, credentials or customer data into issues, PRs or examples.
 - **Give credit.** If your contribution builds on prior work, say so.
 
-## What We Won't Accept
+## What we won't accept
 
-- PRs that introduce backdoors, exfiltration paths, or intentional evasion of the anonymising proxy
-- Issues or comments that harass contributors or SOCfortress staff
-- Sharing credentials, API keys, or customer environment details in public threads
+- Backdoors, exfiltration paths or deliberate evasion of the anonymizing proxy
+- Harassment of contributors or maintainers
+- Credentials, API keys or customer environment details in public threads
 
 ## Reporting
 
-Security issues: open a private advisory on GitHub or email the SOCfortress team directly.
-
-Everything else: open a GitHub issue.
-
----
-
-*Talon is developed and maintained by [SOCfortress](https://www.socfortress.co).*
+Security issues: GitHub private vulnerability reporting (Security → Report a
+vulnerability). Everything else: open a GitHub issue.

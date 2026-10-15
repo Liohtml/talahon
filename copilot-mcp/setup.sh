@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# NanoClaw CoPilot MCP — one-time setup
+# Talon CoPilot MCP — one-time setup
 #
 # What this does:
 #   1. Creates a Python virtual environment (.venv/) to avoid host Python conflicts
 #   2. Installs copilot-mcp-server from GitHub into it
 #   3. Creates .env from .env.example if not already present
 #
-# After running this, edit .env with your CoPilot credentials, then restart NanoClaw.
+# After running this, edit .env with your CoPilot credentials, then restart Talon.
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 ENV_FILE="$SCRIPT_DIR/.env"
 MCP_WRAPPER="$SCRIPT_DIR/copilot-mcp.sh"
 
-echo "=== NanoClaw CoPilot MCP Setup ==="
+echo "=== Talon CoPilot MCP Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -76,8 +76,8 @@ echo ""
 if grep -q "your-copilot-host" "$ENV_FILE" 2>/dev/null; then
     echo "Next steps:"
     echo "  1. Edit copilot-mcp/.env with your CoPilot URL, username, and password"
-    echo "  2. Restart NanoClaw"
+    echo "  2. Restart Talon"
 else
-    echo "Restart NanoClaw to pick up the CoPilot MCP server."
+    echo "Restart Talon to pick up the CoPilot MCP server."
 fi
 echo ""

@@ -7,16 +7,14 @@
 #      directly as `mcp-mysql` (`"runAs": "mcp-mysql"` in .mcp.json). The
 #      credentials were staged at /etc/mcp-secrets/mysql.env (owner mcp-mysql,
 #      mode 0600); the visible mysql/.env is shadowed with /dev/null. The
-#      image ships the Python `mysql_mcp_server` (/opt/mysql-mcp) — there is
-#      no node in the image.
+#      image ships the Python `mysql_mcp_server` (/opt/mysql-mcp).
 #
 #   2. Dev / host. Source mysql/.env next to this script; prefer a local
-#      venv, then the image install, then a globally installed npm
-#      `mcp-server-mysql` (legacy hosts).
+#      venv, then the image install.
 #
 # .env keys: MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASS (or
-# MYSQL_PASSWORD), MYSQL_DB (or MYSQL_DATABASE). Both naming schemes are
-# exported so either server implementation finds them.
+# MYSQL_PASSWORD), MYSQL_DB (or MYSQL_DATABASE). Both spellings are
+# accepted and exported.
 
 set -euo pipefail
 
@@ -36,7 +34,7 @@ _load_env() {
     # shellcheck source=/dev/null
     source "$1"
     set +a
-    # Map legacy (benborla) names <-> Python server names.
+    # Accept both spellings of the password and database keys.
     if [[ -n "${MYSQL_PASS:-}" && -z "${MYSQL_PASSWORD:-}" ]]; then export MYSQL_PASSWORD="$MYSQL_PASS"; fi
     if [[ -n "${MYSQL_PASSWORD:-}" && -z "${MYSQL_PASS:-}" ]]; then export MYSQL_PASS="$MYSQL_PASSWORD"; fi
     if [[ -n "${MYSQL_DB:-}" && -z "${MYSQL_DATABASE:-}" ]]; then export MYSQL_DATABASE="$MYSQL_DB"; fi
@@ -85,8 +83,6 @@ if _is_native_exec "$LOCAL_MCP"; then
     exec "$LOCAL_MCP"
 elif [[ -x "$SYSTEM_MCP" ]]; then
     exec "$SYSTEM_MCP"
-elif command -v mcp-server-mysql >/dev/null 2>&1; then
-    exec mcp-server-mysql
 else
     _err "no MySQL MCP server found."
     _err "  In a container: rebuild the image (container/build.sh)"

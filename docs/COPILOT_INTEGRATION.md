@@ -2,7 +2,7 @@
 
 > **Status:** In progress — MCP write-back tools under development in CoPilot.
 
-This document describes the architecture for integrating the Talon AI analyst with the SOCfortress CoPilot application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
+This document describes the architecture for integrating the Talon AI analyst with the CoPilot application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
 
 ---
 
@@ -23,8 +23,8 @@ This document describes the architecture for integrating the Talon AI analyst wi
 │                                                     │
 │  Alert created ──► POST /investigate ──────────────┐│
 │                                                    ││
-│  GET /nanoclaw/status   ◄──── Talon HTTP API       ││
-│  GET /nanoclaw/jobs/:id ◄──── Talon HTTP API       ││
+│  Talon status view      ◄──── Talon HTTP API       ││
+│  Talon job details      ◄──── Talon HTTP API       ││
 │                                                    ││
 │  MCP write-back tools:                             ││
 │    POST /api/v1/ai-analyst/jobs       ◄────────────┘│
@@ -493,7 +493,7 @@ Recommend separating capability by analyst tier:
 Reviews can generate lessons fast. Two guards keep the palace useful:
 
 1. **Durability flag** on each lesson. `one_off` lessons expire after N days (default 30); `durable` lessons persist until manually removed. Enforced by a daily sweeper on the MemPalace side.
-2. **Quarterly consolidation pass** — SOC lead runs the `anthropic-skills:consolidate-memory` skill against a wing: merges duplicates, flags stale lessons, drops outdated patterns.
+2. **Quarterly consolidation pass** — SOC lead reviews a wing (manually or with a script): merges duplicates, flags stale lessons, drops outdated patterns.
 
 ### Tradeoffs captured here, for posterity
 

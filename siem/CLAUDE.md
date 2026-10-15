@@ -23,7 +23,7 @@ Use **last 24 hours** (`"gte": "now-24h"`) unless the user specifies a range. Wh
 - **Customer-specific indices** — numbered sequentially: `wazuh-customercode_1`, `wazuh-customercode_2`, etc. The highest-numbered index is the most recent. Use `wazuh-customercode_*` to search across all.
 - **When no index pattern is provided** — if the user names an agent or endpoint but doesn't specify an index, ask for clarification. Example: "Which index pattern should I search? It likely contains your customer code, e.g. `wazuh-acmecorp_*`."
 
-## Known Index Patterns (SOCfortress / Wazuh)
+## Known Index Patterns (CoPilot / Wazuh)
 
 | Index Pattern | Data |
 |---------------|------|
