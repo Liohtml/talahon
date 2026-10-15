@@ -1,10 +1,10 @@
-//! Message pipeline (port of `processGroupMessages`, `startMessageLoop` and
-//! `recoverPendingMessages` in `src/index.ts`).
+//! Message pipeline: per-lane message processing, the message loop and
+//! recovery of pending messages at startup.
 //!
 //! The loop is event-driven: `ChannelHost::on_message` stores the message
-//! and wakes it through a `Notify`; the TS poll interval remains as a
-//! fallback (messages written to the database by something else, missed
-//! wake-ups). Semantics kept from TS:
+//! and wakes it through a `Notify`; a poll interval remains as a fallback
+//! (messages written to the database by something else, missed wake-ups).
+//! Semantics:
 //!
 //! - the "seen" cursor (`last_timestamp`) advances as soon as messages are
 //!   fetched; the per-lane agent cursor only when they are handed to the
@@ -131,7 +131,7 @@ impl Orchestrator {
         }
     }
 
-    /// Process all pending messages of a lane (TS `processGroupMessages`).
+    /// Process all pending messages of a lane.
     /// Called by the queue when it is the lane's turn. `false` asks the
     /// queue to retry with backoff.
     pub async fn process_group_messages(&self, chat_jid: &str) -> bool {
@@ -266,7 +266,7 @@ impl Orchestrator {
         }
     }
 
-    /// One iteration of the message loop (TS loop body).
+    /// One iteration of the message loop.
     pub async fn poll_once(&self) -> PollSummary {
         let mut summary = PollSummary::default();
         let (jids, since) = {

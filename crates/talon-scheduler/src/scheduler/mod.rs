@@ -1,4 +1,4 @@
-//! Scheduled-task runner (port of `src/task-scheduler.ts`).
+//! Scheduled-task runner.
 //!
 //! The poll loop finds due tasks and enqueues them into the [`GroupQueue`];
 //! when the queue gives the task's lane a slot, the host's
@@ -19,8 +19,8 @@
 //! the `copilot` folder). When the task's lane is not registered (in-memory
 //! lanes after a host restart or an idle sweep) or is registered for another
 //! folder, the run is deferred with capped backoff and never completed, so it
-//! runs in its own lane once that lane is registered again. Unlike the TS
-//! port there is no fallback to another JID of the same folder.
+//! runs in its own lane once that lane is registered again. There is no
+//! fallback to another JID of the same folder.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -60,7 +60,7 @@ const NOT_DUE_TOLERANCE: chrono::Duration = chrono::Duration::seconds(1);
 /// Scheduler configuration.
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
-    /// How often due tasks are polled (TS `SCHEDULER_POLL_INTERVAL`, 60 s).
+    /// How often due tasks are polled (default 60 s).
     pub poll_interval: Duration,
     /// Timezone for cron evaluation.
     pub timezone: Tz,
@@ -73,7 +73,7 @@ pub struct SchedulerConfig {
     /// retried early; after that the task falls back to its regular
     /// schedule (`once` tasks complete).
     pub retry: RetryPolicy,
-    /// `last_result` keeps this many characters of the result (TS: 200).
+    /// `last_result` keeps this many characters of the result (default: 200).
     pub result_summary_chars: usize,
     /// Results stored in the run log are truncated to this many characters.
     pub max_logged_result_chars: usize,
@@ -176,7 +176,7 @@ impl TaskExecution {
     }
 }
 
-/// Host side of a task run (TS `runTask` minus the bookkeeping): write the
+/// Host side of a task run (everything but the bookkeeping): write the
 /// tasks snapshot, resolve the session when
 /// [`TaskRunContext::uses_group_session`], run the container with
 /// `is_scheduled_task = true` and the task's `script`, register it with
@@ -272,7 +272,7 @@ pub enum TaskRunOutcome {
         /// Why.
         reason: SkipReason,
     },
-    /// The task has an invalid group folder and was paused (TS behaviour).
+    /// The task has an invalid group folder and was paused.
     Paused {
         /// Logged error.
         error: String,
@@ -825,8 +825,8 @@ pub(crate) enum UnresolvedLane {
 /// The group the task runs in: the group registered at the task's own JID,
 /// and only if its folder matches the task's.
 ///
-/// Deliberately no fallback to another JID with the same folder (the TS
-/// `find(g => g.folder === task.group_folder)`, N-1): lanes sharing a folder
+/// Deliberately no fallback to another JID with the same folder (N-1):
+/// lanes sharing a folder
 /// have distinct session keys, IPC namespaces and output streams, so running
 /// a per-user lane's task in, e.g., the base lane would hand it that lane's
 /// session and IPC identity.
@@ -863,7 +863,7 @@ fn human_duration(d: Duration) -> String {
     }
 }
 
-/// First `max` characters (TS `slice(0, 200)` on the summary).
+/// First `max` characters (used to cut the summary).
 fn truncate_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }

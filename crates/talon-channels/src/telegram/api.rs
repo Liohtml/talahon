@@ -331,14 +331,14 @@ mod tests {
             .and(path(format!("/bot{TOKEN}/getMe")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "ok": true,
-                "result": {"id": 42, "is_bot": true, "first_name": "Andy", "username": "andy_ai_bot"}
+                "result": {"id": 42, "is_bot": true, "first_name": "Talon", "username": "talonai_bot"}
             })))
             .mount(&server)
             .await;
         let api = BotApi::new(&server.uri(), TOKEN, Duration::from_secs(5)).unwrap();
         let me = api.get_me().await.unwrap();
         assert_eq!(me.id, 42);
-        assert_eq!(me.username.as_deref(), Some("andy_ai_bot"));
+        assert_eq!(me.username.as_deref(), Some("talonai_bot"));
     }
 
     #[tokio::test]

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# NanoClaw SIEM — one-time setup
+# Talon SIEM — one-time setup
 #
 # What this does:
 #   1. Creates a Python virtual environment (.venv/) to avoid host Python conflicts
 #   2. Installs opensearch-mcp-server into it
 #   3. Creates .env from .env.example if not already present
-#   4. Generates .claude/settings.json with the absolute path to opensearch-mcp.sh
+#   4. Generates .claude/settings.json (MCP settings for local dev tools)
 #
-# After running this, edit .env with your OpenSearch credentials, then:
-#   cd siem && claude
+# After running this, edit .env with your OpenSearch credentials, then
+# restart Talon.
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 SETTINGS_FILE="$SCRIPT_DIR/.claude/settings.json"
 MCP_WRAPPER="$SCRIPT_DIR/opensearch-mcp.sh"
 
-echo "=== NanoClaw SIEM Setup ==="
+echo "=== Talon SIEM Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -102,13 +102,13 @@ if [[ ! -f "$ENV_FILE" ]]; then
     cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
     echo ""
     echo "  Created .env from template."
-    echo "  ➜ Edit $ENV_FILE with your OpenSearch credentials before running 'claude'."
+    echo "  ➜ Edit $ENV_FILE with your OpenSearch credentials before starting Talon."
     echo ""
 else
     echo ".env exists  ✓"
 fi
 
-# ── Claude Code MCP settings ─────────────────────────────────────────────────
+# ── Local MCP settings (for MCP-aware dev tools) ─────────────────────────────
 chmod +x "$MCP_WRAPPER"
 mkdir -p "$SCRIPT_DIR/.claude"
 
@@ -132,8 +132,8 @@ echo ""
 echo "Next steps:"
 if grep -q "your-opensearch-host" "$ENV_FILE" 2>/dev/null; then
     echo "  1. Edit siem/.env with your OpenSearch URL, username, and password"
-    echo "  2. cd $(basename "$SCRIPT_DIR") && claude"
+    echo "  2. Restart Talon (systemctl --user restart talon)"
 else
-    echo "  1. cd $(basename "$SCRIPT_DIR") && claude"
+    echo "  1. Restart Talon (systemctl --user restart talon)"
 fi
 echo ""

@@ -52,7 +52,7 @@ returns successfully. Do not call:
 Use the **`mcp__copilot__DispatchNotificationsTool`** tool. Auth and
 base URL are handled by the same `copilot-mcp` server you already use
 for `SubmitAiAnalystReportTool`, `SubmitAiAnalystIocsTool`, etc. — no
-Bash, no curl, no token juggling.
+`bash`, no curl, no token juggling.
 
 Arguments:
 

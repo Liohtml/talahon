@@ -56,7 +56,6 @@ use crate::validate::{
 };
 
 /// Mounts every CoPilot lane gets (`(directory under project root, read-only)`).
-/// The TS release also mounted `ollama/`; Talon 2.0 has no Ollama provider.
 /// `mempalace-data` stays read-write for the `mcp-palace` MCP server: the
 /// container entrypoint chowns it to `mcp-palace`, so the agent uid cannot
 /// reach it, and the host never runs palace code against it by default
@@ -308,7 +307,7 @@ impl HttpState {
     }
 }
 
-/// The CoPilot group template (TS `connect()`).
+/// The CoPilot group template the base lanes are registered with.
 fn base_group(config: &HttpConfig) -> RegisteredGroup {
     let additional_mounts = COPILOT_MOUNTS
         .iter()

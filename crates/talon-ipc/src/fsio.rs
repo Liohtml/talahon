@@ -342,8 +342,8 @@ fn is_timestamped(name: &CStr) -> bool {
 }
 
 /// Keep at most `max_files` entries in the quarantine directory. Legacy
-/// (non-timestamped, e.g. TypeScript-era) entries are pruned first, then
-/// the oldest records. Returns how many entries were removed.
+/// (non-timestamped, written by earlier releases) entries are pruned first,
+/// then the oldest records. Returns how many entries were removed.
 pub(crate) fn prune_quarantine(errors: BorrowedFd<'_>, max_files: usize) -> io::Result<usize> {
     let reader = rfs::Dir::read_from(errors)?;
     let mut names = Vec::new();
@@ -523,7 +523,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let base = open_base(tmp.path()).unwrap();
         let errors = open_errors_dir(base.as_fd()).unwrap();
-        // legacy TS-era entry is pruned first
+        // legacy (non-timestamped) entry is pruned first
         std::fs::write(tmp.path().join("errors").join("main-1.json"), b"{}").unwrap();
         let rec = QuarantineRecord {
             ipc_key: "main".into(),

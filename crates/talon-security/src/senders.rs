@@ -1,8 +1,8 @@
-//! Per-chat sender allowlist (port of `src/sender-allowlist.ts`).
+//! Per-chat sender allowlist.
 //! File: `~/.config/talon/sender-allowlist.json`. Missing file => everyone
 //! allowed (legacy behaviour) unless `TALON_SENDER_ALLOWLIST_REQUIRED=true`.
 //!
-//! File format (identical to the TypeScript release):
+//! File format:
 //!
 //! ```json
 //! {
@@ -17,7 +17,7 @@
 //!   wake the agent) or `drop` (messages from other senders are discarded
 //!   before they are stored).
 //!
-//! Load semantics match TS: a missing, unreadable or invalid file (or an
+//! Load semantics: a missing, unreadable or invalid file (or an
 //! invalid `default` entry) yields the allow-all default; invalid per-chat
 //! entries are skipped. When the allowlist is *required*
 //! ([`SenderAllowlist::load_with_policy`] with `required = true`, or
@@ -67,7 +67,7 @@ impl Entry {
         }
     }
 
-    /// TS `isValidEntry`: `allow` is `"*"` or an array of strings, `mode` is
+    /// Valid entry: `allow` is `"*"` or an array of strings, `mode` is
     /// `trigger` | `drop`.
     fn parse(value: &serde_json::Value) -> Option<Self> {
         let obj = value.as_object()?;
@@ -91,8 +91,8 @@ impl Entry {
     }
 }
 
-/// Parsed sender allowlist. `Default` is the TS default: everyone allowed,
-/// `trigger` mode, `logDenied: true`.
+/// Parsed sender allowlist. `Default` allows everyone, in `trigger` mode,
+/// with `logDenied: true`.
 #[derive(Debug, Clone)]
 pub struct SenderAllowlist {
     default: Entry,
@@ -176,8 +176,8 @@ impl SenderAllowlist {
         }
     }
 
-    /// Build from an already parsed JSON document (TS semantics: an invalid
-    /// `default` yields the allow-all default).
+    /// Build from an already parsed JSON document (an invalid `default`
+    /// yields the allow-all default).
     pub fn from_json(value: serde_json::Value) -> Self {
         Self::parse(&value).unwrap_or_default()
     }
@@ -235,7 +235,7 @@ impl SenderAllowlist {
     /// Drop the message before it is stored (drop mode entries).
     ///
     /// True when the chat's entry is in `drop` mode **and** the sender is not
-    /// allowed (TS: `shouldDropMessage(chat) && !isSenderAllowed(chat, sender)`).
+    /// allowed.
     pub fn should_drop_message(&self, chat_jid: &str, sender: &str) -> bool {
         let entry = self.entry(chat_jid);
         let drop = entry.mode == Mode::Drop && !entry.allows(sender);
@@ -245,7 +245,7 @@ impl SenderAllowlist {
         drop
     }
 
-    /// Whether the chat's entry is in `drop` mode (TS `shouldDropMessage`).
+    /// Whether the chat's entry is in `drop` mode.
     pub fn is_drop_mode(&self, chat_jid: &str) -> bool {
         self.entry(chat_jid).mode == Mode::Drop
     }

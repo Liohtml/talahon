@@ -256,7 +256,7 @@ siem/
   opensearch-mcp.sh          ← raw OpenSearch MCP server (used for non-sensitive queries)
   anon-opensearch-mcp.sh     ← anonymizing wrapper (use for all document/search queries)
   anon_proxy/
-    anon_proxy.py            ← legacy Python proxy (fallback)
+    anon_proxy.py            ← Python fallback proxy
     fields.yaml              ← field definitions (git-pullable, embedded into the binary at build time)
 ```
 

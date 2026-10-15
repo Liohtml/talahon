@@ -1,30 +1,30 @@
-;;; nanoclaw.el --- Emacs interface for NanoClaw AI assistant -*- lexical-binding: t -*-
+;;; talon.el --- Emacs interface for Talon AI assistant -*- lexical-binding: t -*-
 
-;; Author: NanoClaw
+;; Author: Talon
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: ai, assistant, chat
 ;;
 ;; Vanilla Emacs (init.el):
-;;   (load-file "~/src/nanoclaw/emacs/nanoclaw.el")
-;;   (global-set-key (kbd "C-c n c") #'nanoclaw-chat)
-;;   (global-set-key (kbd "C-c n o") #'nanoclaw-org-send)
+;;   (load-file "/opt/talon/emacs/talon.el")
+;;   (global-set-key (kbd "C-c t c") #'talon-chat)
+;;   (global-set-key (kbd "C-c t o") #'talon-org-send)
 ;;
 ;; Spacemacs (~/.spacemacs, in dotspacemacs/user-config):
-;;   (load-file "~/src/nanoclaw/emacs/nanoclaw.el")
-;;   (spacemacs/set-leader-keys "aNc" #'nanoclaw-chat)
-;;   (spacemacs/set-leader-keys "aNo" #'nanoclaw-org-send)
+;;   (load-file "/opt/talon/emacs/talon.el")
+;;   (spacemacs/set-leader-keys "aTc" #'talon-chat)
+;;   (spacemacs/set-leader-keys "aTo" #'talon-org-send)
 ;;
 ;; Doom Emacs (config.el):
-;;   (load (expand-file-name "~/src/nanoclaw/emacs/nanoclaw.el"))
+;;   (load (expand-file-name "/opt/talon/emacs/talon.el"))
 ;;   (map! :leader
-;;         :prefix ("N" . "NanoClaw")
-;;         :desc "Chat buffer" "c" #'nanoclaw-chat
-;;         :desc "Send org"    "o" #'nanoclaw-org-send)
+;;         :prefix ("T" . "Talon")
+;;         :desc "Chat buffer" "c" #'talon-chat
+;;         :desc "Send org"    "o" #'talon-org-send)
 ;;   ;; Evil users: teach evil about the C-c C-c send binding
 ;;   (after! evil
-;;     (evil-define-key '(normal insert) nanoclaw-chat-mode-map
-;;       (kbd "C-c C-c") #'nanoclaw-chat-send))
+;;     (evil-define-key '(normal insert) talon-chat-mode-map
+;;       (kbd "C-c C-c") #'talon-chat-send))
 
 ;;; Code:
 
@@ -36,56 +36,56 @@
 ;; ---------------------------------------------------------------------------
 ;; Customization
 
-(defgroup nanoclaw nil
-  "NanoClaw AI assistant interface."
+(defgroup talon nil
+  "Talon AI assistant interface."
   :group 'tools
-  :prefix "nanoclaw-")
+  :prefix "talon-")
 
-(defcustom nanoclaw-host "localhost"
-  "Hostname where NanoClaw is running."
+(defcustom talon-host "localhost"
+  "Hostname where Talon is running."
   :type 'string
-  :group 'nanoclaw)
+  :group 'talon)
 
-(defcustom nanoclaw-port 8766
-  "Port for the NanoClaw Emacs channel HTTP server."
+(defcustom talon-port 8766
+  "Port for the Talon Emacs channel HTTP server."
   :type 'integer
-  :group 'nanoclaw)
+  :group 'talon)
 
-(defcustom nanoclaw-auth-token nil
-  "Bearer token for NanoClaw authentication (matches EMACS_AUTH_TOKEN in .env).
+(defcustom talon-auth-token nil
+  "Bearer token for Talon authentication (matches EMACS_AUTH_TOKEN in .env).
 Leave nil if EMACS_AUTH_TOKEN is not set."
   :type '(choice (const nil) string)
-  :group 'nanoclaw)
+  :group 'talon)
 
-(defcustom nanoclaw-poll-interval 1.5
+(defcustom talon-poll-interval 1.5
   "Seconds between response polls when waiting for a reply."
   :type 'number
-  :group 'nanoclaw)
+  :group 'talon)
 
-(defcustom nanoclaw-agent-name "Andy"
-  "Display name for the NanoClaw agent (matches ASSISTANT_NAME in .env)."
+(defcustom talon-agent-name "Talon"
+  "Display name for the Talon agent (matches ASSISTANT_NAME in .env)."
   :type 'string
-  :group 'nanoclaw)
+  :group 'talon)
 
-(defcustom nanoclaw-convert-to-org t
+(defcustom talon-convert-to-org t
   "When non-nil, convert agent responses to org-mode format.
 Uses pandoc when available; falls back to regex substitutions."
   :type 'boolean
-  :group 'nanoclaw)
+  :group 'talon)
 
-(defcustom nanoclaw-timestamp-format "%H:%M"
+(defcustom talon-timestamp-format "%H:%M"
   "Format string for timestamps shown next to agent replies in the chat buffer.
 Passed to `format-time-string'.  Set to nil to suppress timestamps."
   :type '(choice (const nil) string)
-  :group 'nanoclaw)
+  :group 'talon)
 
 ;; ---------------------------------------------------------------------------
 ;; Formatting helpers
 
-(defun nanoclaw--to-org (text)
+(defun talon--to-org (text)
   "Convert TEXT (markdown or plain) to org-mode markup.
 Tries pandoc -f gfm -t org when available; falls back to regex."
-  (if (not nanoclaw-convert-to-org)
+  (if (not talon-convert-to-org)
       text
     (if (executable-find "pandoc")
         (with-temp-buffer
@@ -98,13 +98,13 @@ Tries pandoc -f gfm -t org when available; falls back to regex."
             (if (zerop exit)
                 (string-trim (buffer-string))
               text)))
-      (nanoclaw--md-to-org-regex text))))
+      (talon--md-to-org-regex text))))
 
 ;; NOTE: This function expects standard markdown as input (e.g. **bold**, *italic*).
 ;; Agents responding on this channel must output markdown, not org-mode syntax.
 ;; If the agent outputs org-mode directly, markers like *bold* will be incorrectly
 ;; re-converted to /bold/ by the italic rule.
-(defun nanoclaw--md-to-org-regex (text)
+(defun talon--md-to-org-regex (text)
   "Lightweight markdown → org conversion using regexp substitutions."
   (let ((s text))
     ;; Fenced code blocks  ```lang\n…\n```  →  #+begin_src lang\n…\n#+end_src
@@ -141,67 +141,67 @@ Tries pandoc -f gfm -t org when available; falls back to regex."
              "\\[\\([^]]+\\)\\](\\([^)]+\\))" "[[\\2][\\1]]" s))
     s))
 
-(defun nanoclaw--format-timestamp ()
+(defun talon--format-timestamp ()
   "Return a formatted timestamp string, or nil if disabled."
-  (when nanoclaw-timestamp-format
-    (format-time-string nanoclaw-timestamp-format)))
+  (when talon-timestamp-format
+    (format-time-string talon-timestamp-format)))
 
 ;; ---------------------------------------------------------------------------
 ;; Internal state
 
-(defvar nanoclaw--poll-timer nil
+(defvar talon--poll-timer nil
   "Timer used to poll for responses in the chat buffer.")
 
-(defvar nanoclaw--last-timestamp 0
+(defvar talon--last-timestamp 0
   "Epoch ms of the most recently received message.")
 
-(defvar nanoclaw--pending nil
+(defvar talon--pending nil
   "Non-nil while waiting for a response.")
 
-(defvar-local nanoclaw--thinking-dot-count 0
+(defvar-local talon--thinking-dot-count 0
   "Dot cycle counter for the animated thinking indicator.")
 
-(defvar-local nanoclaw--input-beg nil
+(defvar-local talon--input-beg nil
   "Marker for the start of the current user input area.")
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP helpers
 
-(defun nanoclaw--url (path)
-  "Return the full URL for PATH on the NanoClaw server."
-  (format "http://%s:%d%s" nanoclaw-host nanoclaw-port path))
+(defun talon--url (path)
+  "Return the full URL for PATH on the Talon server."
+  (format "http://%s:%d%s" talon-host talon-port path))
 
-(defun nanoclaw--headers ()
-  "Return alist of HTTP headers for NanoClaw requests."
+(defun talon--headers ()
+  "Return alist of HTTP headers for Talon requests."
   (let ((hdrs '(("Content-Type" . "application/json"))))
-    (when nanoclaw-auth-token
-      (push (cons "Authorization" (concat "Bearer " nanoclaw-auth-token)) hdrs))
+    (when talon-auth-token
+      (push (cons "Authorization" (concat "Bearer " talon-auth-token)) hdrs))
     hdrs))
 
-(defun nanoclaw--post (text callback)
-  "POST TEXT to NanoClaw and call CALLBACK with the response alist."
+(defun talon--post (text callback)
+  "POST TEXT to Talon and call CALLBACK with the response alist."
   (let* ((url-request-method "POST")
-         (url-request-extra-headers (nanoclaw--headers))
+         (url-request-extra-headers (talon--headers))
          (url-request-data (encode-coding-string
                             (json-encode `((text . ,text)))
                             'utf-8)))
     (url-retrieve
-     (nanoclaw--url "/api/message")
+     (talon--url "/api/message")
      (lambda (status)
        (if (plist-get status :error)
-           (message "NanoClaw: POST error %s" (plist-get status :error))
+           (message "Talon: POST error %s" (plist-get status :error))
          (goto-char (point-min))
          (re-search-forward "\n\n" nil t)
          (let ((data (ignore-errors (json-read))))
            (funcall callback data))))
      nil t t)))
 
-(defun nanoclaw--poll (since callback)
+(defun talon--poll (since callback)
   "GET messages newer than SINCE (epoch ms) and call CALLBACK with the list."
   (let* ((url-request-method "GET")
-         (url-request-extra-headers (nanoclaw--headers)))
+         (url-request-extra-headers (talon--headers)))
     (url-retrieve
-     (nanoclaw--url (format "/api/messages?since=%d" since))
+     (talon--url (format "/api/messages?since=%d" since))
      (lambda (status)
        (unless (plist-get status :error)
          (goto-char (point-min))
@@ -216,16 +216,16 @@ Tries pandoc -f gfm -t org when available; falls back to regex."
 ;; ---------------------------------------------------------------------------
 ;; Chat buffer
 
-(defvar nanoclaw-chat-mode-map
+(defvar talon-chat-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET")      #'newline)
     (define-key map (kbd "<return>") #'newline)
-    (define-key map (kbd "C-c C-c") #'nanoclaw-chat-send)
+    (define-key map (kbd "C-c C-c") #'talon-chat-send)
     map)
-  "Keymap for `nanoclaw-chat-mode'.")
+  "Keymap for `talon-chat-mode'.")
 
-(define-derived-mode nanoclaw-chat-mode org-mode "NanoClaw"
-  "Major mode for the NanoClaw chat buffer.
+(define-derived-mode talon-chat-mode org-mode "Talon"
+  "Major mode for the Talon chat buffer.
 Derives from org-mode so that org markup (headings, bold, code blocks,
 etc.) is fontified automatically.  RET and <return> insert plain newlines
 for multi-line input; send with C-c C-c."
@@ -235,40 +235,40 @@ for multi-line input; send with C-c C-c."
   (setq-local org-return-follows-link nil)
   (setq-local org-cycle-emulate-tab nil)
   ;; Ensure send binding beats org-mode's C-c C-c via the buffer-local map
-  (local-set-key (kbd "C-c C-c") #'nanoclaw-chat-send))
+  (local-set-key (kbd "C-c C-c") #'talon-chat-send))
 
-(defun nanoclaw--advance-input-beg ()
-  "Move `nanoclaw--input-beg' to point-max in the chat buffer."
-  (with-current-buffer (nanoclaw--chat-buffer)
-    (when nanoclaw--input-beg (set-marker nanoclaw--input-beg nil))
-    (setq nanoclaw--input-beg (copy-marker (point-max)))))
+(defun talon--advance-input-beg ()
+  "Move `talon--input-beg' to point-max in the chat buffer."
+  (with-current-buffer (talon--chat-buffer)
+    (when talon--input-beg (set-marker talon--input-beg nil))
+    (setq talon--input-beg (copy-marker (point-max)))))
 
-(defun nanoclaw--chat-buffer ()
-  "Return the NanoClaw chat buffer, creating it if necessary."
-  (or (get-buffer "*NanoClaw*")
-      (with-current-buffer (get-buffer-create "*NanoClaw*")
-        (nanoclaw-chat-mode)
+(defun talon--chat-buffer ()
+  "Return the Talon chat buffer, creating it if necessary."
+  (or (get-buffer "*Talon*")
+      (with-current-buffer (get-buffer-create "*Talon*")
+        (talon-chat-mode)
         (set-buffer-file-coding-system 'utf-8)
-        (add-hook 'kill-buffer-hook #'nanoclaw--stop-poll nil t)
-        (nanoclaw--insert-header)
-        (setq nanoclaw--input-beg (copy-marker (point-max)))
+        (add-hook 'kill-buffer-hook #'talon--stop-poll nil t)
+        (talon--insert-header)
+        (setq talon--input-beg (copy-marker (point-max)))
         (current-buffer))))
 
-(defun nanoclaw--insert-header ()
+(defun talon--insert-header ()
   "Insert the welcome header into the chat buffer."
   (let ((inhibit-read-only t))
     (insert (propertize
-             (format "── NanoClaw (%s) ──────────────────────────────\n\n"
-                     nanoclaw-agent-name)
+             (format "── Talon (%s) ──────────────────────────────\n\n"
+                     talon-agent-name)
              'face 'font-lock-comment-face))))
 
-(defun nanoclaw--chat-insert (speaker text)
+(defun talon--chat-insert (speaker text)
   "Append SPEAKER: TEXT to the chat buffer."
-  (with-current-buffer (nanoclaw--chat-buffer)
+  (with-current-buffer (talon--chat-buffer)
     (let* ((inhibit-read-only t)
            (is-agent (not (string= speaker "You")))
-           (display-text (if is-agent (nanoclaw--to-org text) text))
-           (ts (nanoclaw--format-timestamp))
+           (display-text (if is-agent (talon--to-org text) text))
+           (ts (talon--format-timestamp))
            (label (if ts (format "%s [%s]" speaker ts) speaker))
            (face  (if is-agent 'font-lock-string-face 'font-lock-keyword-face)))
       (goto-char (point-max))
@@ -276,123 +276,123 @@ for multi-line input; send with C-c C-c."
       (insert display-text "\n\n")
       (goto-char (point-max))
       (when is-agent
-        (nanoclaw--advance-input-beg)))))
+        (talon--advance-input-beg)))))
 
 ;;;###autoload
-(defun nanoclaw-chat ()
-  "Open the NanoClaw chat buffer."
+(defun talon-chat ()
+  "Open the Talon chat buffer."
   (interactive)
-  (pop-to-buffer (nanoclaw--chat-buffer))
+  (pop-to-buffer (talon--chat-buffer))
   (goto-char (point-max)))
 
-(defun nanoclaw-chat-send ()
-  "Send the accumulated input area as a message to NanoClaw.
+(defun talon-chat-send ()
+  "Send the accumulated input area as a message to Talon.
 Use C-c C-c to send; RET inserts a plain newline for multi-line messages."
   (interactive)
-  (when nanoclaw--pending
-    (message "NanoClaw: waiting for previous response...")
-    (cl-return-from nanoclaw-chat-send))
-  (let* ((beg (if (and nanoclaw--input-beg (marker-buffer nanoclaw--input-beg))
-                  (marker-position nanoclaw--input-beg)
+  (when talon--pending
+    (message "Talon: waiting for previous response...")
+    (cl-return-from talon-chat-send))
+  (let* ((beg (if (and talon--input-beg (marker-buffer talon--input-beg))
+                  (marker-position talon--input-beg)
                 (line-beginning-position)))
          (text (string-trim (buffer-substring-no-properties beg (point-max)))))
     (when (string-empty-p text)
       (user-error "Nothing to send"))
     (let ((inhibit-read-only t))
       (delete-region beg (point-max)))
-    (nanoclaw--chat-insert "You" text)
-    (nanoclaw--advance-input-beg)
-    (setq nanoclaw--pending t)
-    (nanoclaw--post text
+    (talon--chat-insert "You" text)
+    (talon--advance-input-beg)
+    (setq talon--pending t)
+    (talon--post text
                     (lambda (data)
                       (when data
-                        (setq nanoclaw--last-timestamp
+                        (setq talon--last-timestamp
                               (or (cdr (assq 'timestamp data))
-                                  nanoclaw--last-timestamp))
-                        (nanoclaw--start-thinking)
-                        (nanoclaw--start-poll))))))
+                                  talon--last-timestamp))
+                        (talon--start-thinking)
+                        (talon--start-poll))))))
 
-(defun nanoclaw--start-poll ()
+(defun talon--start-poll ()
   "Start polling for new messages."
-  (nanoclaw--stop-poll)
-  (setq nanoclaw--poll-timer
-        (run-with-timer nanoclaw-poll-interval nanoclaw-poll-interval
-                        #'nanoclaw--poll-tick)))
+  (talon--stop-poll)
+  (setq talon--poll-timer
+        (run-with-timer talon-poll-interval talon-poll-interval
+                        #'talon--poll-tick)))
 
-(defun nanoclaw--stop-poll ()
+(defun talon--stop-poll ()
   "Stop the polling timer."
-  (when nanoclaw--poll-timer
-    (cancel-timer nanoclaw--poll-timer)
-    (setq nanoclaw--poll-timer nil)))
+  (when talon--poll-timer
+    (cancel-timer talon--poll-timer)
+    (setq talon--poll-timer nil)))
 
-(defun nanoclaw--start-thinking ()
+(defun talon--start-thinking ()
   "Insert an animated thinking indicator at the end of the chat buffer."
-  (with-current-buffer (nanoclaw--chat-buffer)
+  (with-current-buffer (talon--chat-buffer)
     (let ((inhibit-read-only t))
       (goto-char (point-max))
-      (setq nanoclaw--thinking-dot-count 1)
-      (insert (propertize (format "%s: .\n\n" nanoclaw-agent-name)
-                          'nanoclaw-thinking t
+      (setq talon--thinking-dot-count 1)
+      (insert (propertize (format "%s: .\n\n" talon-agent-name)
+                          'talon-thinking t
                           'face 'font-lock-string-face)))))
 
-(defun nanoclaw--tick-thinking ()
+(defun talon--tick-thinking ()
   "Advance the dot animation in the thinking indicator."
-  (let ((buf (get-buffer "*NanoClaw*")))
+  (let ((buf (get-buffer "*Talon*")))
     (when buf
       (with-current-buffer buf
-        (when nanoclaw--pending
+        (when talon--pending
           (let* ((inhibit-read-only t)
                  (pos (text-property-any (point-min) (point-max)
-                                         'nanoclaw-thinking t)))
+                                         'talon-thinking t)))
             (when pos
               (let* ((end (or (next-single-property-change
-                               pos 'nanoclaw-thinking) (point-max)))
-                     (n (1+ (mod nanoclaw--thinking-dot-count 3))))
-                (setq nanoclaw--thinking-dot-count n)
+                               pos 'talon-thinking) (point-max)))
+                     (n (1+ (mod talon--thinking-dot-count 3))))
+                (setq talon--thinking-dot-count n)
                 (delete-region pos end)
                 (save-excursion
                   (goto-char pos)
                   (insert (propertize
-                           (format "%s: %s\n\n" nanoclaw-agent-name
+                           (format "%s: %s\n\n" talon-agent-name
                                    (make-string n ?.))
-                           'nanoclaw-thinking t
+                           'talon-thinking t
                            'face 'font-lock-string-face)))))))))))
 
-(defun nanoclaw--clear-thinking ()
+(defun talon--clear-thinking ()
   "Remove the thinking indicator from the chat buffer."
-  (let ((buf (get-buffer "*NanoClaw*")))
+  (let ((buf (get-buffer "*Talon*")))
     (when buf
       (with-current-buffer buf
         (let* ((inhibit-read-only t)
                (pos (text-property-any (point-min) (point-max)
-                                       'nanoclaw-thinking t)))
+                                       'talon-thinking t)))
           (when pos
             (delete-region pos (or (next-single-property-change
-                                    pos 'nanoclaw-thinking) (point-max)))))))))
+                                    pos 'talon-thinking) (point-max)))))))))
 
-(defun nanoclaw--poll-tick ()
+(defun talon--poll-tick ()
   "Poll for new messages and insert them into the chat buffer."
-  (nanoclaw--tick-thinking)
-  (nanoclaw--poll
-   nanoclaw--last-timestamp
+  (talon--tick-thinking)
+  (talon--poll
+   talon--last-timestamp
    (lambda (msgs)
      (dolist (msg msgs)
        (let ((text (cdr (assq 'text msg)))
              (ts   (cdr (assq 'timestamp msg))))
-         (when (and text (> ts nanoclaw--last-timestamp))
-           (setq nanoclaw--last-timestamp ts)
-           (nanoclaw--clear-thinking)
-           (nanoclaw--chat-insert nanoclaw-agent-name text))))
+         (when (and text (> ts talon--last-timestamp))
+           (setq talon--last-timestamp ts)
+           (talon--clear-thinking)
+           (talon--chat-insert talon-agent-name text))))
      (when msgs
-       (setq nanoclaw--pending nil)
-       (nanoclaw--stop-poll)))))
+       (setq talon--pending nil)
+       (talon--stop-poll)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Org integration
 
 ;;;###autoload
-(defun nanoclaw-org-send ()
-  "Send the current org subtree to NanoClaw and insert the response as a child.
+(defun talon-org-send ()
+  "Send the current org subtree to Talon and insert the response as a child.
 
 If a region is active, send the region text instead."
   (interactive)
@@ -400,23 +400,23 @@ If a region is active, send the region text instead."
     (user-error "Not in an org-mode buffer"))
   (let ((text (if (use-region-p)
                   (buffer-substring-no-properties (region-beginning) (region-end))
-                (nanoclaw--org-subtree-text))))
+                (talon--org-subtree-text))))
     (when (string-empty-p (string-trim text))
       (user-error "Nothing to send"))
-    (message "NanoClaw: sending to %s..." nanoclaw-agent-name)
+    (message "Talon: sending to %s..." talon-agent-name)
     (let ((marker (point-marker))
           (buf    (current-buffer)))
-      (nanoclaw--post
+      (talon--post
        text
        (lambda (data)
-         (let* ((ts (or (cdr (assq 'timestamp data)) (nanoclaw--now-ms)))
+         (let* ((ts (or (cdr (assq 'timestamp data)) (talon--now-ms)))
                 (level (with-current-buffer buf
                          (save-excursion (goto-char marker) (org-outline-level))))
                 (ph (with-current-buffer buf
                       (save-excursion
                         (goto-char marker)
-                        (nanoclaw--org-insert-placeholder level)))))
-           (nanoclaw--poll-until-response
+                        (talon--org-insert-placeholder level)))))
+           (talon--poll-until-response
             ts
             (lambda (response)
               (with-current-buffer buf
@@ -431,9 +431,9 @@ If a region is active, send the region text instead."
                       (delete-region beg end))
                     (set-marker ph nil))
                   (goto-char marker)
-                  (nanoclaw--org-insert-response response))))
+                  (talon--org-insert-response response))))
             (lambda ()
-              (message "NanoClaw: timed out waiting for response")
+              (message "Talon: timed out waiting for response")
               (when (marker-buffer ph)
                 (with-current-buffer (marker-buffer ph)
                   (let* ((inhibit-read-only t)
@@ -445,16 +445,16 @@ If a region is active, send the region text instead."
                     (delete-region beg end))
                   (set-marker ph nil)))))))))))
 
-(defun nanoclaw--org-insert-placeholder (level)
+(defun talon--org-insert-placeholder (level)
   "Insert a processing child heading at LEVEL+1 and return a marker at its start."
   (org-back-to-heading t)
   (org-end-of-subtree t t)
   (let ((beg (point)))
     (insert "\n" (make-string (1+ level) ?*) " "
-            nanoclaw-agent-name " [processing...]\n\n")
+            talon-agent-name " [processing...]\n\n")
     (copy-marker beg)))
 
-(defun nanoclaw--org-subtree-text ()
+(defun talon--org-subtree-text ()
   "Return the text of the org subtree at point (heading + body)."
   (org-with-wide-buffer
    (org-back-to-heading t)
@@ -462,30 +462,30 @@ If a region is active, send the region text instead."
          (end   (progn (org-end-of-subtree t t) (point))))
      (buffer-substring-no-properties start end))))
 
-(defun nanoclaw--org-insert-response (text)
+(defun talon--org-insert-response (text)
   "Insert TEXT as a child org heading under the current subtree."
   (org-back-to-heading t)
   (let* ((level (org-outline-level))
          (child-stars (make-string (1+ level) ?*))
          (timestamp (format-time-string "[%Y-%m-%d %a %H:%M]"))
-         (body (nanoclaw--to-org text)))
+         (body (talon--to-org text)))
     (org-end-of-subtree t t)
-    (insert "\n" child-stars " " nanoclaw-agent-name " " timestamp "\n"
+    (insert "\n" child-stars " " talon-agent-name " " timestamp "\n"
             body "\n")))
 
-(defun nanoclaw--now-ms ()
+(defun talon--now-ms ()
   "Return current time as milliseconds since epoch."
   (let ((time (current-time)))
     (+ (* (+ (* (car time) 65536) (cadr time)) 1000)
        (/ (caddr time) 1000))))
 
-(defun nanoclaw--poll-until-response (since callback timeout-fn &optional attempts)
+(defun talon--poll-until-response (since callback timeout-fn &optional attempts)
   "Poll until a message newer than SINCE arrives, then call CALLBACK.
 Calls TIMEOUT-FN after 60 attempts (~90s)."
   (let ((n (or attempts 0)))
     (if (>= n 60)
         (funcall timeout-fn)
-      (nanoclaw--poll
+      (talon--poll
        since
        (lambda (msgs)
          (let ((fresh (seq-filter (lambda (m) (> (cdr (assq 'timestamp m)) since))
@@ -494,11 +494,11 @@ Calls TIMEOUT-FN after 60 attempts (~90s)."
                (let ((text (mapconcat (lambda (m) (cdr (assq 'text m)))
                                       fresh "\n")))
                  (funcall callback text))
-             (run-with-timer nanoclaw-poll-interval nil
-                             #'nanoclaw--poll-until-response
+             (run-with-timer talon-poll-interval nil
+                             #'talon--poll-until-response
                              since callback timeout-fn (1+ n)))))))))
 
 ;; ---------------------------------------------------------------------------
 
-(provide 'nanoclaw)
-;;; nanoclaw.el ends here
+(provide 'talon)
+;;; talon.el ends here

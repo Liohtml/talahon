@@ -66,9 +66,8 @@ RUN set -eux; \
 RUN python3 -m venv /opt/opensearch-mcp \
     && /opt/opensearch-mcp/bin/pip install --quiet opensearch-mcp-server pyyaml
 
-# MySQL MCP server (Python; replaces the old npm @benborla29/mcp-server-mysql
-# so the image needs no node). Env: MYSQL_HOST/PORT/USER/PASSWORD/DATABASE —
-# the wrapper maps the legacy MYSQL_PASS/MYSQL_DB names.
+# MySQL MCP server (Python). Env: MYSQL_HOST/PORT/USER/PASSWORD/DATABASE —
+# the wrapper also accepts MYSQL_PASS/MYSQL_DB.
 RUN python3 -m venv /opt/mysql-mcp \
     && /opt/mysql-mcp/bin/pip install --quiet mysql-mcp-server
 

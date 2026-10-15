@@ -1,5 +1,5 @@
-//! Orchestrator behaviour tests (ports of the `src/index.ts` semantics and
-//! the session-command / task / investigation flows) against fakes and an
+//! Orchestrator behaviour tests (message pipeline semantics and the
+//! session-command / task / investigation flows) against fakes and an
 //! in-memory database.
 
 use std::sync::Arc;
@@ -53,7 +53,7 @@ async fn trigger_gating_accumulates_context_until_trigger() {
 
     h.launcher.push(Script::reply("on it"));
     h.orch
-        .accept_message(TEAM, msg(TEAM, "2", "bob", "@Andy please look", &ts(2)));
+        .accept_message(TEAM, msg(TEAM, "2", "bob", "@Talon please look", &ts(2)));
     assert!(h.orch.process_group_messages(TEAM).await);
     let prompts = h.launcher.prompts();
     assert_eq!(prompts.len(), 1);
@@ -82,12 +82,12 @@ async fn trigger_from_disallowed_sender_is_ignored() {
         .register_group_inner(TEAM, group("Team", "team", false), true, false)
         .unwrap();
     h.orch
-        .accept_message(TEAM, msg(TEAM, "1", "mallory", "@Andy do it", &ts(1)));
+        .accept_message(TEAM, msg(TEAM, "1", "mallory", "@Talon do it", &ts(1)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert!(h.launcher.calls().is_empty());
 
     h.orch
-        .accept_message(TEAM, msg(TEAM, "2", "alice", "@Andy do it", &ts(2)));
+        .accept_message(TEAM, msg(TEAM, "2", "alice", "@Talon do it", &ts(2)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert_eq!(h.launcher.calls().len(), 1);
 }
@@ -195,7 +195,7 @@ async fn cursor_recovered_from_last_bot_message() {
         .unwrap();
     h.orch
         .accept_message(MAIN, msg(MAIN, "1", "me", "old question", &ts(1)));
-    let mut bot = msg(MAIN, "2", "Andy", "old answer", &ts(2));
+    let mut bot = msg(MAIN, "2", "Talon", "old answer", &ts(2));
     bot.is_bot_message = true;
     h.orch.accept_message(MAIN, bot);
     h.orch
@@ -649,7 +649,7 @@ async fn gateway_token_label_is_the_lanes_ipc_key() {
         h.launcher.push(Script::reply("ok"));
         let n = u32::try_from(i).unwrap() + 1;
         h.orch
-            .accept_message(jid, msg(jid, &n.to_string(), "u", "@Andy hi", &ts(n)));
+            .accept_message(jid, msg(jid, &n.to_string(), "u", "@Talon hi", &ts(n)));
         assert!(h.orch.process_group_messages(jid).await);
     }
     let labels: Vec<String> = h
@@ -753,7 +753,7 @@ async fn session_command_from_untrusted_sender_is_denied() {
         .register_group_inner(TEAM, group("Team", "team", false), true, false)
         .unwrap();
     h.orch
-        .accept_message(TEAM, msg(TEAM, "1", "bob", "@Andy /compact", &ts(1)));
+        .accept_message(TEAM, msg(TEAM, "1", "bob", "@Talon /compact", &ts(1)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert!(h.launcher.calls().is_empty());
     assert_eq!(
@@ -976,7 +976,7 @@ async fn on_message_stores_and_wakes_the_loop() {
     tokio::time::timeout(Duration::from_secs(1), h.orch.wake.notified())
         .await
         .expect("loop woken");
-    let stored = h.db.get_messages_since(MAIN, "", "Andy", 10).unwrap();
+    let stored = h.db.get_messages_since(MAIN, "", "Talon", 10).unwrap();
     assert_eq!(stored.len(), 1, "stored under the channel's JID");
 }
 
@@ -1029,7 +1029,7 @@ async fn drop_mode_discards_denied_senders_before_storage() {
     let mut mine = msg(TEAM, "3", "operator", "note", &ts(3));
     mine.is_from_me = true;
     assert!(h.orch.accept_message(TEAM, mine));
-    let stored = h.db.get_messages_since(TEAM, "", "Andy", 10).unwrap();
+    let stored = h.db.get_messages_since(TEAM, "", "Talon", 10).unwrap();
     let ids: Vec<&str> = stored.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, vec!["2", "3"]);
 }
@@ -1108,7 +1108,7 @@ async fn persisted_groups_survive_a_restart() {
 #[tokio::test]
 async fn ipc_registration_installs_claude_md_without_following_symlinks() {
     let h = harness_with(HarnessOptions {
-        env: format!("{}ASSISTANT_NAME=Talon\n", crate::testutil::VLLM_ENV),
+        env: format!("{}ASSISTANT_NAME=Nova\n", crate::testutil::VLLM_ENV),
         ..HarnessOptions::default()
     });
     let name = h.orch.config().assistant_name.clone();
@@ -1116,7 +1116,7 @@ async fn ipc_registration_installs_claude_md_without_following_symlinks() {
     std::fs::create_dir_all(groups.join("global")).unwrap();
     std::fs::write(
         groups.join("global/CLAUDE.md"),
-        "# Andy\n\nYou are Andy, a SOC analyst.\n",
+        "# Talon\n\nYou are Talon, a SOC analyst.\n",
     )
     .unwrap();
 
@@ -1147,7 +1147,7 @@ async fn group_bootstrap_never_follows_symlinked_folders_or_templates() {
 
     // A symlinked group folder: neither logs/ nor CLAUDE.md land outside.
     std::fs::create_dir_all(groups.join("global")).unwrap();
-    std::fs::write(groups.join("global/CLAUDE.md"), "# Andy\n").unwrap();
+    std::fs::write(groups.join("global/CLAUDE.md"), "# Talon\n").unwrap();
     let outside = h.root().join("outside-dir");
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, groups.join("evil")).unwrap();
@@ -1605,7 +1605,7 @@ async fn plain_tasks_do_not_touch_investigations_or_sessions() {
         "group context resumes"
     );
     assert!(input.script.is_some());
-    // TS parity: task runs never overwrite the chat session.
+    // Task runs never overwrite the chat session.
     assert_eq!(h.orch.session_for_key("main").as_deref(), Some("chat-sess"));
     assert!(h.db.list_investigations(10).unwrap().is_empty());
 }

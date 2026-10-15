@@ -1,5 +1,4 @@
-//! `docker run` argument construction (port of `buildContainerArgs` /
-//! `buildProviderArgs` in `src/container-runner.ts`) with the hardening of
+//! `docker run` argument construction with the hardening of
 //! `docs/RUST_ARCHITECTURE.md` §3.3.
 //!
 //! ```text

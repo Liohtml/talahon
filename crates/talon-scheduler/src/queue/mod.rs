@@ -1,5 +1,4 @@
-//! Per-lane serialization with a global container limit (port of
-//! `src/group-queue.ts`).
+//! Per-lane serialization with a global container limit.
 //!
 //! A *lane* is a chat JID. At most one job (a message run or a scheduled
 //! task) runs per lane, and at most [`QueueConfig::max_concurrent`] jobs run
@@ -47,9 +46,9 @@ mod tests;
 /// and treated as a failure.
 #[async_trait]
 pub trait LaneProcessor: Send + Sync {
-    /// Process all pending messages for `chat_jid` (TS
-    /// `processGroupMessages`). Return `false` to have the queue retry with
-    /// backoff (e.g. the agent failed and the cursor was rolled back).
+    /// Process all pending messages for `chat_jid`. Return `false` to have
+    /// the queue retry with backoff (e.g. the agent failed and the cursor
+    /// was rolled back).
     async fn process_messages(&self, chat_jid: &str) -> bool;
 
     /// Run the scheduled task `task_id` in the lane `chat_jid`. Hosts
@@ -80,7 +79,7 @@ pub struct QueueConfig {
     /// Backoff for failed message runs.
     pub retry: RetryPolicy,
     /// After the shutdown grace period, stop containers that are still
-    /// running. `false` (TS behaviour) leaves them detached to finish on
+    /// running. `false` (the default) leaves them detached to finish on
     /// their own.
     pub stop_on_shutdown: bool,
     /// Upper bound for a single [`RunningContainer::stop`] call.
@@ -88,8 +87,8 @@ pub struct QueueConfig {
 }
 
 impl QueueConfig {
-    /// Defaults: TS retry policy with cap + jitter, containers detached on
-    /// shutdown, 15 s stop timeout.
+    /// Defaults: [`RetryPolicy::default`] (capped, jittered), containers
+    /// detached on shutdown, 15 s stop timeout.
     pub fn new(data_dir: impl Into<PathBuf>, max_concurrent: usize) -> Self {
         Self {
             max_concurrent,
@@ -316,7 +315,7 @@ impl GroupQueue {
         queue
     }
 
-    /// Install (or replace) the host callbacks (TS `setProcessMessagesFn`).
+    /// Install (or replace) the host callbacks.
     /// Jobs started before this call run without a processor and count as
     /// successful no-ops.
     pub fn set_processor(&self, processor: Arc<dyn LaneProcessor>) {
@@ -412,8 +411,8 @@ impl GroupQueue {
         EnqueueOutcome::Queued
     }
 
-    /// Record the container serving the lane's current job (TS
-    /// `registerProcess`). Returns `false` when the lane has no running job
+    /// Record the container serving the lane's current job. Returns `false`
+    /// when the lane has no running job
     /// (nothing is recorded) or `ipc_key` is invalid (the container is
     /// recorded for `stop`, but IPC writes stay disabled).
     pub fn register_process(
@@ -556,7 +555,7 @@ impl GroupQueue {
     }
 
     /// A timer that writes the `_close` sentinel for `chat_jid` after
-    /// `delay` (TS idle timer / task close timer). Dropping it cancels it.
+    /// `delay` (idle timer / task close timer). Dropping it cancels it.
     pub fn close_timer(&self, chat_jid: &str, delay: Duration) -> CloseTimer {
         CloseTimer {
             queue: self.clone(),

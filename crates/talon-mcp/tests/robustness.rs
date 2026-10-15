@@ -313,7 +313,7 @@ async fn oversized_response_fails_only_that_call() {
     );
     assert!(started.elapsed() < Duration::from_secs(1));
 
-    // TypeScript ordering: id after result.
+    // Other field order (as some MCP SDKs serialize it): id after result.
     let c = Arc::clone(&client);
     let call = tokio::spawn(async move { c.call_tool("big", json!({}), None).await });
     let req = peer.recv_method("tools/call").await;

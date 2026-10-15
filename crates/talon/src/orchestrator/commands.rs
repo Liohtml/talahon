@@ -1,5 +1,5 @@
-//! [`SessionCommandDeps`] for one lane (the `deps` object built inside TS
-//! `processGroupMessages`).
+//! [`SessionCommandDeps`] for one lane (built while processing the lane's
+//! pending messages).
 
 use std::sync::Arc;
 

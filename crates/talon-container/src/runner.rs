@@ -1,5 +1,4 @@
-//! Container runner (port of `runContainerAgent` in
-//! `src/container-runner.ts`).
+//! Container runner: one agent run in a hardened container.
 //!
 //! Lifecycle of one run:
 //!
@@ -26,7 +25,7 @@
 //!    timeout (or [`ContainerHandle::stop`]) the container gets `<runtime>
 //!    stop -t <grace>`; if it is still alive after the grace period it is
 //!    `kill`ed and the CLI process SIGKILLed.
-//! 6. Exit mapping (TS parity): output limit exceeded => error; timeout
+//! 6. Exit mapping: output limit exceeded => error; timeout
 //!    after output => success (idle cleanup); timeout without output =>
 //!    error; exit 0 => success; exit 137 after output => success; anything
 //!    else => error with the (redacted) stderr tail. The run waits for the
@@ -66,7 +65,7 @@ use crate::process::{
 use crate::runtime::{AGENT_NETWORK, ContainerRuntime};
 
 /// Grace added to the idle timeout so the `_close` sentinel can act before
-/// the hard kill (TS: 30 s).
+/// the hard kill.
 pub const DEFAULT_IDLE_GRACE: Duration = Duration::from_secs(30);
 /// `docker stop -t` grace.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
@@ -121,7 +120,7 @@ pub fn network_setting(raw: Option<&str>) -> Option<String> {
 const TAIL_BYTES: usize = 16 * 1024;
 /// Longest stderr line logged as-is.
 const MAX_STDERR_LINE: usize = 8 * 1024;
-/// Characters of stderr quoted in error messages (TS: 200).
+/// Characters of stderr quoted in error messages.
 const ERROR_TAIL_CHARS: usize = 200;
 /// Audit kind for refused container-config values.
 pub const AUDIT_CONFIG_REJECTED: &str = "container.config.rejected";
@@ -365,12 +364,12 @@ pub enum RunOutcome {
     OutputLimitExceeded,
 }
 
-/// Final result of a run (TS `ContainerOutput` + diagnostics).
+/// Final result of a run ([`ContainerOutput`] + diagnostics).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult {
     /// Success / error.
     pub status: OutputStatus,
-    /// Error message (TS-compatible wording).
+    /// Error message.
     pub error: Option<String>,
     /// Last non-empty session id seen in a frame.
     pub new_session_id: Option<String>,
@@ -396,7 +395,7 @@ impl RunResult {
         self.status == OutputStatus::Success
     }
 
-    /// The TS-shaped final output (`result` is null in streaming mode).
+    /// The final [`ContainerOutput`] (`result` is null in streaming mode).
     pub fn to_container_output(&self) -> ContainerOutput {
         ContainerOutput {
             status: self.status,
@@ -836,7 +835,7 @@ impl ContainerRunner {
     }
 
     /// Run to completion. `on_start` receives the handle right after the
-    /// container was spawned (TS `onProcess`), e.g. to register it with the
+    /// container was spawned, e.g. to register it with the
     /// group queue. Never fails: problems are reported in the result.
     pub async fn run<H, F>(&self, spec: RunSpec, handler: H, on_start: F) -> RunResult
     where
@@ -1157,7 +1156,7 @@ async fn run_loop<H: OutputHandler>(
     let stdout_task = tokio::spawn(read_stdout(stdout, ctx.max_output_bytes, ev_tx));
     let mut stderr_task = tokio::spawn(read_stderr(stderr, ctx.name.clone(), ctx.redactor.clone()));
 
-    // Frames are handled sequentially on their own task (TS `outputChain`).
+    // Frames are handled sequentially on their own task.
     let (out_tx, mut out_rx) = mpsc::channel::<ContainerOutput>(ctx.frame_queue_capacity);
     let handler_task = tokio::spawn(async move {
         let mut handler = handler;
@@ -1311,7 +1310,7 @@ async fn run_loop<H: OutputHandler>(
         }
     }
 
-    // Let the handler finish every accepted frame (TS waits for outputChain).
+    // Let the handler finish every accepted frame.
     if let Some(output) = pending.take() {
         if out_tx.send(output).await.is_err() {
             tracing::error!(group = %ctx.group_name, container = %ctx.name, "output handler is gone; dropping frame");
@@ -1701,7 +1700,7 @@ mod tests {
         RegisteredGroup {
             name: "Test Group".into(),
             folder: "test-group".into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             added_at: "2026-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,
@@ -1749,7 +1748,7 @@ mod tests {
             .into_bytes()
     }
 
-    // --- ports of container-runner.test.ts (timeout behaviour) ---
+    // --- timeout behaviour ---
 
     #[tokio::test(start_paused = true)]
     async fn timeout_after_output_resolves_as_success() {

@@ -16,9 +16,9 @@ use std::time::Duration;
 /// `max_delay` again, so the cap is a hard upper bound.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetryPolicy {
-    /// Retries after the initial attempt before giving up (TS: 5).
+    /// Retries after the initial attempt before giving up (default: 5).
     pub max_retries: u32,
-    /// Delay before the first retry (TS: 5 s).
+    /// Delay before the first retry (default: 5 s).
     pub base_delay: Duration,
     /// Upper bound for any single delay.
     pub max_delay: Duration,
@@ -27,8 +27,7 @@ pub struct RetryPolicy {
 }
 
 impl Default for RetryPolicy {
-    /// The TypeScript queue's policy (5 retries starting at 5 s) plus a
-    /// 5 minute cap and ±20 % jitter.
+    /// 5 retries starting at 5 s, with a 5 minute cap and ±20 % jitter.
     fn default() -> Self {
         Self {
             max_retries: 5,

@@ -1,5 +1,5 @@
-//! Port of `src/channels/telegram.test.ts` plus Bot-API-level tests against
-//! a `wiremock` Telegram.
+//! Telegram channel tests, including Bot-API-level tests against a
+//! `wiremock` Telegram.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,12 +25,12 @@ fn ok(result: Value) -> ResponseTemplate {
 fn default_host() -> Arc<RecordingHost> {
     Arc::new(RecordingHost::with_groups(&[(
         "tg:100200300",
-        group("Test Group", "test-group", "@Andy"),
+        group("Test Group", "test-group", "@Talon"),
     )]))
 }
 
 fn config(server: &MockServer) -> TelegramConfig {
-    let mut cfg = TelegramConfig::new(TOKEN, "Andy");
+    let mut cfg = TelegramConfig::new(TOKEN, "Talon");
     cfg.api_base_url = server.uri();
     cfg.poll_timeout = Duration::from_secs(1);
     cfg.error_backoff_base = Duration::from_millis(5);
@@ -43,8 +43,8 @@ fn ready_channel(server: &MockServer, host: Arc<RecordingHost>) -> TelegramChann
     let channel = TelegramChannel::new(config(server), host).unwrap();
     channel.inner.set_me(&User {
         id: 12345,
-        first_name: Some("Andy".into()),
-        username: Some("andy_ai_bot".into()),
+        first_name: Some("Talon".into()),
+        username: Some("talonai_bot".into()),
     });
     channel.inner.connected.store(true, Ordering::SeqCst);
     channel
@@ -62,7 +62,7 @@ async fn mount_startup(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path(api_path("getMe")))
         .respond_with(ok(json!({
-            "id": 12345, "is_bot": true, "first_name": "Andy", "username": "andy_ai_bot"
+            "id": 12345, "is_bot": true, "first_name": "Talon", "username": "talonai_bot"
         })))
         .mount(server)
         .await;
@@ -210,7 +210,7 @@ async fn connect_fails_on_rejected_token_without_leaking_it() {
 async fn rejects_malformed_tokens() {
     let host: Arc<dyn ChannelHost> = default_host();
     for bad in ["", "123/../x", "123:abc?x=1", "tok en", "123:abc#frag"] {
-        let err = TelegramChannel::new(TelegramConfig::new(bad, "Andy"), Arc::clone(&host))
+        let err = TelegramChannel::new(TelegramConfig::new(bad, "Talon"), Arc::clone(&host))
             .unwrap_err()
             .to_string();
         if !bad.is_empty() {
@@ -221,7 +221,7 @@ async fn rejects_malformed_tokens() {
 
 #[test]
 fn config_debug_redacts_token() {
-    let dbg = format!("{:?}", TelegramConfig::new("123:SECRETSECRET", "Andy"));
+    let dbg = format!("{:?}", TelegramConfig::new("123:SECRETSECRET", "Talon"));
     assert!(!dbg.contains("SECRETSECRET"), "{dbg}");
 }
 
@@ -418,7 +418,7 @@ async fn skips_bot_commands_but_passes_other_slash_messages() {
     assert!(host.metadata().is_empty());
 
     deliver(&channel, text_json("/ping")).await;
-    deliver(&channel, text_json("/PING@andy_ai_bot")).await;
+    deliver(&channel, text_json("/PING@talonai_bot")).await;
     deliver(&channel, text_json("/chatid@some_other_bot")).await;
     assert!(host.messages().is_empty());
 
@@ -426,7 +426,7 @@ async fn skips_bot_commands_but_passes_other_slash_messages() {
     let msg = only_message(&host);
     assert_eq!(msg.content, "/remote-control");
 
-    // /chatid, /ping, /PING@andy_ai_bot answered; the other bot's command not.
+    // /chatid, /ping, /PING@talonai_bot answered; the other bot's command not.
     assert_eq!(requests_to(&server, "sendMessage").await.len(), 3);
 }
 
@@ -483,7 +483,7 @@ async fn uses_sender_name_as_chat_name_for_private_chats() {
     let server = MockServer::start().await;
     let host = Arc::new(RecordingHost::with_groups(&[(
         "tg:100200300",
-        group("Private", "private", "@Andy"),
+        group("Private", "private", "@Talon"),
     )]));
     let channel = ready_channel(&server, host.clone());
     let mut v = text_json("Hello");
@@ -586,21 +586,21 @@ async fn mention_case(text: &str, entities: Value) -> String {
 #[tokio::test]
 async fn translates_bot_mention_to_trigger_format() {
     let content = mention_case(
-        "@andy_ai_bot what time is it?",
+        "@talonai_bot what time is it?",
         json!([{ "type": "mention", "offset": 0, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Andy @andy_ai_bot what time is it?");
+    assert_eq!(content, "@Talon @talonai_bot what time is it?");
 }
 
 #[tokio::test]
 async fn does_not_translate_if_message_already_matches_trigger() {
     let content = mention_case(
-        "@Andy @andy_ai_bot hello",
-        json!([{ "type": "mention", "offset": 6, "length": 12 }]),
+        "@Talon @talonai_bot hello",
+        json!([{ "type": "mention", "offset": 7, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Andy @andy_ai_bot hello");
+    assert_eq!(content, "@Talon @talonai_bot hello");
 }
 
 #[tokio::test]
@@ -616,32 +616,32 @@ async fn does_not_translate_mentions_of_other_bots() {
 #[tokio::test]
 async fn handles_mention_in_middle_of_message() {
     let content = mention_case(
-        "hey @andy_ai_bot check this",
+        "hey @talonai_bot check this",
         json!([{ "type": "mention", "offset": 4, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Andy hey @andy_ai_bot check this");
+    assert_eq!(content, "@Talon hey @talonai_bot check this");
 }
 
 #[tokio::test]
 async fn mention_offsets_are_utf16() {
     // The emoji takes two UTF-16 units, so the mention starts at offset 3.
     let content = mention_case(
-        "😂 @Andy_AI_Bot look",
+        "😂 @TalonAI_Bot look",
         json!([{ "type": "mention", "offset": 3, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Andy 😂 @Andy_AI_Bot look");
+    assert_eq!(content, "@Talon 😂 @TalonAI_Bot look");
 }
 
 #[tokio::test]
 async fn out_of_range_entities_are_ignored() {
     let content = mention_case(
-        "@andy_ai_bot",
+        "@talonai_bot",
         json!([{ "type": "mention", "offset": 5, "length": 400 }]),
     )
     .await;
-    assert_eq!(content, "@andy_ai_bot");
+    assert_eq!(content, "@talonai_bot");
 }
 
 #[tokio::test]
@@ -1042,7 +1042,7 @@ async fn ping_replies_with_bot_status() {
     let reqs = requests_to(&server, "sendMessage").await;
     assert_eq!(
         reqs,
-        vec![json!({ "chat_id": "100200300", "text": "Andy is online." })]
+        vec![json!({ "chat_id": "100200300", "text": "Talon is online." })]
     );
 }
 

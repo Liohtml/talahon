@@ -468,9 +468,7 @@ fn scan_suffix_id(s: &[u8]) -> Option<RequestId> {
         end -= 1;
     }
     // Value: integer or simple string, ending at `end`.
-    let value_start;
-    let id;
-    if end > 0 && s[end - 1] == b'"' {
+    let (id, value_start) = if end > 0 && s[end - 1] == b'"' {
         let close = end - 1;
         let mut i = close;
         loop {
@@ -486,8 +484,7 @@ fn scan_suffix_id(s: &[u8]) -> Option<RequestId> {
         if text.contains('\\') {
             return None;
         }
-        id = RequestId::String(text.to_string());
-        value_start = i;
+        (RequestId::String(text.to_string()), i)
     } else {
         let mut i = end;
         while i > 0 && (s[i - 1].is_ascii_digit() || s[i - 1] == b'-') {
@@ -497,9 +494,8 @@ fn scan_suffix_id(s: &[u8]) -> Option<RequestId> {
             return None;
         }
         let n: i64 = std::str::from_utf8(&s[i..end]).ok()?.parse().ok()?;
-        id = RequestId::Number(n);
-        value_start = i;
-    }
+        (RequestId::Number(n), i)
+    };
     let mut i = value_start;
     while i > 0 && s[i - 1].is_ascii_whitespace() {
         i -= 1;

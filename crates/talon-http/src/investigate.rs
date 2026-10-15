@@ -126,9 +126,8 @@ pub fn investigation_record(
     }
 }
 
-/// Prompt for a targeted investigation (port of the TS template plus the
-/// structured-verdict step; every interpolated value is validated before it
-/// gets here).
+/// Prompt for a targeted investigation, including the structured-verdict
+/// step (every interpolated value is validated before it gets here).
 pub fn investigation_prompt(req: &InvestigationRequest, job_id: &str) -> String {
     let alert_id = req.alert_id;
     let customer_code = &req.customer_code;
@@ -248,7 +247,7 @@ pub(crate) fn persist_investigation(
     Ok(())
 }
 
-/// Verbatim port of the TS digest prompt.
+/// Prompt of the scheduled SOC monitor (digest) task.
 pub const DIGEST_PROMPT: &str = r#"You are running as a scheduled SOC monitor. Follow these steps exactly for each alert.
 
 1. Query MySQL for OPEN alerts with no completed AI investigation:

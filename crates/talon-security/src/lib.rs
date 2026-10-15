@@ -1,9 +1,9 @@
 //! # talon-security — the policy engine
 //!
-//! **Owner: agent A07.** The module layout and public signatures below are the
-//! contract consumed by talon-container, talon-ipc, talon-http, talon-tools,
-//! talon-agent and the host. Implement every `todo!()`; you may add items,
-//! but do not change/remove the listed signatures without coordinating.
+//! The module layout and public signatures below are the contract consumed
+//! by talon-container, talon-ipc, talon-http, talon-tools, talon-agent and
+//! the host. Items may be added, but do not change/remove the listed
+//! signatures without coordinating.
 //!
 //! Design rules: fail closed, never panic on attacker input, no regex
 //! catastrophic backtracking (the `regex` crate is linear-time — keep it),

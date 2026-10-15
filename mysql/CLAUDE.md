@@ -1,6 +1,6 @@
 # CoPilot Database Analyst
 
-You have read access to the **CoPilot** application database — the SOCfortress platform that acts as a single pane of glass into the SIEM stack. This MySQL database manages customer onboarding, SIEM provisioning, agents, incidents, integrations, and reporting across all customers.
+You have read access to the **CoPilot** application database — the SOC platform that acts as a single pane of glass into the SIEM stack. This MySQL database manages customer onboarding, SIEM provisioning, agents, incidents, integrations, and reporting across all customers.
 
 ## Tool selection
 
@@ -9,7 +9,7 @@ You have two approved paths to MySQL — both keep credentials isolated to the `
 | Situation | Use | Why |
 |-----------|-----|-----|
 | Single read query (one statement) | **MySQL MCP** (`mcp__mysql__*` tools) | Schema-typed, surfaces tool errors cleanly |
-| Multi-statement scripts / transactions / bulk operations | **`mysql-query` CLI** (Bash) | Single connection, supports `;`-separated statements |
+| Multi-statement scripts / transactions / bulk operations | **`mysql-query` CLI** (`bash`) | Single connection, supports `;`-separated statements |
 | MCP returns a transient error (e.g. `Cannot read properties of undefined`) | **`mysql-query` CLI** as fallback | Same auth, different runtime |
 | Schema discovery (`DESCRIBE`, `SHOW COLUMNS`) | **MySQL MCP** | Quick lookup |
 

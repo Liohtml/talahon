@@ -47,7 +47,7 @@ pub const DEFAULT_ASSISTANT_NAME: &str = "Talon";
 /// Name of the intel tool investigations should finish with.
 pub const SUBMIT_TRIAGE_REPORT: &str = "submit_triage_report";
 
-/// Prefix the TypeScript runtime put in front of scheduled-task prompts.
+/// Prefix put in front of scheduled-task prompts.
 pub const SCHEDULED_TASK_PREFIX: &str = "[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]";
 
 /// Appended (as a user message) when the per-turn tool budget is spent.
@@ -160,7 +160,7 @@ const TOOL_GUIDANCE: &str = "## Tool use
 - Long tool results are truncated (beginning and end kept). Narrow the query, filter, or read a smaller range instead of repeating the same call; an identical call returns an identical result.
 - When you are done, reply with plain text and no tool calls. That final message is delivered to the user or chat. Wrap notes that should not be delivered in <internal>...</internal>.
 - Use `send_message` only for progress updates or messages that must go out before you finish.
-- Instructions may use Claude Code tool names. Use the Talon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`, `mcp__nanoclaw__<name>` -> `<name>` (for example `send_message`, `schedule_task`). WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
+- Instructions may use Claude Code tool names. Use the Talon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`. WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
 - MCP tools are named `mcp__<server>__<tool>`.
 - To remember something for future runs, update `MEMORY.md` in the group folder (`edit_file` / `write_file`). `CLAUDE.md` files are read-only instructions: never try to modify them.";
 
@@ -175,7 +175,7 @@ pub fn build_system_prompt(inputs: &SystemPromptInputs) -> String {
     let p = &inputs.paths;
     let mut s = String::with_capacity(16 * 1024);
     s.push_str(&format!(
-        "You are {name}, an AI assistant running inside Talon, an autonomous security-operations agent platform (SOCFortress CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
+        "You are {name}, an AI assistant running inside Talon, an autonomous security-operations agent platform (CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
     ));
 
     if let Some(global) = read_instructions(&p.global.join(INSTRUCTIONS_FILE)) {
@@ -430,7 +430,7 @@ mod tests {
 
     fn inputs(root: &Path) -> SystemPromptInputs {
         SystemPromptInputs {
-            assistant_name: "Andy".into(),
+            assistant_name: "Talon".into(),
             group_folder: "main".into(),
             is_main: true,
             paths: AgentPaths::under(root),
@@ -453,7 +453,7 @@ mod tests {
         let a = build_system_prompt(&i);
         let b = build_system_prompt(&i);
         assert_eq!(a, b, "system prompt must be byte-stable");
-        assert!(a.starts_with("You are Andy"));
+        assert!(a.starts_with("You are Talon"));
         let g = a.find("GLOBAL RULES").unwrap();
         let gr = a.find("GROUP RULES").unwrap();
         let f = a.find("## Untrusted data").unwrap();

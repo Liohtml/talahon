@@ -1,6 +1,6 @@
 //! # talon-container — hardened container runtime
 //!
-//! **Owner: agent A08.** See `docs/RUST_ARCHITECTURE.md` §A08 and §3.3.
+//! See `docs/RUST_ARCHITECTURE.md` §3.3.
 //!
 //! Host-side launcher for the per-run agent container:
 //!

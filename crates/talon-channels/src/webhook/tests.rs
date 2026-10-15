@@ -500,8 +500,7 @@ fn signature_value_format() {
     );
 }
 
-/// Uses the real `talon_security::auth::hmac_sha256_hex`; panics (todo!())
-/// until A07's implementation lands.
+/// Uses the real `talon_security::auth::hmac_sha256_hex`.
 #[test]
 fn signature_with_real_hmac_matches_reference() {
     let body = r#"{"text":"hi","timestamp":"2026-01-01T00:00:00.000Z"}"#;
@@ -520,8 +519,7 @@ fn reference_hmac_matches_rfc4231() {
 }
 
 /// Uses the real `talon_security::egress::EgressPolicy` (default policy
-/// denies loopback); fails (todo!() panic) until A07's egress
-/// implementation lands.
+/// denies loopback).
 #[tokio::test]
 async fn default_policy_denies_loopback_destinations() {
     let server = MockServer::start().await;

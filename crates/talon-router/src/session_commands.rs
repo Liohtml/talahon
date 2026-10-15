@@ -1,6 +1,5 @@
 //! Session slash commands (`/compact`, `/new` and its aliases) intercepted
-//! by the orchestrator before a batch reaches the agent (port of
-//! `src/session-commands.ts`).
+//! by the orchestrator before a batch reaches the agent.
 //!
 //! The host implements [`SessionCommandDeps`]; [`handle_session_command`]
 //! drives authorization, the pre-command flush and the command itself.
@@ -48,7 +47,7 @@ impl std::fmt::Display for SessionCommand {
 }
 
 /// Extract a session command from a message, stripping a leading trigger
-/// (`@Andy /compact`). Returns `None` for anything that is not exactly a
+/// (`@Talon /compact`). Returns `None` for anything that is not exactly a
 /// known command — `/compact now` or `/deploy` fall through as prompts.
 pub fn extract_session_command(content: &str, trigger_pattern: &Regex) -> Option<SessionCommand> {
     let text = content.trim();
@@ -314,7 +313,7 @@ mod tests {
     use super::*;
 
     fn trigger() -> Regex {
-        talon_core::trigger::build_trigger_pattern("@Andy", "Andy")
+        talon_core::trigger::build_trigger_pattern("@Talon", "Talon")
     }
 
     // --- extract_session_command --------------------------------------------
@@ -330,7 +329,7 @@ mod tests {
     #[test]
     fn detects_compact_with_trigger_prefix() {
         assert_eq!(
-            extract_session_command("@Andy /compact", &trigger()),
+            extract_session_command("@Talon /compact", &trigger()),
             Some(SessionCommand::Compact)
         );
     }
@@ -380,7 +379,7 @@ mod tests {
     #[test]
     fn detects_new_with_trigger_prefix() {
         assert_eq!(
-            extract_session_command("@Andy /new", &trigger()),
+            extract_session_command("@Talon /new", &trigger()),
             Some(SessionCommand::New)
         );
     }
@@ -406,7 +405,7 @@ mod tests {
     #[test]
     fn trigger_is_case_insensitive() {
         assert_eq!(
-            extract_session_command("@andy /new", &trigger()),
+            extract_session_command("@talon /new", &trigger()),
             Some(SessionCommand::New)
         );
     }

@@ -1,5 +1,4 @@
-//! Volume mount construction (port of `buildVolumeMounts` in
-//! `src/container-runner.ts`, hardened).
+//! Volume mount construction (hardened).
 //!
 //! Layout inside the container:
 //!
@@ -20,7 +19,7 @@
 //! | `/workspace/extra/<name>/…`    | `/dev/null` (shadowed credential files)  | ro   |
 //! | `/etc/mcp-staging/<id>.<file>` | the MCP's secret file (root-only dir)    | ro   |
 //!
-//! Hardening over the TypeScript version:
+//! Hardening:
 //! - `.mcp.json` is always bind-mounted read-only (created empty if absent):
 //!   the root supervisor spawns whatever it lists as privileged `mcp-*`
 //!   users, so the agent must never be able to edit it.
@@ -59,7 +58,8 @@
 //!   `mcp-palace` (mode 0700, never agent-readable) and a non-root host
 //!   cannot list it once the entrypoint has locked it down.
 //! - For the main group, secrets of isolated MCPs living under the project
-//!   root are shadowed and staged too (TS leaked them via the project mount).
+//!   root are shadowed and staged too (they must not leak via the project
+//!   mount).
 //! - `store/` is no longer mounted read-write for main by default (the audit
 //!   chain lives there); opt in with [`MountOptions::main_store_writable`].
 //! - Agent-writable IPC sub-directories that were replaced by symlinks are
@@ -307,7 +307,7 @@ impl IsolatedMcp {
     }
 }
 
-/// MCP servers with credential isolation (TS `ISOLATED_MCPS` + MemPalace).
+/// MCP servers with credential isolation (including MemPalace).
 pub const ISOLATED_MCPS: &[IsolatedMcp] = &[
     IsolatedMcp {
         id: "siem",
@@ -351,8 +351,8 @@ pub const ISOLATED_MCPS: &[IsolatedMcp] = &[
     },
 ];
 
-/// `/etc/mcp-staging/<id>.<file without leading dot>` (TS naming:
-/// `siem.env`, `velociraptor.api.config.yaml`).
+/// `/etc/mcp-staging/<id>.<file without leading dot>` (e.g. `siem.env`,
+/// `velociraptor.api.config.yaml`).
 pub fn mcp_staging_path(id: &str, file: &str) -> String {
     format!("{MCP_STAGING_DIR}/{id}.{}", file.trim_start_matches('.'))
 }
@@ -411,7 +411,7 @@ impl Default for SecretScanLimits {
 /// Knobs that deviate from the secure defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountOptions {
-    /// Mount `<project>/store` read-write for the main group (TS behaviour).
+    /// Mount `<project>/store` read-write for the main group.
     /// Off by default: it holds the hash-chained audit log.
     pub main_store_writable: bool,
     /// Expose `<project>/container/skills` read-only at
@@ -1593,7 +1593,7 @@ mod tests {
         RegisteredGroup {
             name: format!("Group {folder}"),
             folder: folder.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             added_at: "2026-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,

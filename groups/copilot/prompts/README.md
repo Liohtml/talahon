@@ -105,7 +105,7 @@ author: ...
 # Steps
 1. ...                      ← ordered investigation instructions
 2. ...                      ← may reference specific event fields
-...                         ← may call for WebFetch/VT/MITRE lookups
+...                         ← may call for web_fetch/VT/MITRE lookups
 
 # INPUT
 ```json

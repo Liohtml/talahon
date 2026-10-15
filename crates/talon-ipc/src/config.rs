@@ -24,7 +24,7 @@ pub const DEFAULT_MAX_ERROR_FILES: usize = 500;
 pub const DEFAULT_MAX_ERROR_CONTENT_BYTES: usize = 32 * 1024;
 /// Default timeout for a single async host callback.
 pub const DEFAULT_HOST_CALL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Default poll interval (matches the TypeScript `IPC_POLL_INTERVAL`).
+/// Default poll interval.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 /// Default number of audit rows one IPC namespace may produce per
 /// [`DEFAULT_AUDIT_WINDOW`] before further rows are suppressed (counted

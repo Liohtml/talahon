@@ -170,7 +170,7 @@ impl LlmAccess for GatewayLlm {
 /// What the orchestrator learned from one agent run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentOutcome {
-    /// Overall status (TS `'success' | 'error'`).
+    /// Overall status (`success` or `error`).
     pub status: OutputStatus,
     /// Error message when `status == Error`.
     pub error: Option<String>,

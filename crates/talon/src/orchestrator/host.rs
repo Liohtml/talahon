@@ -14,7 +14,7 @@ use talon_scheduler::{GroupDirectory, LaneProcessor};
 use super::Orchestrator;
 
 impl Orchestrator {
-    /// Inbound message (TS `channelOpts.onMessage`): sender-allowlist drop
+    /// Inbound message: sender-allowlist drop
     /// check, store, wake the message loop. Never blocks on the agent.
     /// Returns whether the message was stored.
     pub fn accept_message(&self, chat_jid: &str, mut message: NewMessage) -> bool {

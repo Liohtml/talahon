@@ -1,7 +1,5 @@
-//! Ports of `src/group-queue.test.ts` plus tests for the Rust improvements.
-//! Time is paused (`start_paused`), so `sleep` auto-advances virtual time
-//! once every spawned task is idle — the equivalent of vitest's
-//! `advanceTimersByTimeAsync`.
+//! Group queue tests. Time is paused (`start_paused`), so `sleep`
+//! auto-advances virtual time once every spawned task is idle.
 
 #![allow(clippy::unwrap_used)]
 
@@ -66,7 +64,7 @@ where
     processor(messages, |_, _| async {})
 }
 
-/// Completion callbacks, like the TS tests' `completionCallbacks` array.
+/// Completion callbacks: one gate per started job, released by the test.
 #[derive(Clone, Default)]
 struct Gates(Arc<Mutex<Vec<Option<oneshot::Sender<()>>>>>);
 
@@ -163,7 +161,7 @@ fn input_messages(dir: &Path) -> Vec<String> {
     out
 }
 
-/// vitest `advanceTimersByTimeAsync(10)`.
+/// Advance virtual time by 10 ms and let every spawned task settle.
 async fn settle() {
     sleep(Duration::from_millis(10)).await;
 }
@@ -197,7 +195,7 @@ fn gated_queue(dir: &Path, max: usize, gates: &Gates, events: &Events) -> GroupQ
 }
 
 // ---------------------------------------------------------------------------
-// Ported from group-queue.test.ts
+// Core queue behaviour
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Talon MemPalace — one-time host setup
 #
-# Creates a local Python venv and installs mempalace + chromadb.
-# Run this on the host machine so the wrapper script can use the venv
-# when developing or testing outside a container.
+# Creates the palace data directory and hands it over to the mcp-palace user,
+# plus a local Python venv with mempalace + chromadb for development and
+# testing outside a container.
 #
-# Inside the container, /opt/mempalace (pre-baked into the image) is used instead.
+# Agent containers and host-side /palace calls use /opt/mempalace, which is
+# pre-baked into the agent image.
 
 set -euo pipefail
 
@@ -56,23 +57,24 @@ PALACE_DATA_DIR="$SCRIPT_DIR/../mempalace-data/palace"
 mkdir -p "$PALACE_DATA_DIR"
 echo "Palace data directory: $PALACE_DATA_DIR  ✓"
 
-# Fix ownership so the container (uid 1000 / node) can write to this directory.
-# On Linux hosts the directory is often created as root, which causes ChromaDB
-# to fail on first write inside the container.
+# Inside agent containers and for host-side /palace calls the data directory
+# belongs to the mcp-palace user (uid 61008, mode 0700): agents can neither
+# read it nor plant files in it. Hand it over once; back it up with sudo.
 MEMPALACE_ROOT="$(realpath "$SCRIPT_DIR/../mempalace-data")"
+PALACE_UID=61008
 if [[ "$(uname -s)" == "Linux" ]]; then
     CURRENT_OWNER="$(stat -c '%u' "$MEMPALACE_ROOT" 2>/dev/null || echo "unknown")"
-    if [[ "$CURRENT_OWNER" != "1000" ]]; then
-        if chown -R 1000:1000 "$MEMPALACE_ROOT" 2>/dev/null; then
-            echo "Fixed mempalace-data ownership → uid 1000  ✓"
-        elif command -v sudo &>/dev/null && sudo chown -R 1000:1000 "$MEMPALACE_ROOT" 2>/dev/null; then
-            echo "Fixed mempalace-data ownership (via sudo) → uid 1000  ✓"
+    if [[ "$CURRENT_OWNER" != "$PALACE_UID" ]]; then
+        if chown -R "$PALACE_UID:$PALACE_UID" "$MEMPALACE_ROOT" 2>/dev/null && chmod 700 "$MEMPALACE_ROOT"; then
+            echo "mempalace-data handed over to mcp-palace (uid $PALACE_UID)  ✓"
+        elif command -v sudo &>/dev/null && sudo chown -R "$PALACE_UID:$PALACE_UID" "$MEMPALACE_ROOT" 2>/dev/null \
+            && sudo chmod 700 "$MEMPALACE_ROOT"; then
+            echo "mempalace-data handed over to mcp-palace (uid $PALACE_UID, via sudo)  ✓"
         else
             echo ""
-            echo "  WARNING: Could not set ownership of $MEMPALACE_ROOT to uid 1000."
-            echo "  The container agent (user 'node', uid 1000) may not be able to write"
-            echo "  to mempalace-data/. Fix manually:"
-            echo "    sudo chown -R 1000:1000 $MEMPALACE_ROOT"
+            echo "  WARNING: could not hand $MEMPALACE_ROOT over to mcp-palace (uid $PALACE_UID)."
+            echo "  Fix manually before starting Talon:"
+            echo "    sudo chown -R $PALACE_UID:$PALACE_UID $MEMPALACE_ROOT && sudo chmod 700 $MEMPALACE_ROOT"
             echo ""
         fi
     fi

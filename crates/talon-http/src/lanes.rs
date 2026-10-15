@@ -14,10 +14,10 @@
 //!    `set_typing(jid, false)` when the container exits);
 //! 5. removed whenever the client disconnects.
 //!
-//! Hardening over the TS release: a turn start that arrives while the lane
-//! still has an active writer (a follow-up piped into a running container)
-//! no longer replaces it mid-answer; it is remembered and the next queued
-//! writer is promoted when the current turn completes.
+//! A turn start that arrives while the lane still has an active writer (a
+//! follow-up piped into a running container) never replaces it mid-answer;
+//! it is remembered and the next queued writer is promoted when the current
+//! turn completes.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -97,7 +97,7 @@ impl LaneIds {
 }
 
 /// JID of the lane owned by `user_id` under the default base JID
-/// (`http:copilot:u:<id>`), mirroring the TS `laneJidForUser`.
+/// (`http:copilot:u:<id>`).
 pub fn lane_jid_for_user(user_id: &str) -> String {
     LaneIds::new(crate::config::DEFAULT_BASE_JID).user_lane(user_id)
 }
@@ -199,8 +199,8 @@ pub(crate) enum SseFrame {
 }
 
 impl SseFrame {
-    /// JSON payload of the `data:` line. Key order matches the TS channel
-    /// (`type` first) regardless of serde_json's map-ordering feature.
+    /// JSON payload of the `data:` line. Keys are always ordered `type`
+    /// first, regardless of serde_json's map-ordering feature.
     pub(crate) fn to_json(&self) -> String {
         match self {
             SseFrame::Text(content) => format!(
@@ -500,7 +500,7 @@ mod tests {
     }
 
     impl Enqueued {
-        /// Text payloads received so far (TS `textEvents`).
+        /// Text payloads received so far.
         fn texts(&mut self) -> Vec<String> {
             self.drain()
                 .into_iter()
@@ -533,7 +533,7 @@ mod tests {
         Enqueued { id, rx }
     }
 
-    // ---- ports of `HttpChannel writer isolation` ---------------------------
+    // ---- writer isolation ----------------------------------------------------
 
     #[test]
     fn writes_a_lane_response_only_to_that_lanes_writer() {
@@ -605,8 +605,8 @@ mod tests {
 
     #[test]
     fn follow_up_turn_start_does_not_hijack_the_active_writer() {
-        // TS replaced the active writer when a piped follow-up signalled a new
-        // turn, so the rest of answer #1 landed in caller #2's stream.
+        // Replacing the active writer when a piped follow-up signals a new
+        // turn would land the rest of answer #1 in caller #2's stream.
         let reg = StreamRegistry::default();
         let mut first = enqueue(&reg, COPILOT_JID);
         reg.turn_started(COPILOT_JID);
@@ -704,7 +704,7 @@ mod tests {
         assert_eq!(SseFrame::Done.to_json(), r#"{"type":"done"}"#);
     }
 
-    // ---- ports of `HttpChannel lane ownership` + user id validation -------
+    // ---- lane ownership + user id validation -------------------------------
 
     #[test]
     fn owns_the_chat_lane_and_every_sub_lane() {
@@ -741,8 +741,8 @@ mod tests {
 
     #[test]
     fn rejects_ids_instead_of_stripping_them_into_a_neighbour() {
-        // TS (and the first Rust port) stripped these, so `bob.smith` and
-        // `bobsmith` shared a lane.
+        // Stripping these instead would let `bob.smith` and `bobsmith` share
+        // a lane.
         for raw in [
             "bob.smith",
             "../../etc/passwd",

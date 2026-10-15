@@ -1,7 +1,6 @@
 //! # talon-anon — PII anonymization engine and anonymizing MCP proxy
 //!
-//! Rust port of `siem/anon_proxy/anon_proxy.py`. SIEM tool results are
-//! rewritten before they reach the model: user names, host names, internal
+//! SIEM tool results are rewritten before they reach the model: user names, host names, internal
 //! IPs, e-mail addresses, internal domains, SIDs and MAC addresses become
 //! consistent session tokens (`USER_1`, `HOST_2`, `IP_INT_3`, `EMAIL_1`,
 //! `DOMAIN_INT_1`, `SID_1`, `MAC_1`), while hashes, public IPs/domains and

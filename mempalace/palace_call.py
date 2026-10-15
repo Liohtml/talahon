@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""One-shot MemPalace helper invoked by NanoClaw's node process.
+"""One-shot MemPalace helper for the Talon host.
 
 Reads a JSON request on stdin, dispatches to the mempalace Python API,
-and writes a JSON response on stdout. Used by src/palace-client.ts to
-back the POST /palace/lesson and GET /palace/search HTTP endpoints.
+and writes a JSON response on stdout. The Talon host runs it in a one-shot
+container as the mcp-palace user to back the POST /palace/lesson,
+GET /palace/search and POST /palace/forget HTTP endpoints.
 
 Supported ops:
   {"op": "add_drawer", "wing": "...", "room": "...",
@@ -15,7 +16,7 @@ The response is always a JSON object. On success it mirrors the mempalace
 tool return; on failure it contains {"error": "..."}.
 
 Errors are printed to stderr; stdout is reserved for the JSON response so
-the node caller can parse it cleanly.
+the Talon host can parse it cleanly.
 """
 
 import contextlib
@@ -46,8 +47,8 @@ def main() -> int:
     # Redirect mempalace's stdout output (chromadb internals + mempalace's
     # own print() lines like "Filed drawer: ..." or "Fixed N BLOB seq_ids
     # in embeddings") to stderr for the duration of the tool call. Our
-    # caller (src/palace-client.ts) parses stdout as JSON, so any non-JSON
-    # noise on stdout breaks the round trip. Stderr is fine — node logs
+    # caller (the Talon host) parses stdout as JSON, so any non-JSON
+    # noise on stdout breaks the round trip. Stderr is fine — the host logs
     # it at debug.
     try:
         with contextlib.redirect_stdout(sys.stderr):

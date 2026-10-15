@@ -1,8 +1,7 @@
 //! Small local seams over `talon-security`.
 //!
-//! `talon-security` is implemented concurrently with this crate (its public
-//! signatures are frozen, bodies may still be `todo!()`), so the container
-//! launcher talks to it through two narrow traits. Production wires the real
+//! The container launcher talks to `talon-security` through two narrow
+//! traits. Production wires the real
 //! types (blanket impls below); unit tests inject fakes.
 
 use std::borrow::Cow;

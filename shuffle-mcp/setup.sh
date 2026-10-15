@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# NanoClaw Shuffle MCP — one-time setup
+# Talon Shuffle MCP — one-time setup
 #
 # What this does:
 #   1. Creates a Python virtual environment (.venv/) to avoid host Python conflicts
 #   2. Installs shuffle-mcp-server from GitHub into it
 #   3. Creates .env from .env.example if not already present
 #
-# After running this, edit .env with your Shuffle API key, then restart NanoClaw.
+# After running this, edit .env with your Shuffle API key, then restart Talon.
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 ENV_FILE="$SCRIPT_DIR/.env"
 MCP_WRAPPER="$SCRIPT_DIR/shuffle-mcp.sh"
 
-echo "=== NanoClaw Shuffle MCP Setup ==="
+echo "=== Talon Shuffle MCP Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -78,8 +78,8 @@ if grep -q "your-shuffle-api-key" "$ENV_FILE" 2>/dev/null; then
     echo "  1. Edit shuffle-mcp/.env with your Shuffle API key"
     echo "     (the same key configured in CoPilot's Shuffle connector)"
     echo "  2. Optionally set SHUFFLE_ORG_ID to scope to one customer's org"
-    echo "  3. Restart NanoClaw"
+    echo "  3. Restart Talon"
 else
-    echo "Restart NanoClaw to pick up the Shuffle MCP server."
+    echo "Restart Talon to pick up the Shuffle MCP server."
 fi
 echo ""

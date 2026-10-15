@@ -1,5 +1,4 @@
-//! Ports of `src/task-scheduler.test.ts` plus tests for the Rust
-//! improvements. Wall-clock time follows Tokio's paused clock via
+//! Task scheduler tests. Wall-clock time follows Tokio's paused clock via
 //! [`TokioClock`](crate::TokioClock).
 
 #![allow(clippy::unwrap_used)]
@@ -227,7 +226,7 @@ fn finished(outcome: &TaskRunOutcome) -> &TaskRunReport {
 }
 
 // ---------------------------------------------------------------------------
-// Ported from task-scheduler.test.ts
+// Core scheduler behaviour
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
@@ -469,12 +468,15 @@ async fn context_flags_and_timeout_are_passed_to_the_executor() {
 
 #[tokio::test(start_paused = true)]
 async fn failed_once_task_is_retried_with_backoff_then_completes() {
-    let failures_left = Arc::new(AtomicUsize::new(1));
+    let failures_left = Arc::new(Mutex::new(1_usize));
     let f = failures_left.clone();
     let h = harness(move |_| {
-        let fail = f
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
+        let fail = {
+            let mut left = f.lock().unwrap();
+            let fail = *left > 0;
+            *left = left.saturating_sub(1);
+            fail
+        };
         async move {
             if fail {
                 TaskExecution::failure("vLLM unavailable")

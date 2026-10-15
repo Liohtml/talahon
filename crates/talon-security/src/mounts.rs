@@ -1,5 +1,4 @@
-//! Additional-mount validation against the tamper-proof allowlist
-//! (port of `src/mount-security.ts`, hardened).
+//! Additional-mount validation against the tamper-proof allowlist.
 //!
 //! Rules: no allowlist file => every additional mount is rejected; host paths
 //! are canonicalized (symlinks resolved) before matching allowed roots and
@@ -9,7 +8,7 @@
 //! control characters; non-main groups are forced read-only when
 //! `non_main_read_only`; read-write requires `allow_read_write` on the root.
 //!
-//! Hardening over the TypeScript release:
+//! Hardening:
 //! - pattern matching is case-insensitive and supports globs (`*.pem`);
 //! - relative or `~user` host paths and allowed roots are rejected instead
 //!   of being resolved against the process cwd;

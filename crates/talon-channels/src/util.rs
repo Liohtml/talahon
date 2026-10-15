@@ -9,8 +9,7 @@ use rand::Rng;
 use talon_core::env::EnvFile;
 
 /// Read a secret: the `.env` file wins (secrets belong there), then the
-/// process environment (the TypeScript release accepted both). Blank values
-/// count as unset.
+/// process environment. Blank values count as unset.
 pub(crate) fn secret_value(env: &EnvFile, key: &str) -> Option<String> {
     env.file_value(key)
         .map(str::to_string)
@@ -39,8 +38,8 @@ pub(crate) fn list_setting(env: &EnvFile, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The project root the `.env` was loaded from, else the current directory
-/// (the TypeScript release used `process.cwd()`).
+/// The project root the `.env` was loaded from, else the current
+/// directory.
 pub(crate) fn project_root(env: &EnvFile) -> Option<PathBuf> {
     env.path()
         .and_then(Path::parent)

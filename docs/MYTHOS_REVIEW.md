@@ -73,6 +73,6 @@ Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
 - No fair-share scheduling of vLLM capacity between lanes beyond the
   gateway's concurrency limits.
 - The main group is the root of trust inside Talon.
-- On upgrade from 1.x, reset `groups/*/prompts/` and
-  `groups/copilot/notifications.md` from git: content an agent planted there
-  before the read-only binds existed would now be trusted.
+- On deployments that ran before the read-only binds existed, reset
+  `groups/*/prompts/` and `groups/copilot/notifications.md` from git: content
+  an agent planted there earlier would now be trusted.

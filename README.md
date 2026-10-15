@@ -4,7 +4,7 @@
 
 # Talon
 
-**The self-hosted AI SOC analyst for the SOCFortress CoPilot stack.**<br>
+**The self-hosted AI SOC analyst for the CoPilot SOC stack.**<br>
 Written in Rust · powered by your own vLLM · built to survive hostile input.
 
 [![CI](https://github.com/Liohtml/talahon/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/talahon/actions/workflows/ci.yml)
@@ -33,8 +33,8 @@ MITRE ATT&CK, correlates across your environment and writes a structured
 verdict — severity, confidence, evidence and recommended actions — back into
 CoPilot.
 
-**Talon 2.0** is a ground-up rewrite in **Rust**. The model runs on **your own
-vLLM server**, so SIEM data never leaves your infrastructure, and every layer
+Talon is written in **Rust** end to end. The model runs on **your own vLLM
+server**, so SIEM data never leaves your infrastructure, and every layer
 assumes that the data it reads was written by an attacker.
 
 ## ✨ Features
@@ -53,8 +53,8 @@ free text.
 
 ### 🧠 Self-hosted model
 A native Rust agent loop talks to vLLM's OpenAI-compatible API: tool calling,
-streaming, guided JSON decoding, prefix caching. No cloud LLM, no Node.js,
-no SDK.
+streaming, guided JSON decoding, prefix caching. No cloud LLM and no
+third-party agent framework.
 
 </td>
 <td width="33%" valign="top">
@@ -91,18 +91,18 @@ API. Verdicts and IOC sightings stay local for cross-alert correlation.
 </tr>
 </table>
 
-### What changed in 2.0
+### At a glance
 
-| | Talon 1.x | Talon 2.0 |
-|---|---|---|
-| Runtime | Node.js + Claude Agent SDK | Rust workspace (`talon` host, `talon-agent` in the container) |
-| Model | Anthropic API / Ollama | **vLLM** on your own GPUs, behind an authenticated host gateway |
-| Model credentials | API key in the container | Key stays on the host; each run gets a short-lived token over stdin |
-| Container | Agent and MCP servers in one context | Root supervisor without LLM; MCP servers as separate `mcp-*` users; agent unprivileged |
-| Untrusted data | Passed to the model as is | Nonce-fenced envelopes plus an injection scanner (EN/DE) |
-| Isolation | Per group | Per lane: every analyst, the investigation lane and the webhook lane are separate principals |
-| Verdicts | Free-text reports | `submit_triage_report` with JSON schema, stored and queryable via `GET /investigations` |
-| Audit | Log files | SHA-256 hash-chained audit table, `talon audit verify` |
+| | |
+|---|---|
+| Runtime | Rust workspace: `talon` on the host, `talon-agent` in the container |
+| Model | **vLLM** on your own GPUs, behind an authenticated host gateway |
+| Model credentials | The key stays on the host; each run gets a short-lived token over stdin |
+| Container | Root supervisor without LLM; MCP servers as separate `mcp-*` users; agent unprivileged |
+| Untrusted data | Nonce-fenced envelopes plus an injection scanner (EN/DE) |
+| Isolation | Per lane: every analyst, the investigation lane and the webhook lane are separate principals |
+| Verdicts | `submit_triage_report` with JSON schema, stored and queryable via `GET /investigations` |
+| Audit | SHA-256 hash-chained audit table, `talon audit verify` |
 
 ## 🧩 Architecture
 
@@ -187,7 +187,7 @@ sequenceDiagram
 | `talon-scheduler` | Group queue and task scheduler |
 | `talon-ipc` | Host-side IPC watcher |
 | `talon-http`, `talon-channels`, `talon-router` | Channels and message formatting |
-| `talon-db` | SQLite store (migrates Talon 1.x databases in place) |
+| `talon-db` | SQLite store: messages, tasks, sessions, verdicts, IOC sightings, audit chain |
 | `talon-setup` | Setup, verification, egress firewall and service installation |
 
 Design details: [docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md).
@@ -284,8 +284,8 @@ talon setup vllm
 ### 4. Create the mount allowlist
 
 The allowlist controls which host directories may be mounted into agent
-containers. It lives outside the project root in `~/.config/talon/` (the
-legacy `~/.config/nanoclaw/` is still read), so agents can't modify it.
+containers. It lives outside the project root in `~/.config/talon/`, so
+agents can't modify it.
 Without it, no additional mounts are allowed.
 
 > [!WARNING]
@@ -397,21 +397,6 @@ talon audit tail -n 20
 The API binds `127.0.0.1` by default. Set `COPILOT_HTTP_BIND` to a private
 interface if CoPilot runs on another host, and terminate TLS in front of it.
 
-<details>
-<summary><b>Upgrading from Talon 1.x</b></summary>
-
-- Run vLLM with `--api-key` and set the same value as `TALON_VLLM_API_KEY`.
-- `sudo chown -R 61008:61008 mempalace-data`
-- Reset `groups/*/prompts/` and `groups/copilot/notifications.md` from git:
-  they are read-only inside containers now, and anything planted earlier would
-  be trusted.
-- Per-user CoPilot sessions start fresh (new lane keys). Existing
-  `store/messages.db` databases are migrated in place.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full list.
-
-</details>
-
 ## 🧰 Operations
 
 | Command | Purpose |
@@ -479,15 +464,8 @@ audited via `talon_core::audit`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 | [docs/COPILOT_INTEGRATION.md](docs/COPILOT_INTEGRATION.md) | CoPilot integration, MySQL schema, MCP tool reference |
 | [docs/ANON_PROXY.md](docs/ANON_PROXY.md) | Anonymizing proxy: flow, token types, `fields.yaml` |
 | [groups/copilot/prompts/README.md](groups/copilot/prompts/README.md) | Writing investigation templates |
-| [CHANGELOG.md](CHANGELOG.md) | Release notes and upgrade steps |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes |
 
-## 🤝 Credits & community
-
-Talon was created by [SOCFortress](https://www.socfortress.co) for the
-CoPilot stack and started as a fork of NanoClaw. Talon 2.0 in this repository
-is an independent Rust rewrite. For questions about CoPilot and the
-SOCFortress stack, join the SOCFortress
-[Discord](https://discord.gg/UN3pNBzaEQ) or watch the
-[video tutorials](https://www.youtube.com/@taylorwalton_socfortress/videos).
+## 📄 License
 
 Released under the [MIT License](LICENSE).

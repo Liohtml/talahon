@@ -1,14 +1,13 @@
 //! Inbound prompt formatting: chat messages -> the XML envelope the agent
-//! reads (port of `formatMessages` / `escapeXml` in `src/router.ts` and
-//! `formatLocalTime` in `src/timezone.ts`).
+//! reads, plus XML escaping and local-time rendering.
 
 use talon_core::time::{is_valid_timezone, parse_iso, parse_tz};
 use talon_core::types::NewMessage;
 
 /// Escape the XML special characters `&`, `<`, `>` and `"`.
 ///
-/// Byte-for-byte compatible with the TypeScript `escapeXml` (single quotes
-/// are left alone because every attribute Talon emits is double-quoted).
+/// Single quotes are left alone because every attribute Talon emits is
+/// double-quoted.
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 8);
     for c in s.chars() {
@@ -29,8 +28,7 @@ pub fn resolve_timezone(tz: &str) -> &str {
 }
 
 /// Render a UTC ISO-8601 timestamp as a human-readable local time, e.g.
-/// `Jan 1, 2024, 1:30 PM` (the `en-US` shape the TypeScript version
-/// produced with `toLocaleString`).
+/// `Jan 1, 2024, 1:30 PM` (`en-US` style).
 ///
 /// Invalid timezones fall back to UTC. A timestamp that does not parse as
 /// RFC 3339 is returned unchanged, so the agent still sees *something*.
@@ -272,7 +270,7 @@ mod tests {
         assert!(result.contains("<context timezone=\"America/New_York\" />"));
     }
 
-    // --- format_local_time (port of timezone.test.ts) -----------------------
+    // --- format_local_time -------------------------------------------------
 
     #[test]
     fn local_time_converts_utc() {

@@ -114,7 +114,7 @@ fn input(server: &MockServer, extra: Value) -> Vec<u8> {
         "groupFolder": "testgroup",
         "chatJid": "tg:42",
         "isMain": false,
-        "assistantName": "Andy",
+        "assistantName": "Nova",
         "timezone": "Europe/Berlin",
         "llm": {
             "baseUrl": format!("{}/v1", server.uri()),
@@ -258,7 +258,7 @@ async fn run_binary_against_fake_vllm() {
     assert!(tools.contains(&"submit_triage_report"));
     assert!(!tools.contains(&"register_group"));
     let system = first["messages"][0]["content"].as_str().unwrap();
-    assert!(system.starts_with("You are Andy"));
+    assert!(system.starts_with("You are Nova"));
     assert!(system.contains("Always be brief."));
     let user = first["messages"][1]["content"].as_str().unwrap();
     assert!(user.starts_with("[Current date and time:"));

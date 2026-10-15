@@ -1,5 +1,5 @@
-//! Port of `src/channels/emacs.test.ts` (HTTP-level tests against the real
-//! listener on an ephemeral loopback port) plus hardening tests.
+//! Emacs bridge tests: HTTP-level tests against the real listener on an
+//! ephemeral loopback port, plus hardening tests.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -507,8 +507,7 @@ fn config_from_env_requires_token() {
     assert!(!format!("{cfg:?}").contains("abc"));
 }
 
-/// Uses the real `talon_security::auth::constant_time_eq`; panics
-/// (todo!()) until A07's implementation lands.
+/// Uses the real `talon_security::auth::constant_time_eq`.
 #[tokio::test]
 async fn auth_with_real_constant_time_eq() {
     let audit = MemoryAuditSink::default();

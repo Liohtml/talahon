@@ -1,10 +1,10 @@
 //! # talon-tools — built-in agent tools
 //!
-//! **Owner: agent A04.** See `docs/RUST_ARCHITECTURE.md` §A04.
+//! See `docs/RUST_ARCHITECTURE.md` §3.4 (untrusted data).
 //!
-//! Native replacements for the Claude Code built-in tools the TypeScript
-//! runtime got from the Claude Agent SDK, plus a port of the `nanoclaw` IPC
-//! MCP server. Every tool implements [`talon_core::tool::Tool`]:
+//! The agent's built-in tools (shell, files, search, web fetch, todo list)
+//! plus the IPC tools that talk to the host. Every tool implements
+//! [`talon_core::tool::Tool`]:
 //!
 //! | tool | module | concurrency |
 //! |------|--------|-------------|

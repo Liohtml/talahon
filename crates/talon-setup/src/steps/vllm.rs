@@ -1,4 +1,4 @@
-//! Step `vllm` (new; replaces the Anthropic/Ollama credential checks):
+//! Step `vllm`:
 //! verify that the configured vLLM server answers `GET <base>/v1/models`
 //! and serves `TALON_VLLM_MODEL` (and `TALON_VLLM_FAST_MODEL` if set).
 //!

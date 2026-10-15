@@ -1,10 +1,9 @@
-//! Step `verify` (port of `setup/verify.ts`): end-to-end health report.
+//! Step `verify`: end-to-end health report.
 //!
 //! `STATUS: success` requires a running service, a reachable vLLM serving
 //! the configured model, at least one configured channel and at least one
-//! registered group. The Anthropic/OAuth credential check of the
-//! TypeScript version is replaced by the vLLM probe (`CREDENTIALS` now
-//! reports whether `TALON_VLLM_BASE_URL`/`TALON_VLLM_MODEL` are set).
+//! registered group. `CREDENTIALS` reports whether
+//! `TALON_VLLM_BASE_URL`/`TALON_VLLM_MODEL` are set.
 //!
 //! `WARNINGS` lists settings that expose the host to agent containers
 //! (`vllm_api_key_unset`, `http_bind_all_interfaces`, see

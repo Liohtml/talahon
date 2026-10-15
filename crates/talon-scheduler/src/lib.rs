@@ -1,13 +1,11 @@
 //! # talon-scheduler — group queue + task scheduler
 //!
-//! **Owner: agent A09.** See `docs/RUST_ARCHITECTURE.md` §A09.
-//!
-//! - [`GroupQueue`] (port of `src/group-queue.ts`): one job per lane (chat
+//! - [`GroupQueue`]: one job per lane (chat
 //!   JID), a global concurrency limit, a FIFO waiting list, tasks before
 //!   messages, idle preemption, follow-up messages and the `_close` sentinel
 //!   via IPC input files, retry with capped + jittered exponential backoff,
 //!   `/status` snapshots and a bounded graceful shutdown.
-//! - [`TaskScheduler`] (port of `src/task-scheduler.ts`): poll loop with
+//! - [`TaskScheduler`]: poll loop with
 //!   wake-up, due tasks from a [`TaskStore`] (implemented for
 //!   `talon_db::Db`), execution through the host's [`TaskExecutor`] under a
 //!   timeout, run logs, next-run computation via

@@ -1,9 +1,8 @@
 //! # talon-core
 //!
 //! The contract every other Talon crate builds against. Everything in here is
-//! **frozen** for the duration of the Rust rewrite: crates may add their own
-//! types, but must not change the shapes defined here without coordinating,
-//! because the host (`talon`) and the in-container runtime (`talon-agent`)
+//! **frozen**: crates may add their own types, but must not change the
+//! shapes defined here without coordinating, because the host (`talon`) and the in-container runtime (`talon-agent`)
 //! exchange these types across a process and container boundary.
 //!
 //! Module map:

@@ -1,7 +1,5 @@
 //! # talon-router — formatting, routing, session lanes & commands
 //!
-//! **Owner: agent A11.** See `docs/RUST_ARCHITECTURE.md` §A11.
-//!
 //! Pure, synchronous text processing plus two small async helpers:
 //!
 //! - [`format`] — inbound envelope: [`escape_xml`], [`format_messages`]

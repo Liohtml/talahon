@@ -1,5 +1,4 @@
-//! Platform detection (port of `setup/platform.ts`, minus the Node.js
-//! helpers). Everything here reads files or environment variables only — no
+//! Platform detection. Everything here reads files or environment variables only — no
 //! `unsafe` libc calls.
 
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-//! Step `timezone` (port of `setup/timezone.ts`): resolve the operator's
+//! Step `timezone`: resolve the operator's
 //! IANA timezone and persist it as `TZ` in `.env`.
 //!
 //! Precedence: `--tz` > `.env` `TZ` > process `TZ` > host autodetection.

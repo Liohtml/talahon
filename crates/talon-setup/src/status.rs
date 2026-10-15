@@ -1,22 +1,21 @@
-//! Machine-readable status blocks (port of `setup/status.ts`).
+//! Machine-readable status blocks.
 //!
 //! Every setup step ends by printing one block that the setup skill parses:
 //!
 //! ```text
-//! === NANOCLAW SETUP: CHECK_ENVIRONMENT ===
+//! === TALON SETUP: CHECK_ENVIRONMENT ===
 //! PLATFORM: linux
 //! STATUS: success
 //! === END ===
 //! ```
 //!
-//! The header keeps the exact `NANOCLAW SETUP` spelling of the TypeScript
-//! release so existing skill instructions and scripts (`setup.sh` emits the
-//! same header) keep working unchanged.
+//! Skill instructions and scripts that parse the output match on the
+//! `=== TALON SETUP: <STEP> ===` header line.
 
 use std::fmt;
 
 /// First part of a block header line.
-pub const STATUS_HEADER_PREFIX: &str = "=== NANOCLAW SETUP: ";
+pub const STATUS_HEADER_PREFIX: &str = "=== TALON SETUP: ";
 /// Last part of a block header line.
 pub const STATUS_HEADER_SUFFIX: &str = " ===";
 /// Block terminator line.
@@ -55,7 +54,7 @@ impl StatusBlock {
     }
 
     /// Set `key` to `value`, replacing an existing value in place (field
-    /// order is insertion order, like the TypeScript object literals).
+    /// order is insertion order).
     pub fn set(&mut self, key: &str, value: impl fmt::Display) {
         let key = sanitize(key);
         let value = sanitize(&value.to_string());
@@ -144,7 +143,7 @@ pub struct StepOutcome {
     /// The status block, if the step emits one.
     pub block: Option<StatusBlock>,
     /// Exit code (0 success, 1 failure, 2 runtime unavailable, 4 bad input
-    /// — same codes as the TypeScript steps).
+    /// — the same codes for every step).
     pub exit_code: i32,
 }
 
@@ -200,7 +199,7 @@ mod tests {
             .field("STATUS", "success");
         assert_eq!(
             block.render(),
-            "=== NANOCLAW SETUP: TIMEZONE ===\nRESOLVED_TZ: Europe/Berlin\nNEEDS_USER_INPUT: false\nCOUNT: 3\nSTATUS: success\n=== END ==="
+            "=== TALON SETUP: TIMEZONE ===\nRESOLVED_TZ: Europe/Berlin\nNEEDS_USER_INPUT: false\nCOUNT: 3\nSTATUS: success\n=== END ==="
         );
     }
 
@@ -238,7 +237,7 @@ mod tests {
     fn outcome_render_puts_lines_first() {
         let mut o = StepOutcome::ok(StatusBlock::new("S").field("STATUS", "success"));
         o.lines = vec!["a|b".into()];
-        assert!(o.render().starts_with("a|b\n=== NANOCLAW SETUP: S ==="));
+        assert!(o.render().starts_with("a|b\n=== TALON SETUP: S ==="));
         assert!(o.is_success());
         assert!(!StepOutcome::lines(vec![], 1).is_success());
     }

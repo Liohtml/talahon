@@ -1,4 +1,4 @@
-//! Step `service` (port of `setup/service.ts`): install Talon as a
+//! Step `service`: install Talon as a
 //! background service running `<talon binary> run`.
 //!
 //! - **Linux + systemd**: a user unit (`~/.config/systemd/user/talon.service`,
@@ -36,7 +36,8 @@ use crate::status::{StatusBlock, StepOutcome};
 pub const SERVICE_NAME: &str = "talon";
 /// launchd label.
 pub const LAUNCHD_LABEL: &str = "com.talon";
-/// Unit name of the TypeScript release.
+/// Service unit name used by earlier releases; reported as `LEGACY_SERVICE`
+/// when such a unit is still installed.
 pub const LEGACY_SERVICE_NAME: &str = "nanoclaw";
 /// Open-file limit (soft and hard) of the service process
 /// (`LimitNOFILE=`, launchd `NumberOfFiles`, `ulimit -n`).
@@ -732,7 +733,7 @@ mod tests {
         }
     }
 
-    // --- systemd unit (ports of service.test.ts) ----------------------------
+    // --- systemd unit -----------------------------------------------------------
 
     #[test]
     fn user_unit_uses_default_target() {

@@ -1,4 +1,4 @@
-//! Step `container` (port of `setup/container.ts`): build the agent image
+//! Step `container`: build the agent image
 //! and smoke-test it.
 //!
 //! `--runtime docker|podman` (default: `CONTAINER_RUNTIME`, else `docker`),

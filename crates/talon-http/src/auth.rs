@@ -250,8 +250,7 @@ mod tests {
         assert_eq!(v.extract(None, None), None);
     }
 
-    /// Exercises the real `talon_security::auth` backend (implemented by A07
-    /// concurrently; fails with a `todo!()` panic until that lands).
+    /// Exercises the real `talon_security::auth` backend.
     #[test]
     fn security_crate_verifier_fails_closed() {
         let v = SecurityKeyVerifier;

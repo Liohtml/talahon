@@ -1,7 +1,7 @@
 //! Bounded parsing and shape validation of container-written IPC payloads.
 //!
 //! Pipeline: nesting-depth pre-scan (linear, no recursion) -> `serde_json`
-//! into a generic value -> TypeScript-compatible normalization -> typed
+//! into a generic value -> lenient normalization -> typed
 //! protocol structs -> shape checks (non-empty required fields, length and
 //! charset limits). Anything failing here is *malformed* and gets
 //! quarantined; semantic problems (authorization, bad schedules, duplicate
@@ -289,7 +289,7 @@ const TASK_TYPES: &[&str] = &[
     "register_group",
 ];
 
-/// TypeScript-compatible leniency applied before typed deserialization:
+/// Leniency applied before typed deserialization:
 /// - `context_mode` other than `"group"` / `"isolated"` falls back to the
 ///   default (isolated) instead of failing the whole request;
 /// - `schedule_task`: empty `taskId` / `script` mean "not given"

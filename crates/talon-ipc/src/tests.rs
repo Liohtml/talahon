@@ -1,6 +1,5 @@
-//! Behavioural tests: a port of `src/ipc-auth.test.ts` (driven through
-//! `process_task` / `process_message`, like the TS suite drives
-//! `processTaskIpc`) plus end-to-end scans over a temporary IPC tree.
+//! Behavioural tests: IPC authorization driven through `process_task` /
+//! `process_message`, plus end-to-end scans over a temporary IPC tree.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -58,7 +57,7 @@ fn register(jid: &str, folder: &str) -> IpcTask {
         jid: jid.into(),
         name: "New Group".into(),
         folder: folder.into(),
-        trigger: "@Andy".into(),
+        trigger: "@Talon".into(),
         requires_trigger: None,
         container_config: None,
         timestamp: None,
@@ -75,7 +74,7 @@ fn message(jid: &str, text: &str) -> IpcOutbound {
 }
 
 // ---------------------------------------------------------------------------
-// schedule_task authorization (ipc-auth.test.ts)
+// schedule_task authorization
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -347,7 +346,7 @@ async fn main_group_can_register_a_new_group() {
         .unwrap();
     assert_eq!(g.name, "New Group");
     assert_eq!(g.folder, "new-group");
-    assert_eq!(g.trigger, "@Andy");
+    assert_eq!(g.trigger, "@Talon");
     assert!(!g.is_main);
     let ev = h.audit.snapshot();
     assert!(
@@ -392,7 +391,7 @@ async fn register_group_preserves_lane_fields_and_strips_container_config() {
         jid: "other@g.us".into(),
         name: "Other renamed".into(),
         folder: "other-group".into(),
-        trigger: "@Andy".into(),
+        trigger: "@Talon".into(),
         requires_trigger: Some(true),
         container_config: Some(cfg),
         timestamp: None,
@@ -454,7 +453,7 @@ async fn register_group_never_applies_container_config_to_new_groups() {
                 jid: "new@g.us".into(),
                 name: "New".into(),
                 folder: "new-group".into(),
-                trigger: "@Andy".into(),
+                trigger: "@Talon".into(),
                 requires_trigger: None,
                 container_config: Some(ContainerConfig {
                     additional_mounts: vec![AdditionalMount {

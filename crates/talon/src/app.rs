@@ -1,5 +1,4 @@
-//! `talon run`: startup and graceful shutdown (port of `main()` in
-//! `src/index.ts`).
+//! `talon run`: startup and graceful shutdown.
 //!
 //! Startup:
 //! 1. container runtime: detect, `ensure_running`, clean up orphans,
@@ -546,7 +545,7 @@ mod tests {
         RegisteredGroup {
             name: model.into(),
             folder: model.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             added_at: "2026-01-01T00:00:00.000Z".into(),
             container_config: Some(ContainerConfig {
                 provider: Some(ProviderKind::Vllm),

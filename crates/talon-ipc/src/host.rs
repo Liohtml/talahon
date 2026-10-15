@@ -44,8 +44,7 @@ impl SourceIdentity {
     }
 }
 
-/// Callbacks into the host orchestrator (`talon`), mirroring the TypeScript
-/// `IpcDeps`.
+/// Callbacks into the host orchestrator (`talon`).
 ///
 /// Async callbacks are bounded by
 /// [`IpcWatcherConfig::host_call_timeout`](crate::IpcWatcherConfig::host_call_timeout).
@@ -94,7 +93,7 @@ mod tests {
         RegisteredGroup {
             name: folder.into(),
             folder: folder.into(),
-            trigger: "@Andy".into(),
+            trigger: "@Talon".into(),
             added_at: "2024-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,

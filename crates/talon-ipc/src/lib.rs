@@ -1,6 +1,7 @@
 //! # talon-ipc — host-side IPC watcher
 //!
-//! **Owner: agent A10.** See `docs/RUST_ARCHITECTURE.md` §A10.
+//! See `docs/RUST_ARCHITECTURE.md` §3.1 (host <-> container protocol) and
+//! §3.5 (audit).
 //!
 //! Containers talk back to the host by dropping JSON files into their IPC
 //! namespace (`data/ipc/<ipc_key>/messages/*.json` for chat messages,
@@ -24,7 +25,7 @@
 //!   each other.
 //! - **Authorization** goes through `talon_security::ipc_authz`
 //!   ([`FnAuthorizer::security_policy`], replaceable via
-//!   [`IpcWatcher::with_authorizer`]) *and* the TypeScript baseline rules
+//!   [`IpcWatcher::with_authorizer`]) *and* the built-in baseline rules
 //!   ([`BaselineAuthorizer`]); both must allow. A panicking policy denies.
 //!   Every decision is recorded on the [`talon_core::audit::SharedAuditSink`].
 //! - **File handling** is descriptor-relative (`openat`/`unlinkat` with

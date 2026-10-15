@@ -1,7 +1,4 @@
-//! Lane resolution, trigger gating and the available-groups snapshot
-//! (ports of `src/session-lane.ts`, the trigger-gating logic of
-//! `src/index.ts` exercised by `formatting.test.ts`, and `getAvailableGroups`
-//! exercised by `routing.test.ts`).
+//! Lane resolution, trigger gating and the available-groups snapshot.
 //!
 //! A *lane* is one addressable conversation: a JID with its own agent
 //! session, IPC namespace, queue slot and outbound writer. Several lanes may
@@ -15,7 +12,7 @@ use regex::Regex;
 use talon_core::trigger::build_trigger_pattern;
 use talon_core::types::{AvailableGroup, ChatInfo, NewMessage, RegisteredGroup};
 
-/// Sentinel chat row the TypeScript release used to record group syncs.
+/// Sentinel chat row earlier releases used to record group syncs.
 pub const GROUP_SYNC_SENTINEL: &str = "__group_sync__";
 
 /// Storage key for a lane's agent session (defaults to the group folder).
@@ -106,7 +103,7 @@ pub fn available_groups(
 mod tests {
     use super::*;
 
-    const ASSISTANT: &str = "Andy";
+    const ASSISTANT: &str = "Talon";
 
     fn make_group() -> RegisteredGroup {
         RegisteredGroup {
@@ -247,7 +244,7 @@ mod tests {
         assert_eq!(resumable_session_id(&g, &s), None);
     }
 
-    // --- trigger pattern (formatting.test.ts TRIGGER_PATTERN) ----------------
+    // --- trigger pattern ------------------------------------------------------
 
     fn default_pattern() -> Regex {
         build_trigger_pattern("", ASSISTANT)
@@ -255,40 +252,40 @@ mod tests {
 
     #[test]
     fn trigger_matches_at_start() {
-        assert!(default_pattern().is_match("@Andy hello"));
+        assert!(default_pattern().is_match("@Talon hello"));
     }
 
     #[test]
     fn trigger_matches_case_insensitively() {
-        assert!(default_pattern().is_match("@andy hello"));
-        assert!(default_pattern().is_match("@ANDY hello"));
+        assert!(default_pattern().is_match("@talon hello"));
+        assert!(default_pattern().is_match("@TALON hello"));
     }
 
     #[test]
     fn trigger_not_matched_mid_message() {
-        assert!(!default_pattern().is_match("hello @Andy"));
+        assert!(!default_pattern().is_match("hello @Talon"));
     }
 
     #[test]
     fn trigger_requires_word_boundary() {
-        assert!(!default_pattern().is_match("@Andyextra hello"));
+        assert!(!default_pattern().is_match("@Talonextra hello"));
     }
 
     #[test]
     fn trigger_word_boundary_before_apostrophe() {
-        assert!(default_pattern().is_match("@Andy's thing"));
+        assert!(default_pattern().is_match("@Talon's thing"));
     }
 
     #[test]
     fn trigger_alone_matches() {
-        assert!(default_pattern().is_match("@Andy"));
+        assert!(default_pattern().is_match("@Talon"));
     }
 
     #[test]
     fn per_group_trigger_is_used() {
         let p = build_trigger_pattern("@Claw", ASSISTANT);
         assert!(p.is_match("@Claw hello"));
-        assert!(!p.is_match("@Andy hello"));
+        assert!(!p.is_match("@Talon hello"));
     }
 
     #[test]
@@ -324,14 +321,14 @@ mod tests {
 
     #[test]
     fn non_main_processes_with_trigger() {
-        assert!(gate(false, Some(true), "", "@Andy do something"));
-        assert!(gate(false, Some(true), "", "   @Andy do something"));
+        assert!(gate(false, Some(true), "", "@Talon do something"));
+        assert!(gate(false, Some(true), "", "   @Talon do something"));
     }
 
     #[test]
     fn non_main_uses_its_own_trigger() {
         assert!(gate(false, Some(true), "@Claw", "@Claw do something"));
-        assert!(!gate(false, Some(true), "@Claw", "@Andy do something"));
+        assert!(!gate(false, Some(true), "@Claw", "@Talon do something"));
     }
 
     #[test]
@@ -348,7 +345,7 @@ mod tests {
         assert!(!should_require_trigger(false, Some(false)));
     }
 
-    // --- available_groups (routing.test.ts) ---------------------------------
+    // --- available_groups -----------------------------------------------------
 
     fn chat(jid: &str, ts: &str, name: &str, is_group: bool) -> ChatInfo {
         ChatInfo {
@@ -412,7 +409,7 @@ mod tests {
             RegisteredGroup {
                 name: "Registered".into(),
                 folder: "registered".into(),
-                trigger: "@Andy".into(),
+                trigger: "@Talon".into(),
                 ..make_group()
             },
         )]);

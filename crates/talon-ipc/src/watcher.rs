@@ -190,7 +190,7 @@ struct ScanState {
     reported: HashSet<String>,
 }
 
-/// Host-side IPC watcher (port of `src/ipc.ts`, hardened).
+/// Host-side IPC watcher.
 ///
 /// Polls `data/ipc/<ipc_key>/{messages,tasks}/` of every registered lane,
 /// derives the sender identity from the directory, authorizes every request

@@ -2,7 +2,7 @@
 //!
 //! Non-secret settings are read with [`EnvFile::get`] (process env wins over
 //! `.env`); the API key is a secret and is only ever read from the `.env`
-//! file ([`EnvFile::file_value`]), like the TypeScript release did.
+//! file ([`EnvFile::file_value`]).
 //!
 //! | Variable | Default | Meaning |
 //! |---|---|---|
@@ -50,7 +50,7 @@ use crate::files::EVALS_DIR;
 use crate::lanes::INVESTIGATE_SESSION_KEY;
 use crate::palace::{HOST_EXEC_ENV, HOST_EXEC_UNSAFE};
 
-/// Default listen port (TS: `COPILOT_HTTP_PORT || 3100`).
+/// Default listen port (used when `COPILOT_HTTP_PORT` is unset).
 pub const DEFAULT_PORT: u16 = 3100;
 /// Default base lane JID.
 pub const DEFAULT_BASE_JID: &str = "http:copilot";

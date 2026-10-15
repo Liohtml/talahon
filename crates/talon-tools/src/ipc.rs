@@ -1,8 +1,6 @@
-//! IPC tools — Rust port of `container/agent-runner/src/ipc-mcp-stdio.ts`.
-//!
-//! Same tool names, descriptions and parameters as the TypeScript MCP server
-//! (`send_message`, `schedule_task`, `list_tasks`, `pause_task`,
-//! `resume_task`, `cancel_task`, `update_task`, `register_group`). Requests
+//! IPC tools: the agent's channel to the host (`send_message`,
+//! `schedule_task`, `list_tasks`, `pause_task`, `resume_task`,
+//! `cancel_task`, `update_task`, `register_group`). Requests
 //! are written as [`talon_core::protocol::IpcOutbound`] /
 //! [`talon_core::protocol::IpcTask`] JSON files, atomically
 //! (`<name>.json.tmp` + rename), under `ToolContext.ipc_dir`
@@ -10,7 +8,7 @@
 //! directory it was found in, so these tools only pre-validate for good error
 //! messages: they are not a security boundary.
 //!
-//! Differences from the TypeScript version (hardening):
+//! Hardening:
 //! - schedules are validated with [`talon_core::schedule::validate`] (same
 //!   rules the host applies, incl. the 10 s minimum interval and `once`
 //!   timestamps that must exist in the configured timezone);
@@ -123,7 +121,7 @@ fn parse_schedule_type(raw: &str) -> Result<ScheduleType, String> {
     })
 }
 
-/// `...Z`, `...z` or a `+HH:MM` / `-HH:MM` suffix (the TS regexes).
+/// `...Z`, `...z` or a `+HH:MM` / `-HH:MM` suffix.
 fn has_tz_suffix(v: &str) -> bool {
     if v.ends_with('Z') || v.ends_with('z') {
         return true;
@@ -140,7 +138,8 @@ fn has_tz_suffix(v: &str) -> bool {
     }
 }
 
-/// Validate a schedule with the TS error messages.
+/// Validate a schedule, with error messages that tell the agent the expected
+/// format.
 fn validate_schedule(st: ScheduleType, value: &str, tz: Tz) -> Result<(), String> {
     match st {
         ScheduleType::Cron => validate(st, value, tz).map_err(|_| {
@@ -169,7 +168,7 @@ fn validate_schedule(st: ScheduleType, value: &str, tz: Tz) -> Result<(), String
 }
 
 fn new_task_id() -> String {
-    // `<millis>-<random6>.json` -> `task-<millis>-<random6>` (TS shape).
+    // `<millis>-<random6>.json` -> `task-<millis>-<random6>`.
     let name = ipc_file_name();
     format!("task-{}", name.trim_end_matches(".json"))
 }
@@ -254,7 +253,7 @@ impl Tool for SendMessageTool {
             Err(e) => return ToolOutput::err(format!("failed to encode message: {e}")),
         };
         // `sender` is not part of the frozen IpcOutbound shape; it is carried
-        // as an extra field (ignored by hosts that don't know it), as in TS.
+        // as an extra field (ignored by hosts that don't know it).
         if let (Some(s), Some(obj)) = (sender, value.as_object_mut()) {
             obj.insert("sender".to_string(), Value::String(s));
         }
@@ -683,7 +682,7 @@ impl Tool for UpdateTaskTool {
                         .await
                         .ok()
                         .flatten()
-                        // Unknown task: the TypeScript tool assumed cron.
+                        // Unknown task: assume cron.
                         .unwrap_or(ScheduleType::Cron)
                 }
             };
@@ -721,14 +720,14 @@ impl Tool for RegisterGroupTool {
             name: REGISTER_GROUP.to_string(),
             description: "Register a new chat/group so the agent can respond to messages there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: \"{channel}_{group-name}\" (e.g., \"whatsapp_family-chat\", \"telegram_dev-team\", \"discord_general\"). Use lowercase with hyphens for the group name part.".to_string(),
+Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: \"{channel}_{group-name}\" (e.g., \"telegram_dev-team\", \"telegram_soc-alerts\"). Use lowercase with hyphens for the group name part.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "jid": {"type": "string", "description": "The chat JID (e.g., \"120363336345536173@g.us\", \"tg:-1001234567890\", \"dc:1234567890123456\")"},
+                    "jid": {"type": "string", "description": "The chat JID (e.g., \"tg:-1001234567890\")"},
                     "name": {"type": "string", "description": "Display name for the group"},
-                    "folder": {"type": "string", "description": "Channel-prefixed folder name (e.g., \"whatsapp_family-chat\", \"telegram_dev-team\")"},
-                    "trigger": {"type": "string", "description": "Trigger word (e.g., \"@Andy\")"},
+                    "folder": {"type": "string", "description": "Channel-prefixed folder name (e.g., \"telegram_dev-team\")"},
+                    "trigger": {"type": "string", "description": "Trigger word (e.g., \"@Talon\")"},
                     "requiresTrigger": {"type": "boolean", "description": "Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned."}
                 },
                 "required": ["jid", "name", "folder", "trigger"],
@@ -1026,7 +1025,8 @@ mod tests {
         )
         .unwrap();
         let t = UpdateTaskTool::default();
-        // Interval value for an interval task: OK (TS would have rejected it as cron).
+        // Interval value for an interval task: OK (validated against the
+        // task's real schedule type, not as cron).
         let out = t
             .call(
                 json!({"task_id": "task-int", "schedule_value": "120000"}),

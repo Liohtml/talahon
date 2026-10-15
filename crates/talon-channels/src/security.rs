@@ -124,8 +124,7 @@ mod tests {
         assert!(!host_matches("anything", &pats(&["", "*.", " "])));
     }
 
-    /// Exercises the real `talon-security` primitives. Fails (todo!() panic)
-    /// until A07's implementation of `talon_security::auth` lands.
+    /// Exercises the real `talon-security` primitives.
     #[test]
     fn real_security_primitives() {
         let ct = default_constant_time_eq();

@@ -1,7 +1,5 @@
 //! # talon-channels — Telegram, webhook, Emacs channels
 //!
-//! **Owner: agent A12.** See `docs/RUST_ARCHITECTURE.md` §A12.
-//!
 //! [`talon_core::channel::Channel`] implementations built directly on
 //! `reqwest` / `axum` (no bot framework):
 //!
@@ -15,8 +13,8 @@
 //! configured. Secrets are read from `.env` first, then the process
 //! environment, and are never logged.
 //!
-//! All channels follow the TypeScript contract that `send_message` does not
-//! surface *delivery* failures as errors (they are logged, and audited when
+//! All channels follow the contract that `send_message` does not surface
+//! *delivery* failures as errors (they are logged, and audited when
 //! security-relevant); `Err` is only returned for a JID the channel does not
 //! own.
 
@@ -38,8 +36,8 @@ pub use security::{EgressGuard, PolicyEgressGuard};
 pub use telegram::{TelegramChannel, TelegramConfig};
 pub use webhook::{WEBHOOK_JID, WebhookChannel, WebhookConfig};
 
-/// Build every channel whose credentials are configured, in the order the
-/// TypeScript registry connected them (telegram, emacs, webhook).
+/// Build every channel whose credentials are configured, in a fixed order
+/// (telegram, emacs, webhook).
 ///
 /// Channels are returned unconnected; the host calls
 /// [`Channel::connect`]. Invalid configurations are logged and skipped.
@@ -123,7 +121,7 @@ mod tests {
         if !process_env_clean() {
             return;
         }
-        let env = EnvFile::from_str_content("ASSISTANT_NAME=Andy\nEMACS_CHANNEL_PORT=9999\n");
+        let env = EnvFile::from_str_content("ASSISTANT_NAME=Talon\nEMACS_CHANNEL_PORT=9999\n");
         assert!(build_channels(host(), &env, audit()).is_empty());
     }
 
@@ -152,8 +150,7 @@ mod tests {
         assert!(build_channels(host(), &env, audit()).is_empty());
     }
 
-    /// Uses the real `EgressPolicy::from_env`; panics (todo!()) until A07's
-    /// `talon_security::egress` implementation lands.
+    /// Uses the real `EgressPolicy::from_env` of `talon_security::egress`.
     #[test]
     fn webhook_from_env_uses_real_egress_policy() {
         if !process_env_clean() {

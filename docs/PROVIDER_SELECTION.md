@@ -2,10 +2,9 @@
 
 Talon 2.0 runs its agents against a **vLLM** server through vLLM's
 OpenAI-compatible API (`/v1/chat/completions` with tool calling and
-structured outputs). Ollama and the Anthropic/Claude Agent SDK path of the
-TypeScript release are gone: the agent loop is now native Rust
-(`crates/talon-agent`), so any model vLLM can serve with a working tool-call
-parser can drive an investigation.
+structured outputs). The agent loop is native Rust (`crates/talon-agent`),
+so any model vLLM can serve with a working tool-call parser can drive an
+investigation.
 
 ## TL;DR
 
@@ -92,9 +91,9 @@ it is invisible to `docker inspect` and to tool subprocesses. The gateway:
 | `TALON_LLM_GATEWAY_BIND` | auto | override the auto-detected bind address |
 | `TALON_BLOCKED_HOSTS` | — | hosts routed to 127.0.0.1 in every container |
 
-Legacy `TALON_PROVIDER=ollama|anthropic` and `TALON_OLLAMA_*` values are
-ignored with a warning; stored group configs with `"provider":"ollama"` are
-tolerated and fall back to the `.env` vLLM defaults.
+`TALON_PROVIDER` values other than `vllm` are ignored with a warning, and
+stored group configs that name another provider fall back to the `.env` vLLM
+defaults.
 
 ## Model selection
 

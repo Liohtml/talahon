@@ -1,4 +1,4 @@
-//! Step `mounts` (port of `setup/mounts.ts`): write the mount allowlist
+//! Step `mounts`: write the mount allowlist
 //! (`~/.config/talon/mount-allowlist.json`, outside the project root and
 //! never mounted into a container).
 //!
@@ -7,8 +7,8 @@
 //! `--json '<json>'`, otherwise JSON on stdin. An existing file is kept
 //! unless `--force` is given.
 //!
-//! Hardening: the JSON must deserialize as a `MountAllowlist` (the
-//! TypeScript step accepted any JSON), roots must be absolute or `~/`
+//! Hardening: the JSON must deserialize as a `MountAllowlist` (arbitrary
+//! JSON is rejected), roots must be absolute or `~/`
 //! paths, and the file is written atomically with mode `0600` in a `0700`
 //! directory. Extra descriptive keys are preserved.
 
@@ -33,7 +33,7 @@ pub fn parse_allowlist(json: &str) -> Result<MountAllowlist, &'static str> {
 }
 
 /// [`parse_allowlist`], also returning the raw JSON value (written back
-/// as-is, so descriptive extra keys survive — like the TypeScript step).
+/// as-is, so descriptive extra keys survive).
 fn parse_allowlist_value(json: &str) -> Result<(serde_json::Value, MountAllowlist), &'static str> {
     let value: serde_json::Value = serde_json::from_str(json).map_err(|_| "invalid_json")?;
     let allowlist: MountAllowlist =
@@ -256,7 +256,7 @@ mod tests {
         );
     }
 
-    /// Needs `talon_security::mounts::allowlist_template` (agent A07).
+    /// Uses `talon_security::mounts::allowlist_template`.
     #[tokio::test]
     async fn template_flag_writes_a_valid_allowlist() {
         let dir = tempfile::tempdir().unwrap();

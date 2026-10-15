@@ -1,18 +1,18 @@
-//! Step `groups` (port of `setup/groups.ts`).
+//! Step `groups`.
 //!
-//! The TypeScript step synced WhatsApp group metadata up front. Talon's
-//! channels (CoPilot HTTP, Telegram, webhook, Emacs) discover chat names at
-//! runtime, so the sync is always skipped (`REASON: runtime_discovery`) and
-//! the step only reports how many group chats the store knows.
+//! Talon's channels (CoPilot HTTP, Telegram, webhook, Emacs) discover chat
+//! names at runtime, so no group metadata is synced up front: the sync is
+//! always skipped (`REASON: runtime_discovery`) and the step only reports
+//! how many group chats the store knows.
 //!
 //! `--list [--limit N]` prints `jid|name` lines for known group chats, most
-//! recently active first (no status block, like the TypeScript version).
+//! recently active first (no status block).
 
 use super::StepArgs;
 use crate::context::{SETUP_LOG, SetupContext};
 use crate::status::{StatusBlock, StepOutcome};
 
-/// The sync sentinel chat row written by the TypeScript release.
+/// The sync sentinel chat row written by earlier releases.
 const GROUP_SYNC_SENTINEL: &str = "__group_sync__";
 
 /// Default and maximum `--limit`.
@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(clean("a|b\nc"), "a b c");
     }
 
-    /// Needs the talon-db implementation (agent A01).
+    /// Uses the real talon-db.
     #[tokio::test]
     async fn lists_group_chats_newest_first() {
         let dir = tempfile::tempdir().unwrap();
