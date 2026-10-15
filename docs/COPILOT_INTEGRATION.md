@@ -1,9 +1,11 @@
 # Talon × CoPilot Integration
 
 > **Status:** Live. CoPilot's side of this integration — the Talon connector
-> (`/api/talon/*`) and the write-back API (`/api/ai_analyst/*`) — is served by
+> (`/api/talon/*`), the write-back API (`/api/ai_analyst/*`) and the Customer
+> Portal's AI reports (`/api/customer_portal/ai_reports/*`) — is served by
 > CoPilot's Rust service (CoPilot `crates/copilot-talon`,
-> `crates/copilot-ai-analyst`, see CoPilot `docs/architecture/RUST_MIGRATION.md`),
+> `crates/copilot-ai-analyst`, `crates/copilot-customer-portal`, see CoPilot
+> `docs/architecture/RUST_MIGRATION.md`),
 > built on the same toolchain and conventions as this workspace. The wire
 > contract is typed and test-pinned on the CoPilot side (§ Wire contract).
 
@@ -80,6 +82,20 @@ POST http://talon:3100/investigate
   "sender": "copilot"
 }
 ```
+
+`sender` names who asked:
+
+| `sender` | CoPilot route | Gate |
+|---|---|---|
+| `copilot` | ingest-time trigger | `incident_management_ai_analyst_trigger_enabled` per customer |
+| `copilot-analyst` | `POST /api/talon/investigate` (analyst click) | the alert must belong to one of the analyst's customers |
+| `customer-portal` | `POST /api/customer_portal/ai_reports/alert/{id}/investigate` (a portal user asking, CoPilot #1215; Rust `copilot-customer-portal`) | opt-in per customer, 30-minute cooldown per alert, optional daily limit — refused in CoPilot before Talon is called |
+
+For `customer-portal` requests the `ai_analyst_job` row appears only once
+Talon picks the request up; until then CoPilot counts its own
+`customer_portal_ai_request` row. A non-2xx answer from `/investigate` makes
+CoPilot drop that row and tell the customer to try again later — Talon's
+error text never reaches the portal.
 
 **Talon behaviour:**
 1. Creates a job row in `ai_analyst_job` (status = `pending`) via the CoPilot write-back API
