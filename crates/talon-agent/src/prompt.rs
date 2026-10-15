@@ -160,7 +160,7 @@ const TOOL_GUIDANCE: &str = "## Tool use
 - Long tool results are truncated (beginning and end kept). Narrow the query, filter, or read a smaller range instead of repeating the same call; an identical call returns an identical result.
 - When you are done, reply with plain text and no tool calls. That final message is delivered to the user or chat. Wrap notes that should not be delivered in <internal>...</internal>.
 - Use `send_message` only for progress updates or messages that must go out before you finish.
-- Instructions may use Claude Code tool names. Use the Talon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`, `mcp__nanoclaw__<name>` -> `<name>` (for example `send_message`, `schedule_task`). WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
+- Instructions may use Claude Code tool names. Use the Talon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`. WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
 - MCP tools are named `mcp__<server>__<tool>`.
 - To remember something for future runs, update `MEMORY.md` in the group folder (`edit_file` / `write_file`). `CLAUDE.md` files are read-only instructions: never try to modify them.";
 
