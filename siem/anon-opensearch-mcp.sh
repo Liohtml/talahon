@@ -140,5 +140,5 @@ echo "[anon-opensearch-mcp]   Tried: \$TALON_ANON_PROXY_BIN, PATH, /usr/local/bi
 echo "[anon-opensearch-mcp]   Tried: $LOCAL_PYTHON" >&2
 echo "[anon-opensearch-mcp]   Tried: $SYSTEM_PYTHON" >&2
 echo "[anon-opensearch-mcp]   In a container: rebuild the image (container/build.sh)" >&2
-echo "[anon-opensearch-mcp]   On the host: cargo build --release -p talon-anon, or rerun siem/setup.sh" >&2
+echo "[anon-opensearch-mcp]   On the host: cargo build --release -p talahon-anon, or rerun siem/setup.sh" >&2
 exit 1

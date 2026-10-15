@@ -1706,7 +1706,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon"
+name = "talahon"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1718,17 +1718,17 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "talon-channels",
- "talon-container",
- "talon-core",
- "talon-db",
- "talon-http",
- "talon-ipc",
- "talon-llm",
- "talon-router",
- "talon-scheduler",
- "talon-security",
- "talon-setup",
+ "talahon-channels",
+ "talahon-container",
+ "talahon-core",
+ "talahon-db",
+ "talahon-http",
+ "talahon-ipc",
+ "talahon-llm",
+ "talahon-router",
+ "talahon-scheduler",
+ "talahon-security",
+ "talahon-setup",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1737,7 +1737,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-agent"
+name = "talahon-agent"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1749,12 +1749,12 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "talon-core",
- "talon-intel",
- "talon-llm",
- "talon-mcp",
- "talon-security",
- "talon-tools",
+ "talahon-core",
+ "talahon-intel",
+ "talahon-llm",
+ "talahon-mcp",
+ "talahon-security",
+ "talahon-tools",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1766,7 +1766,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-anon"
+name = "talahon-anon"
 version = "2.0.0"
 dependencies = [
  "aho-corasick",
@@ -1774,7 +1774,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "talon-core",
+ "talahon-core",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1784,7 +1784,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-channels"
+name = "talahon-channels"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1799,9 +1799,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "talon-core",
- "talon-net",
- "talon-security",
+ "talahon-core",
+ "talahon-net",
+ "talahon-security",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1813,7 +1813,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-container"
+name = "talahon-container"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1822,8 +1822,8 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "talon-core",
- "talon-security",
+ "talahon-core",
+ "talahon-security",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1832,7 +1832,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-core"
+name = "talahon-core"
 version = "2.0.0"
 dependencies = [
  "async-trait",
@@ -1851,7 +1851,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-db"
+name = "talahon-db"
 version = "2.0.0"
 dependencies = [
  "chrono",
@@ -1860,13 +1860,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "talon-core",
+ "talahon-core",
  "tempfile",
  "tracing",
 ]
 
 [[package]]
-name = "talon-http"
+name = "talahon-http"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1881,10 +1881,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "talon-core",
- "talon-db",
- "talon-net",
- "talon-security",
+ "talahon-core",
+ "talahon-db",
+ "talahon-net",
+ "talahon-security",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1898,7 +1898,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-intel"
+name = "talahon-intel"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1910,7 +1910,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "talon-core",
+ "talahon-core",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1919,7 +1919,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-ipc"
+name = "talahon-ipc"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1929,9 +1929,9 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "talon-core",
- "talon-db",
- "talon-security",
+ "talahon-core",
+ "talahon-db",
+ "talahon-security",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1941,7 +1941,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-llm"
+name = "talahon-llm"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1957,10 +1957,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "talon-core",
- "talon-intel",
- "talon-net",
- "talon-security",
+ "talahon-core",
+ "talahon-intel",
+ "talahon-net",
+ "talahon-security",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1974,7 +1974,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-mcp"
+name = "talahon-mcp"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -1983,7 +1983,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "talon-core",
+ "talahon-core",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1992,7 +1992,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-net"
+name = "talahon-net"
 version = "2.0.0"
 dependencies = [
  "axum",
@@ -2007,7 +2007,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-router"
+name = "talahon-router"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -2017,7 +2017,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "talon-core",
+ "talahon-core",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2025,7 +2025,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-scheduler"
+name = "talahon-scheduler"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -2035,8 +2035,8 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
- "talon-core",
- "talon-db",
+ "talahon-core",
+ "talahon-db",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2045,7 +2045,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-security"
+name = "talahon-security"
 version = "2.0.0"
 dependencies = [
  "aho-corasick",
@@ -2060,7 +2060,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
- "talon-core",
+ "talahon-core",
  "tempfile",
  "tokio",
  "tracing",
@@ -2068,7 +2068,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-setup"
+name = "talahon-setup"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -2078,9 +2078,9 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "talon-core",
- "talon-db",
- "talon-security",
+ "talahon-core",
+ "talahon-db",
+ "talahon-security",
  "tempfile",
  "tokio",
  "tracing",
@@ -2088,7 +2088,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "talon-tools"
+name = "talahon-tools"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -2100,8 +2100,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "talon-core",
- "talon-security",
+ "talahon-core",
+ "talahon-security",
  "tempfile",
  "thiserror",
  "tokio",

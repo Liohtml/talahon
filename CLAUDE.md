@@ -33,8 +33,10 @@ cargo test --workspace                                 # all tests
 cargo clippy --workspace --all-targets -- -D warnings  # lint (CI gate)
 cargo fmt --all                                        # format (CI checks --check)
 ./container/build.sh                                   # rebuild the agent image
-cargo run -p talon -- doctor                           # diagnose a local install
+cargo run -p talahon -- doctor                         # diagnose a local install
 ```
+
+Packages are named `talahon-*` on crates.io (directories and Rust crate names stay `talon-*` / `talon_*`), so `-p` takes `talahon-core`, not `talon-core`. Every merge to `main` is versioned and published automatically (`.github/workflows/release.yml`, `scripts/release.py`): use Conventional Commit titles, never edit `CHANGELOG.md` or the version by hand.
 
 Rules of the codebase: no `unsafe` (workspace lint), no `unwrap`/`expect` outside tests, public items documented, untrusted data fenced with `talon_security::injection::fence_untrusted`, security decisions audited via `talon_core::audit`. `talon-core` is the cross-crate contract: change it deliberately and update both host and agent.
 

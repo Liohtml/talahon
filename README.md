@@ -8,6 +8,8 @@
 Written in Rust · powered by your own vLLM · built to survive hostile input.
 
 [![CI](https://github.com/Liohtml/talahon/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/talahon/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/talahon?logo=rust&label=crates.io)](https://crates.io/crates/talahon)
+[![docs.rs](https://img.shields.io/docsrs/talahon?label=docs.rs)](https://docs.rs/talahon)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![LLM: vLLM](https://img.shields.io/badge/LLM-vLLM%20%C2%B7%20self--hosted-6E56CF)](docs/PROVIDER_SELECTION.md)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-2EA44F)](Cargo.toml)
@@ -172,24 +174,29 @@ sequenceDiagram
 <details>
 <summary><b>Crate map</b></summary>
 
-| Crate | Responsibility |
-|---|---|
-| `talon` | Host binary: orchestrator, CLI (`run`, `setup`, `doctor`, `audit`) |
-| `talon-core` | Shared types, host ↔ container protocol, traits, config, scheduling |
-| `talon-agent` | In-container runtime: root supervisor + unprivileged vLLM agent loop |
-| `talon-llm` | vLLM client (streaming, tool-call recovery, guided decoding) + host gateway |
-| `talon-mcp` | Native Model Context Protocol client, server and manager |
-| `talon-tools` | Built-in agent tools with path guard and SSRF-safe `web_fetch` |
-| `talon-intel` | IOC / MITRE / command-line / triage / correlation engine + report schema |
-| `talon-anon` | PII anonymizer and `talon-anon-proxy` |
-| `talon-security` | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
-| `talon-container` | Hardened docker/podman launcher, mounts, output parser |
-| `talon-net` | Hardened HTTP serving: header timeouts, connection caps |
-| `talon-scheduler` | Group queue and task scheduler |
-| `talon-ipc` | Host-side IPC watcher |
-| `talon-http`, `talon-channels`, `talon-router` | Channels and message formatting |
-| `talon-db` | SQLite store: messages, tasks, sessions, verdicts, IOC sightings, audit chain |
-| `talon-setup` | Setup, verification, egress firewall and service installation |
+Each crate lives in `crates/talon-*` and is published on crates.io as
+`talahon-*` (the `talon` names were taken); its Rust name stays `talon_*`.
+
+| Crate (`crates/`) | crates.io | Responsibility |
+|---|---|---|
+| `talon` | [`talahon`](https://crates.io/crates/talahon) | Host binary: orchestrator, CLI (`run`, `setup`, `doctor`, `audit`) |
+| `talon-core` | [`talahon-core`](https://crates.io/crates/talahon-core) | Shared types, host ↔ container protocol, traits, config, scheduling |
+| `talon-agent` | [`talahon-agent`](https://crates.io/crates/talahon-agent) | In-container runtime: root supervisor + unprivileged vLLM agent loop |
+| `talon-llm` | [`talahon-llm`](https://crates.io/crates/talahon-llm) | vLLM client (streaming, tool-call recovery, guided decoding) + host gateway |
+| `talon-mcp` | [`talahon-mcp`](https://crates.io/crates/talahon-mcp) | Native Model Context Protocol client, server and manager |
+| `talon-tools` | [`talahon-tools`](https://crates.io/crates/talahon-tools) | Built-in agent tools with path guard and SSRF-safe `web_fetch` |
+| `talon-intel` | [`talahon-intel`](https://crates.io/crates/talahon-intel) | IOC / MITRE / command-line / triage / correlation engine + report schema |
+| `talon-anon` | [`talahon-anon`](https://crates.io/crates/talahon-anon) | PII anonymizer and `talon-anon-proxy` |
+| `talon-security` | [`talahon-security`](https://crates.io/crates/talahon-security) | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
+| `talon-container` | [`talahon-container`](https://crates.io/crates/talahon-container) | Hardened docker/podman launcher, mounts, output parser |
+| `talon-net` | [`talahon-net`](https://crates.io/crates/talahon-net) | Hardened HTTP serving: header timeouts, connection caps |
+| `talon-scheduler` | [`talahon-scheduler`](https://crates.io/crates/talahon-scheduler) | Group queue and task scheduler |
+| `talon-ipc` | [`talahon-ipc`](https://crates.io/crates/talahon-ipc) | Host-side IPC watcher |
+| `talon-http` | [`talahon-http`](https://crates.io/crates/talahon-http) | CoPilot HTTP API channel |
+| `talon-channels` | [`talahon-channels`](https://crates.io/crates/talahon-channels) | Telegram, outbound webhook, Emacs bridge |
+| `talon-router` | [`talahon-router`](https://crates.io/crates/talahon-router) | Message formatting and session lanes |
+| `talon-db` | [`talahon-db`](https://crates.io/crates/talahon-db) | SQLite store: messages, tasks, sessions, verdicts, IOC sightings, audit chain |
+| `talon-setup` | [`talahon-setup`](https://crates.io/crates/talahon-setup) | Setup, verification, egress firewall and service installation |
 
 Design details: [docs/RUST_ARCHITECTURE.md](docs/RUST_ARCHITECTURE.md).
 
@@ -233,6 +240,10 @@ talon setup vllm                            # checks that the models are served
 talon doctor                                # runtime, image, vLLM, gateway, audit chain
 talon run
 ```
+
+The host binary is also on crates.io: `cargo install talahon --locked`
+installs `talon`. The agent image, group folders and MCP wrappers still come
+from the repository checkout.
 
 The deployment guide below covers the mount allowlist, MCP credentials,
 egress firewall and service installation, which a production setup needs.
@@ -453,6 +464,16 @@ cargo fmt --all --check
 Codebase rules: no `unsafe`, no `unwrap`/`expect` outside tests, untrusted data
 fenced with `talon_security::injection::fence_untrusted`, security decisions
 audited via `talon_core::audit`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Releases
+
+Every merge to `main` that passes CI and changes a crate is released
+automatically ([`release.yml`](.github/workflows/release.yml)): the next
+version follows [Conventional Commits](https://www.conventionalcommits.org)
+(`feat` → minor, `type!:` / `BREAKING CHANGE:` → major, anything else → patch),
+`CHANGELOG.md` gets the entry, `main` gets a `chore(release)` commit and a
+`vX.Y.Z` tag, GitHub gets a release, and all `talahon-*` crates are published
+to crates.io with the same version.
 
 ## 📚 Documentation
 

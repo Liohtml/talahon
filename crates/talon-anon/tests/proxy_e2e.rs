@@ -89,7 +89,7 @@ fn python_available() -> bool {
 }
 
 fn fields_yaml() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../siem/anon_proxy/fields.yaml")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fields.yaml")
 }
 
 struct Proxy {

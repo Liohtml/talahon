@@ -43,6 +43,24 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  package:
+    name: crates.io packaging
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Every crate must package (metadata, files inside its directory) and build
+      # from its tarball alone, exactly as the release workflow publishes it.
+      - name: Package and verify every crate
+        run: cargo package --workspace --locked
+
   advisories:
     name: dependency advisories (non-blocking)
     runs-on: ubuntu-latest

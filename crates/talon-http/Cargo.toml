@@ -1,10 +1,18 @@
 [package]
-name = "talon-http"
+name = "talahon-http"
 description = "CoPilot HTTP API channel (investigations, SSE chat, status, palace)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+
+[lib]
+name = "talon_http"
 
 [dependencies]
 talon-core = { workspace = true }

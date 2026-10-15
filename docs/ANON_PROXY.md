@@ -252,12 +252,13 @@ Protocol behaviour:
 
 ```
 crates/talon-anon/           ← Rust proxy (library + talon-anon-proxy binary)
+  fields.yaml                ← copy embedded into the binary at build time (must equal siem's)
 siem/
   opensearch-mcp.sh          ← raw OpenSearch MCP server (used for non-sensitive queries)
   anon-opensearch-mcp.sh     ← anonymizing wrapper (use for all document/search queries)
   anon_proxy/
     anon_proxy.py            ← Python fallback proxy
-    fields.yaml              ← field definitions (git-pullable, embedded into the binary at build time)
+    fields.yaml              ← field definitions read at runtime (git-pullable)
 ```
 
 The proxy is registered as a second MCP server in `groups/copilot/.mcp.json`:
@@ -285,7 +286,9 @@ Field definitions live in `siem/anon_proxy/fields.yaml`. To add a new field:
 2. Find the right category (`user`, `hostname`, `email`, `domain`) or add a new one
 3. Add the field name in **underscore notation** (Wazuh/CoPilot convention)
 4. Validate: `talon-anon-proxy --fields siem/anon_proxy/fields.yaml --map /tmp/check.json --check`
-5. Commit and push — other deployments run `git pull` to receive the update
+5. Copy it over `crates/talon-anon/fields.yaml`, the default embedded into the binary (and the
+   published crate); `cargo test -p talahon-anon` fails while the two differ
+6. Commit and push — other deployments run `git pull` to receive the update
 
 Example — adding Azure AD fields:
 

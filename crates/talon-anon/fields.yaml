@@ -1,0 +1,254 @@
+# Anonymizing MCP Proxy — Field Definitions
+#
+# This file controls which OpenSearch fields are anonymized before their values
+# reach the model context window. Add new fields here and git pull to
+# distribute updates to all deployments.
+#
+# It is read by the Rust proxy (`talon-anon-proxy`, crates/talon-anon) and by
+# the legacy Python fallback (anon_proxy.py). The Python proxy ignores keys it
+# does not know, so everything marked "(Rust)" below is an optional extension.
+#
+# Token format: <PREFIX>_<N>
+# Example: a user field containing "john.doe" becomes "USER_1" the first time
+# it's seen, and stays "USER_1" for the rest of the session.
+#
+# Field names use underscore notation (Wazuh/CoPilot convention):
+#   data_win_eventdata_user  (not data.win.eventdata.user)
+# The Rust proxy also matches the dotted form and nested documents
+# (`_source.data.win.eventdata.user`), so one entry covers both shapes.
+#
+# To add a new field:
+#   1. Find the category that best fits (or add a new one)
+#   2. Add the field name in underscore notation
+#   3. Commit and push — users git pull to receive the update
+#
+# Validate the file with:  talon-anon-proxy --fields fields.yaml --map /tmp/x.json --check
+
+categories:
+
+  # ── User / Account identifiers ────────────────────────────────────────────
+  # `DOMAIN\user` values are split by the Rust proxy into DOMAIN_INT_n\USER_m
+  # so the bare user name shares its token with other fields.
+  user:
+    token_prefix: "USER"
+    description: "Windows and Linux user account names"
+    fields:
+      - data_win_eventdata_user
+      - data_win_eventdata_targetUserName
+      - data_win_eventdata_subjectUserName
+      - data_win_eventdata_subjectusername
+      - data_win_eventdata_targetusername
+      - data_win_eventdata_callerProcessName
+      - data_win_eventdata_targetLogonId
+      - data_win_system_user
+      - syscheck_uname_after
+      - syscheck_uname_before
+      - data_srcuser
+      - data_dstuser
+      # added for talon-anon-proxy
+      - data_win_eventdata_samAccountName
+      - data_win_eventdata_accountName
+      - data_win_eventdata_clientUserName
+      - data_win_eventdata_newTargetUserName
+      - data_win_eventdata_oldTargetUserName
+      - data_win_eventdata_memberName
+      - data_audit_acct
+      # ECS / Winlogbeat indices
+      - user_name
+      - winlog_user_name
+      - winlog_event_data_TargetUserName
+      - winlog_event_data_SubjectUserName
+      - related_user
+
+  # ── Hostnames / Computer names ────────────────────────────────────────────
+  # Internal IPs in these fields become IP_INT_n, public IPs are kept, and
+  # names under an internal DNS domain become HOST_n.DOMAIN_INT_m (Rust).
+  hostname:
+    token_prefix: "HOST"
+    description: "Internal hostnames and computer names"
+    fields:
+      - agent_name
+      - data_win_eventdata_workstationName
+      - data_win_eventdata_computerName
+      - data_win_system_computer
+      - predecoder_hostname
+      - manager_name
+      - data_win_eventdata_targetServerName
+      # added for talon-anon-proxy
+      - data_win_eventdata_sourceHostname
+      # ECS / Winlogbeat indices
+      - host_name
+      - host_hostname
+      - winlog_computer_name
+      - winlog_event_data_WorkstationName
+      - related_hosts
+
+  # ── Email addresses ───────────────────────────────────────────────────────
+  # value_pattern (Rust): a field listed in several categories (e.g.
+  # targetUserName) is EMAIL_n only when the value looks like an address,
+  # otherwise the other category (USER_n) applies.
+  email:
+    token_prefix: "EMAIL"
+    description: "Email addresses (UPN-format usernames and explicit email fields)"
+    value_pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    fields:
+      - data_win_eventdata_targetUserName  # often user@domain.com in Azure AD envs
+      - data_office365_UserId
+      - data_office365_Actor_ID
+      - data_gcp_protoPayload_authenticationInfo_principalEmail
+      # added for talon-anon-proxy
+      - data_win_eventdata_userPrincipalName
+      - user_email
+
+  # ── Internal AD / DNS domain names (new) ─────────────────────────────────
+  domain:
+    token_prefix: "DOMAIN_INT"
+    description: "Active Directory / internal DNS domain names"
+    fields:
+      - data_win_eventdata_subjectDomainName
+      - data_win_eventdata_targetDomainName
+      - user_domain
+      - winlog_event_data_SubjectDomainName
+      - winlog_event_data_TargetDomainName
+
+  # ── Internal / RFC1918 IP addresses ──────────────────────────────────────
+  # Note: external IPs are preserved — they're needed for VirusTotal / Shodan
+  # Internal IP detection is pattern-based (RFC1918 + loopback + link-local;
+  # the Rust proxy adds CGNAT 100.64/10 and IPv6 ULA/link-local).
+  # No field list needed — the proxy detects them by value.
+  # Token prefix for internal IPs:
+internal_ip_token_prefix: "IP_INT"
+
+# ── Pattern-based anonymization ───────────────────────────────────────────
+# When enabled, text values are scanned for embedded PII patterns
+# even when they appear inside larger strings (e.g. paths, command lines).
+
+# Replace usernames embedded in Windows paths:
+#   C:\Users\john.doe\AppData  →  C:\Users\USER_1\AppData
+# (also /home/<name>/ and macOS /Users/<name>/)
+scan_user_paths: true
+
+# Replace RFC1918 IPs appearing inline in any string value
+scan_inline_ips: true
+
+# (Rust) Further free-text detectors — all default to true:
+#   scan_emails            john.doe@corp.com        → EMAIL_n
+#   scan_domain_users      CORP\jsmith              → DOMAIN_INT_n\USER_m
+#   scan_unc_paths         \\fileserver\share       → \\HOST_n\share
+#   scan_sids              S-1-5-21-..-..-..-1104   → SID_n-1104 (RID kept)
+#   scan_macs              00:1a:2b:3c:4d:5e        → MAC_n
+#   scan_internal_domains  ws01.corp.local          → HOST_n.DOMAIN_INT_m
+scan_emails: true
+scan_domain_users: true
+scan_unc_paths: true
+scan_sids: true
+scan_macs: true
+scan_internal_domains: true
+
+# (Rust) Your organisation's internal DNS domains (subdomains included).
+# Names under these are tokenized; public domains are never touched.
+internal_domains: []
+#  - corp.example.com
+
+# (Rust) Suffixes that are internal by definition. Default:
+# internal_domain_suffixes: [local, localdomain, lan, internal, intranet, corp, home.arpa]
+
+# (Rust) Once a value has a token, replace it wherever it re-appears in free
+# text (full_log, message, command lines, ...). Values shorter than
+# sweep_min_length characters or without letters are not swept.
+sweep_known_values: true
+sweep_min_length: 3
+
+# (Rust) Values that are never tokenized (case-insensitive). Built-in
+# principals carry analytic meaning and identify nobody.
+keep_values:
+  - SYSTEM
+  - LOCAL SERVICE
+  - NETWORK SERVICE
+  - ANONYMOUS LOGON
+  - NT AUTHORITY
+  - BUILTIN
+  - NT SERVICE
+  - WORKGROUP
+  - Window Manager
+  - Font Driver Host
+  - Administrator
+  - Administrators
+  - Guest
+  - DefaultAccount
+  - WDAGUtilityAccount
+  - krbtgt
+  - root
+
+# (Rust) Run the free-text detectors on preserve_fields too. Preserved values
+# are never replaced as a whole, but internal IPs, user profile paths,
+# DOMAIN\user etc. inside them are (e.g. C:\Users\john.doe\ inside a command
+# line). Public IPs, public domains and hashes are never touched by the
+# detectors. Fields in verbatim_fields below are exempt.
+scan_preserved_fields: true
+
+# ── Fields to preserve (never anonymize) ─────────────────────────────────
+# Security-critical values that must reach the model intact for
+# threat intel, hash lookups, MITRE correlation, etc.
+preserve_fields:
+  # Hashes — needed for VirusTotal / MalwareBazaar lookups
+  - data_win_eventdata_hashes
+  - data_win_eventdata_sha256
+  - data_win_eventdata_sha1
+  - data_win_eventdata_md5
+
+  # Rule metadata — classification, MITRE mapping, severity
+  - rule_id
+  - rule_description
+  - rule_level
+  - rule_groups
+  - rule_mitre_id
+  - rule_mitre_tactic
+  - rule_mitre_technique
+
+  # Windows Event IDs — alert type detection
+  - data_win_system_eventID
+  - data_win_system_eventid
+
+  # Process image paths — needed to identify malicious executables
+  - data_win_eventdata_image
+  - data_win_eventdata_parentImage
+  - data_win_eventdata_commandLine
+
+  # Network — destination (external) IPs and domains for threat intel
+  - data_win_eventdata_destinationIp
+  - data_win_eventdata_destinationHostname
+  - data_win_eventdata_destinationPort
+  - data_win_eventdata_queryName
+  - data_win_eventdata_queryResults
+  - data_srcip
+  - data_dstip
+  - data_dstport
+
+  # Timestamps and index pointers
+  - "@timestamp"
+  - timestamp
+  - _id
+  - _index
+
+# (Rust) Fields that are never touched at all — not even by the free-text
+# detectors (only relevant with scan_preserved_fields: true).
+# rule_description is deliberately not listed: Wazuh descriptions can embed
+# event fields (e.g. "... from $(srcip)"), so the detectors still run on it.
+verbatim_fields:
+  - data_win_eventdata_hashes
+  - data_win_eventdata_sha256
+  - data_win_eventdata_sha1
+  - data_win_eventdata_md5
+  - rule_id
+  - rule_level
+  - rule_groups
+  - rule_mitre_id
+  - rule_mitre_tactic
+  - rule_mitre_technique
+  - data_win_system_eventID
+  - data_win_system_eventid
+  - "@timestamp"
+  - timestamp
+  - _id
+  - _index

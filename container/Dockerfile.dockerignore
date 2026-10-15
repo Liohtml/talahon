@@ -7,8 +7,9 @@
 
 !Cargo.toml
 !Cargo.lock
+# crates/*/LICENSE are symlinks to it (packaged into each published crate).
+!LICENSE
 !crates/
-!siem/anon_proxy/fields.yaml
 !container/entrypoint.sh
 !container/mysql-tools/
 

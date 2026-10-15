@@ -1,10 +1,18 @@
 [package]
-name = "talon-channels"
+name = "talahon-channels"
 description = "Messaging channels: Telegram, outbound webhook, Emacs bridge"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+
+[lib]
+name = "talon_channels"
 
 [dependencies]
 talon-core = { workspace = true }

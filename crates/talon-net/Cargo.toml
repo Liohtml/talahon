@@ -1,10 +1,18 @@
 [package]
-name = "talon-net"
+name = "talahon-net"
 description = "Hardened HTTP serving for Talon: header-read timeouts, connection caps, graceful shutdown"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+
+[lib]
+name = "talon_net"
 
 [dependencies]
 axum = { workspace = true }

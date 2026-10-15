@@ -3,7 +3,7 @@
 use super::*;
 use serde_json::json;
 
-const SHIPPED: &str = include_str!("../../../../siem/anon_proxy/fields.yaml");
+const SHIPPED: &str = include_str!("../../fields.yaml");
 
 /// The original (pre-Rust) fields.yaml semantics in miniature.
 const PY_YAML: &str = r#"

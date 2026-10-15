@@ -20,7 +20,8 @@ security-first lens.
 - Bug fixes and security fixes
 - Detection and enrichment improvements in `talon-intel` (IOC types, MITRE
   mappings, triage scoring) with tests
-- Anonymizer improvements (`talon-anon`, `siem/anon_proxy/fields.yaml`)
+- Anonymizer improvements (`talon-anon`, `siem/anon_proxy/fields.yaml` and its
+  embedded copy `crates/talon-anon/fields.yaml`)
 - New investigation templates in `groups/copilot/prompts/` (no code needed)
 - Investigation workflow improvements in `groups/copilot/CLAUDE.md`
 - New channels or MCP integrations that follow the existing security contracts
@@ -44,8 +45,13 @@ cargo fmt --all
 ```
 
 CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
---locked -- -D warnings` and `cargo test --workspace --locked`; all three must
-pass.
+--locked -- -D warnings`, `cargo test --workspace --locked` and
+`cargo package --workspace --locked` (every crate must package and build on its
+own, as crates.io will); all four must pass.
+
+Packages are named `talahon-*` (crates.io), the directories and Rust crate
+names `talon-*` / `talon_*`: `cargo test -p talahon-core` tests
+`crates/talon-core`.
 
 ### Code rules
 
@@ -73,5 +79,35 @@ template.
 - Describe what changed and why, and how you tested it.
 - Keep the PR description free of credentials, internal hostnames and
   customer data.
-- Update `CHANGELOG.md` for user-visible changes and the docs for changed
-  behaviour or configuration.
+- Use a [Conventional Commits](https://www.conventionalcommits.org) title
+  (`feat(intel): …`, `fix(http): …`, `docs: …`); it becomes the changelog
+  entry and decides the next version.
+- Update the docs for changed behaviour or configuration. Don't edit
+  `CHANGELOG.md` or the version in `Cargo.toml`: the release automation does.
+
+## Releases
+
+Every merge to `main` releases itself once CI is green
+([`.github/workflows/release.yml`](.github/workflows/release.yml),
+[`scripts/release.py`](scripts/release.py)):
+
+1. The next version is computed from every commit since the last `vX.Y.Z` tag:
+   `type!:` or a `BREAKING CHANGE:` footer → major, `feat` → minor, anything
+   else → patch. All crates share one version.
+2. `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` are updated in a
+   `chore(release): vX.Y.Z` commit on `main`, which is tagged `vX.Y.Z`.
+3. `cargo package --workspace` checks every crate, the commit and tag are
+   pushed, and a GitHub release is created from the changelog entry.
+4. Every `talahon-*` crate is published to crates.io, dependencies first.
+
+Merges that only touch files outside the published crates (docs, CI, group
+templates) are not released on their own; they ride along with the next
+release. To pick a version yourself, raise `workspace.package.version` in
+`Cargo.toml` (and the internal dependency versions next to it) in your PR; it
+is released as it is.
+
+Publishing uses the `CARGO_REGISTRY_TOKEN` repository secret (a crates.io API
+token with the `publish-new` and `publish-update` scopes). crates.io allows a
+few new crates at once and then one every few minutes, so the very first
+release takes about two hours; the workflow waits. If a run stops early, run
+**Actions → Release → Run workflow**: it publishes whatever is still missing.
