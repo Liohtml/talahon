@@ -285,7 +285,7 @@ def cmd_publish(_: argparse.Namespace) -> None:
     if not os.environ.get("CARGO_REGISTRY_TOKEN"):
         print(
             "::warning title=crates.io::CARGO_REGISTRY_TOKEN is not set; nothing was published. "
-            "Add the repository secret, then re-run the Release workflow."
+            "Add it to the CRATES environment, then re-run the Release workflow."
         )
         return
     deadline = float(os.environ.get("RELEASE_DEADLINE", time.time() + 3 * 3600))

@@ -106,8 +106,9 @@ release. To pick a version yourself, raise `workspace.package.version` in
 `Cargo.toml` (and the internal dependency versions next to it) in your PR; it
 is released as it is.
 
-Publishing uses the `CARGO_REGISTRY_TOKEN` repository secret (a crates.io API
-token with the `publish-new` and `publish-update` scopes). crates.io allows a
-few new crates at once and then one every few minutes, so the very first
-release takes about two hours; the workflow waits. If a run stops early, run
+Publishing uses the `CARGO_REGISTRY_TOKEN` secret of the `CRATES` environment
+(Settings → Environments; a crates.io API token with the `publish-new` and
+`publish-update` scopes). crates.io allows a few new crates at once and then
+one every few minutes, so the very first release takes about two hours; the
+workflow waits. If a run stops early, run
 **Actions → Release → Run workflow**: it publishes whatever is still missing.
