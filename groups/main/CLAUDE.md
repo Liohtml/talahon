@@ -112,7 +112,9 @@ A task can carry a bash `script` that runs first (30-second timeout). Its
 last stdout line must be JSON: `{"wakeAgent": true|false, "data": {...}}`.
 With `wakeAgent: false` nothing else happens; with `true` the model wakes up
 with the script's data and the prompt. Use this to keep frequent checks from
-waking the model needlessly.
+waking the model needlessly. A script that exits non-zero, times out or prints
+no such line counts as a failed run (logged with the reason and retried), not
+as "nothing to do".
 
 Test the script in your sandbox before scheduling it. The image has `bash`,
 `curl`, `jq` and `python3`:

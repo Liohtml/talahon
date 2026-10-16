@@ -178,13 +178,16 @@ pub fn builtin_tools(opts: &BuiltinOptions) -> Vec<Arc<dyn Tool>> {
     if opts.ipc_tools {
         let ipc = IpcOptions {
             timezone: opts.timezone,
+            ..IpcOptions::default()
         };
         tools.push(Arc::new(SendMessageTool));
         tools.push(Arc::new(ScheduleTaskTool::new(ipc.clone())));
         tools.push(Arc::new(ListTasksTool));
-        tools.push(Arc::new(TaskControlTool::new(TaskControl::Pause)));
-        tools.push(Arc::new(TaskControlTool::new(TaskControl::Resume)));
-        tools.push(Arc::new(TaskControlTool::new(TaskControl::Cancel)));
+        for kind in [TaskControl::Pause, TaskControl::Resume, TaskControl::Cancel] {
+            tools.push(Arc::new(
+                TaskControlTool::new(kind).with_options(ipc.clone()),
+            ));
+        }
         tools.push(Arc::new(UpdateTaskTool::new(ipc)));
         if opts.register_group {
             tools.push(Arc::new(RegisterGroupTool));

@@ -28,6 +28,10 @@ pub enum AgentError {
     /// compaction (e.g. a single oversized prompt).
     #[error("context length exceeded and the conversation cannot be compacted further: {0}")]
     ContextOverflow(String),
+    /// A scheduled task's pre-flight script failed (it did not decide
+    /// whether to wake the agent).
+    #[error("task script failed: {0}")]
+    TaskScript(String),
     /// The run was cancelled (SIGTERM / SIGINT).
     #[error("agent run cancelled")]
     Cancelled,
@@ -46,6 +50,7 @@ impl AgentError {
             AgentError::Config(_) => "config",
             AgentError::Llm(e) => e.kind(),
             AgentError::ContextOverflow(_) => "context_overflow",
+            AgentError::TaskScript(_) => "task_script",
             AgentError::Cancelled => "cancelled",
             AgentError::Io(_) => "io",
         }

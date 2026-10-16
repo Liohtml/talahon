@@ -15,9 +15,18 @@
 //! - `update_task` validates a new `schedule_value` against the task's real
 //!   schedule type (looked up in `current_tasks.json`) instead of assuming
 //!   cron, and requires `schedule_value` when `schedule_type` changes;
-//! - empty texts/prompts/ids and invalid group folders are rejected early.
+//! - empty texts/prompts/ids and invalid group folders are rejected early;
+//! - `once` times that have already passed are rejected (the host would
+//!   run such a task right away);
+//! - the task tools report success only once the host has applied the
+//!   request, which they see in the `current_tasks.json` snapshot it
+//!   rewrites after every change. The host checks more than these tools can
+//!   (quotas, the minimum frequency outside the main chat, ownership); a
+//!   request it refuses never shows up there, and the tool says so instead
+//!   of claiming success.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono_tz::Tz;
@@ -25,7 +34,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use talon_core::paths::is_valid_group_folder;
 use talon_core::protocol::{IpcOutbound, IpcTask, container_paths, ipc_file_name};
-use talon_core::schedule::{MIN_INTERVAL_MS, validate};
+use talon_core::schedule::{MIN_INTERVAL_MS, ensure_not_past, validate};
 use talon_core::time::now_iso;
 use talon_core::tool::{Tool, ToolConcurrency, ToolContext, ToolOutput, ToolSpec};
 use talon_core::types::{ContextMode, ScheduleType};
@@ -63,17 +72,31 @@ const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 /// Longest accepted task id / jid / name.
 const MAX_ID_LEN: usize = 256;
 
+/// How long the task tools wait for the host to apply a request by default
+/// (the host polls for requests every second).
+pub const DEFAULT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the task snapshot is re-read while waiting.
+const CONFIRM_POLL: Duration = Duration::from_millis(200);
+/// What the host checks beyond these tools, for the "not confirmed" answer.
+const HOST_LIMITS: &str = "outside the main chat a task may run at most once every 5 minutes \
+     and a chat may own at most 25 tasks (the host's defaults), and only the task's own chat or \
+     the main chat may change it";
+
 /// Settings shared by the IPC tools.
 #[derive(Debug, Clone)]
 pub struct IpcOptions {
     /// Timezone used to validate `once` schedules (the host's `TZ`).
     pub timezone: Tz,
+    /// How long the task tools wait for the host to apply a request before
+    /// reporting it as not confirmed.
+    pub confirm_timeout: Duration,
 }
 
 impl Default for IpcOptions {
     fn default() -> Self {
         Self {
             timezone: chrono_tz::UTC,
+            confirm_timeout: DEFAULT_CONFIRM_TIMEOUT,
         }
     }
 }
@@ -162,9 +185,58 @@ fn validate_schedule(st: ScheduleType, value: &str, tz: Tz) -> Result<(), String
                 format!(
                     "Invalid timestamp: \"{value}\". Use local time format like \"2026-02-01T15:30:00\"."
                 )
+            })?;
+            ensure_not_past(st, value, tz, chrono::Utc::now()).map_err(|_| {
+                format!(
+                    "The time \"{value}\" has already passed (local time is now {}). Pick a time in the future.",
+                    chrono::Utc::now().with_timezone(&tz).format("%Y-%m-%dT%H:%M:%S")
+                )
             })
         }
     }
+}
+
+/// Poll the host's `current_tasks.json` until `done` accepts it, for at most
+/// `timeout`. Returns the accepted snapshot, `None` on timeout or
+/// cancellation.
+async fn await_snapshot<F>(ctx: &ToolContext, timeout: Duration, done: F) -> Option<Vec<Value>>
+where
+    F: Fn(&[Value]) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let path = current_tasks_file(ctx);
+        let tasks = tokio::task::spawn_blocking(move || read_snapshot(&path))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .unwrap_or_default();
+        if done(&tasks) {
+            return Some(tasks);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(CONFIRM_POLL.min(deadline - now)) => {}
+            () = ctx.cancel.cancelled() => return None,
+        }
+    }
+}
+
+fn find_task<'a>(tasks: &'a [Value], task_id: &str) -> Option<&'a Value> {
+    tasks.iter().find(|t| str_field(t, "id") == task_id)
+}
+
+/// The answer when the host did not apply a request in time.
+fn not_confirmed(task_id: &str, what: &str, timeout: Duration) -> ToolOutput {
+    ToolOutput::err(format!(
+        "The host has not {what} task {task_id} within {} s, so it most likely refused the \
+         request: {HOST_LIMITS}. Call list_tasks to see the current state before trying again.",
+        timeout.as_secs().max(1)
+    ))
 }
 
 fn new_task_id() -> String {
@@ -301,7 +373,9 @@ MESSAGING BEHAVIOR - The task agent's output is sent to the user or group. It ca
 SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 \u{2022} cron: Standard cron expression (e.g., \"*/5 * * * *\" for every 5 minutes, \"0 9 * * *\" for daily at 9am LOCAL time)
 \u{2022} interval: Milliseconds between runs (e.g., \"300000\" for 5 minutes, \"3600000\" for 1 hour)
-\u{2022} once: Local time WITHOUT \"Z\" suffix (e.g., \"2026-02-01T15:30:00\"). Do NOT use UTC/Z suffix.";
+\u{2022} once: Local time WITHOUT \"Z\" suffix (e.g., \"2026-02-01T15:30:00\"). Do NOT use UTC/Z suffix. It must be in the future.
+
+LIMITS - Outside the main chat a task may run at most once every 5 minutes and a chat may own at most 25 tasks. The tool reports success only after the host has created the task; otherwise it says that the host refused it.";
 
 #[async_trait]
 impl Tool for ScheduleTaskTool {
@@ -398,12 +472,23 @@ impl Tool for ScheduleTaskTool {
             created_by: Some(ctx.group_folder.clone()),
             timestamp: Some(now_iso()),
         };
-        match write_request(tasks_dir(ctx), &task).await {
-            Ok(_) => ToolOutput::ok(format!(
-                "Task {task_id} scheduled: {} - {schedule_value}{note}",
-                schedule_type.as_str()
-            )),
-            Err(e) => ToolOutput::err(e),
+        if let Err(e) = write_request(tasks_dir(ctx), &task).await {
+            return ToolOutput::err(e);
+        }
+        let timeout = self.opts.confirm_timeout;
+        let id = task_id.clone();
+        match await_snapshot(ctx, timeout, move |tasks| find_task(tasks, &id).is_some()).await {
+            Some(tasks) => {
+                let next = find_task(&tasks, &task_id)
+                    .map(|t| str_field(t, "next_run"))
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("not scheduled");
+                ToolOutput::ok(format!(
+                    "Task {task_id} scheduled: {} - {schedule_value}{note}. Next run: {next}.",
+                    schedule_type.as_str()
+                ))
+            }
+            None => not_confirmed(&task_id, "created", timeout),
         }
     }
 }
@@ -493,12 +578,23 @@ pub enum TaskControl {
 #[derive(Debug, Clone)]
 pub struct TaskControlTool {
     kind: TaskControl,
+    opts: IpcOptions,
 }
 
 impl TaskControlTool {
     /// Tool for the given operation.
     pub fn new(kind: TaskControl) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            opts: IpcOptions::default(),
+        }
+    }
+
+    /// The same tool with other IPC settings.
+    #[must_use]
+    pub fn with_options(mut self, opts: IpcOptions) -> Self {
+        self.opts = opts;
+        self
     }
 }
 
@@ -552,26 +648,38 @@ impl Tool for TaskControlTool {
                     task_id: task_id.clone(),
                     timestamp,
                 },
-                "pause requested",
+                "paused",
             ),
             TaskControl::Resume => (
                 IpcTask::ResumeTask {
                     task_id: task_id.clone(),
                     timestamp,
                 },
-                "resume requested",
+                "resumed",
             ),
             TaskControl::Cancel => (
                 IpcTask::CancelTask {
                     task_id: task_id.clone(),
                     timestamp,
                 },
-                "cancellation requested",
+                "cancelled",
             ),
         };
-        match write_request(tasks_dir(ctx), &task).await {
-            Ok(_) => ToolOutput::ok(format!("Task {task_id} {verb}.")),
-            Err(e) => ToolOutput::err(e),
+        if let Err(e) = write_request(tasks_dir(ctx), &task).await {
+            return ToolOutput::err(e);
+        }
+        let kind = self.kind;
+        let id = task_id.clone();
+        let applied = move |tasks: &[Value]| match (kind, find_task(tasks, &id)) {
+            (TaskControl::Cancel, found) => found.is_none(),
+            (TaskControl::Pause, Some(t)) => str_field(t, "status") == "paused",
+            (TaskControl::Resume, Some(t)) => str_field(t, "status") == "active",
+            (_, None) => false,
+        };
+        let timeout = self.opts.confirm_timeout;
+        match await_snapshot(ctx, timeout, applied).await {
+            Some(_) => ToolOutput::ok(format!("Task {task_id} {verb}.")),
+            None => not_confirmed(&task_id, verb, timeout),
         }
     }
 }
@@ -692,15 +800,40 @@ impl Tool for UpdateTaskTool {
         }
         let task = IpcTask::UpdateTask {
             task_id: task_id.clone(),
-            prompt,
-            script,
+            prompt: prompt.clone(),
+            script: script.clone(),
             schedule_type,
-            schedule_value,
+            schedule_value: schedule_value.clone(),
             timestamp: Some(now_iso()),
         };
-        match write_request(tasks_dir(ctx), &task).await {
-            Ok(_) => ToolOutput::ok(format!("Task {task_id} update requested.")),
-            Err(e) => ToolOutput::err(e),
+        if let Err(e) = write_request(tasks_dir(ctx), &task).await {
+            return ToolOutput::err(e);
+        }
+        let id = task_id.clone();
+        let applied = move |tasks: &[Value]| {
+            let Some(t) = find_task(tasks, &id) else {
+                return false;
+            };
+            let script_now = t.get("script").and_then(Value::as_str).unwrap_or("");
+            prompt
+                .as_deref()
+                .is_none_or(|p| str_field(t, "prompt") == p)
+                && schedule_type.is_none_or(|ty| str_field(t, "schedule_type") == ty.as_str())
+                && schedule_value
+                    .as_deref()
+                    .is_none_or(|v| str_field(t, "schedule_value") == v)
+                && script.as_deref().is_none_or(|s| script_now == s)
+        };
+        let timeout = self.opts.confirm_timeout;
+        match await_snapshot(ctx, timeout, applied).await {
+            Some(tasks) => {
+                let next = find_task(&tasks, &task_id)
+                    .map(|t| str_field(t, "next_run"))
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("not scheduled");
+                ToolOutput::ok(format!("Task {task_id} updated. Next run: {next}."))
+            }
+            None => not_confirmed(&task_id, "updated", timeout),
         }
     }
 }
@@ -789,6 +922,135 @@ pub fn default_ipc_dir() -> PathBuf {
 mod tests {
     use super::*;
     use crate::test_support::ctx_for;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Settings that give up on the host quickly (no host in most tests).
+    fn quick() -> IpcOptions {
+        IpcOptions {
+            confirm_timeout: Duration::from_millis(50),
+            ..IpcOptions::default()
+        }
+    }
+
+    /// Stand-in for the host: applies the task requests it finds under
+    /// `tasks/` to `current_tasks.json`, like the real host does after
+    /// authorizing them. Refuses new tasks whose prompt says "refuse".
+    struct FakeHost {
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeHost {
+        fn start(ctx: &ToolContext, initial: Value) -> Self {
+            let ipc = ctx.ipc_dir.clone();
+            std::fs::create_dir_all(ipc.join("tasks")).unwrap();
+            std::fs::write(ipc.join("current_tasks.json"), initial.to_string()).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let handle = std::thread::spawn(move || {
+                let mut seen = HashSet::new();
+                while !flag.load(Ordering::SeqCst) {
+                    let mut names: Vec<_> = std::fs::read_dir(ipc.join("tasks"))
+                        .unwrap()
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| n.ends_with(".json"))
+                        .collect();
+                    names.sort();
+                    for name in names {
+                        if !seen.insert(name.clone()) {
+                            continue;
+                        }
+                        let raw = std::fs::read(ipc.join("tasks").join(&name)).unwrap();
+                        let snapshot = ipc.join("current_tasks.json");
+                        let mut tasks: Vec<Value> =
+                            serde_json::from_slice(&std::fs::read(&snapshot).unwrap()).unwrap();
+                        apply(&mut tasks, serde_json::from_slice(&raw).unwrap());
+                        std::fs::write(&snapshot, Value::Array(tasks).to_string()).unwrap();
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+            Self {
+                stop,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for FakeHost {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(h) = self.handle.take() {
+                h.join().unwrap();
+            }
+        }
+    }
+
+    fn apply(tasks: &mut Vec<Value>, request: IpcTask) {
+        let position = |tasks: &[Value], id: &str| tasks.iter().position(|t| t["id"] == id);
+        match request {
+            IpcTask::ScheduleTask {
+                task_id,
+                prompt,
+                schedule_type,
+                schedule_value,
+                ..
+            } if !prompt.contains("refuse") => tasks.push(json!({
+                "id": task_id.unwrap(),
+                "groupFolder": "testgroup",
+                "prompt": prompt,
+                "schedule_type": schedule_type.as_str(),
+                "schedule_value": schedule_value,
+                "status": "active",
+                "next_run": "2030-01-01T09:00:00.000Z",
+            })),
+            IpcTask::UpdateTask {
+                task_id,
+                prompt,
+                script,
+                schedule_type,
+                schedule_value,
+                ..
+            } => {
+                if let Some(i) = position(tasks, &task_id) {
+                    let t = &mut tasks[i];
+                    if let Some(p) = prompt {
+                        t["prompt"] = json!(p);
+                    }
+                    if let Some(ty) = schedule_type {
+                        t["schedule_type"] = json!(ty.as_str());
+                    }
+                    if let Some(v) = schedule_value {
+                        t["schedule_value"] = json!(v);
+                    }
+                    match script {
+                        Some(s) if s.is_empty() => {
+                            t.as_object_mut().unwrap().remove("script");
+                        }
+                        Some(s) => t["script"] = json!(s),
+                        None => {}
+                    }
+                }
+            }
+            IpcTask::PauseTask { task_id, .. } => {
+                if let Some(i) = position(tasks, &task_id) {
+                    tasks[i]["status"] = json!("paused");
+                }
+            }
+            IpcTask::ResumeTask { task_id, .. } => {
+                if let Some(i) = position(tasks, &task_id) {
+                    tasks[i]["status"] = json!("active");
+                }
+            }
+            IpcTask::CancelTask { task_id, .. } => {
+                tasks.retain(|t| t["id"] != task_id.as_str());
+            }
+            _ => {}
+        }
+    }
 
     fn files_in(dir: &Path) -> Vec<Value> {
         let mut names: Vec<_> = std::fs::read_dir(dir)
@@ -840,6 +1102,7 @@ mod tests {
     async fn schedule_task_valid_and_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_for(dir.path());
+        let _host = FakeHost::start(&ctx, json!([]));
         let t = ScheduleTaskTool::default();
         let out = t
             .call(
@@ -849,7 +1112,12 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.starts_with("Task task-"));
-        assert!(out.content.ends_with("scheduled: cron - 0 9 * * *"));
+        assert!(
+            out.content
+                .ends_with("scheduled: cron - 0 9 * * *. Next run: 2030-01-01T09:00:00.000Z."),
+            "{}",
+            out.content
+        );
         let files = files_in(&ctx.ipc_dir.join("tasks"));
         assert_eq!(files.len(), 1);
         let v = &files[0];
@@ -865,10 +1133,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schedule_task_is_confirmed_only_by_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let t = ScheduleTaskTool::new(quick());
+        let args = json!({"prompt": "p", "schedule_type": "interval", "schedule_value": "60000"});
+        // Nobody applies the request: not reported as scheduled.
+        let out = t.call(args.clone(), &ctx).await;
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("has not created task task-")
+                && out.content.contains("5 minutes")
+                && out.content.contains("list_tasks"),
+            "{}",
+            out.content
+        );
+        // The host refuses this one.
+        let _host = FakeHost::start(&ctx, json!([]));
+        let refused = json!({"prompt": "please refuse", "schedule_type": "interval", "schedule_value": "60000"});
+        assert!(t.call(refused, &ctx).await.is_error);
+        assert!(!t.call(args, &ctx).await.is_error);
+    }
+
+    #[tokio::test]
     async fn schedule_task_validation_messages() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_for(dir.path());
-        let t = ScheduleTaskTool::default();
+        let t = ScheduleTaskTool::new(quick());
         let call = |st: &str, sv: &str| {
             let t = t.clone();
             let ctx = ctx.clone();
@@ -892,8 +1183,16 @@ mod tests {
         assert!(out.content.starts_with("Invalid timestamp: \"tomorrow\""));
         let out = call("weekly", "x").await;
         assert!(out.content.contains("schedule_type"));
-        assert!(!call("interval", "300000").await.is_error);
-        assert!(!call("once", "2030-02-01T15:30:00").await.is_error);
+        let out = call("once", "2020-02-01T15:30:00").await;
+        assert!(
+            out.content
+                .starts_with("The time \"2020-02-01T15:30:00\" has already passed")
+        );
+        // Valid requests pass validation (and then wait for the host).
+        for (st, sv) in [("interval", "300000"), ("once", "2030-02-01T15:30:00")] {
+            let out = call(st, sv).await;
+            assert!(out.content.contains("has not created"), "{}", out.content);
+        }
         let out = t
             .call(
                 json!({"prompt": "p", "schedule_type": "cron", "schedule_value": "* * * * *", "context_mode": "shared"}),
@@ -907,6 +1206,7 @@ mod tests {
     async fn schedule_task_target_only_for_main() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ctx_for(dir.path());
+        let _host = FakeHost::start(&ctx, json!([]));
         let t = ScheduleTaskTool::default();
         let args = json!({"prompt": "p", "schedule_type": "interval", "schedule_value": "60000", "target_group_jid": "tg:999", "context_mode": "isolated"});
         let out = t.call(args.clone(), &ctx).await;
@@ -929,6 +1229,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ctx_for(dir.path());
         let schedule = ScheduleTaskTool::default();
+        let _host = FakeHost::start(&ctx, json!([]));
         let args = json!({"prompt": "p", "schedule_type": "interval", "schedule_value": "60000", "script": "echo '{\"wakeAgent\":true}'"});
         let out = schedule.call(args.clone(), &ctx).await;
         assert!(out.is_error);
@@ -981,50 +1282,54 @@ mod tests {
     async fn task_control_tools() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_for(dir.path());
+        let host = FakeHost::start(
+            &ctx,
+            json!([{"id": "task-1", "groupFolder": "testgroup", "prompt": "p", "schedule_type": "cron", "schedule_value": "0 9 * * *", "status": "active", "next_run": null}]),
+        );
         let cases = [
-            (
-                TaskControl::Pause,
-                "pause_task",
-                "Task task-1 pause requested.",
-            ),
-            (
-                TaskControl::Resume,
-                "resume_task",
-                "Task task-1 resume requested.",
-            ),
-            (
-                TaskControl::Cancel,
-                "cancel_task",
-                "Task task-1 cancellation requested.",
-            ),
+            (TaskControl::Pause, "pause_task", "Task task-1 paused."),
+            (TaskControl::Resume, "resume_task", "Task task-1 resumed."),
+            (TaskControl::Cancel, "cancel_task", "Task task-1 cancelled."),
         ];
         for (kind, ty, msg) in cases {
-            let t = TaskControlTool::new(kind);
+            let t = TaskControlTool::new(kind).with_options(quick());
             assert_eq!(t.spec().name, ty);
             let out = t.call(json!({"task_id": "task-1"}), &ctx).await;
             assert_eq!(out.content, msg);
             assert!(t.call(json!({"task_id": ""}), &ctx).await.is_error);
         }
+        drop(host);
+        // A task the host does not know never gets paused.
+        let out = TaskControlTool::new(TaskControl::Pause)
+            .with_options(quick())
+            .call(json!({"task_id": "task-ghost"}), &ctx)
+            .await;
+        assert!(out.is_error && out.content.contains("has not paused task task-ghost"));
         let files = files_in(&ctx.ipc_dir.join("tasks"));
         let types: Vec<&str> = files.iter().map(|v| v["type"].as_str().unwrap()).collect();
-        assert_eq!(types.len(), 3);
+        assert_eq!(types.len(), 4);
         for ty in ["pause_task", "resume_task", "cancel_task"] {
             assert!(types.contains(&ty));
         }
-        assert!(files.iter().all(|v| v["taskId"] == "task-1"));
+        assert!(
+            files
+                .iter()
+                .all(|v| v["taskId"] == "task-1" || v["taskId"] == "task-ghost")
+        );
     }
 
     #[tokio::test]
     async fn update_task_validation_uses_snapshot_type() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx_for(dir.path());
-        std::fs::create_dir_all(&ctx.ipc_dir).unwrap();
-        std::fs::write(
-            ctx.ipc_dir.join("current_tasks.json"),
-            json!([{"id": "task-int", "groupFolder": "testgroup", "prompt": "p", "schedule_type": "interval", "schedule_value": "60000", "status": "active", "next_run": null}]).to_string(),
-        )
-        .unwrap();
-        let t = UpdateTaskTool::default();
+        let host = FakeHost::start(
+            &ctx,
+            json!([
+                {"id": "task-int", "groupFolder": "testgroup", "prompt": "p", "schedule_type": "interval", "schedule_value": "60000", "status": "active", "next_run": "2030-01-01T09:00:00.000Z"},
+                {"id": "task-x", "groupFolder": "testgroup", "prompt": "old", "script": "echo hi", "schedule_type": "cron", "schedule_value": "0 9 * * *", "status": "active", "next_run": null}
+            ]),
+        );
+        let t = UpdateTaskTool::new(quick());
         // Interval value for an interval task: OK (validated against the
         // task's real schedule type, not as cron).
         let out = t
@@ -1033,11 +1338,14 @@ mod tests {
                 &ctx,
             )
             .await;
-        assert_eq!(out.content, "Task task-int update requested.");
+        assert_eq!(
+            out.content,
+            "Task task-int updated. Next run: 2030-01-01T09:00:00.000Z."
+        );
         // Unknown task -> cron assumed.
         let out = t
             .call(
-                json!({"task_id": "task-x", "schedule_value": "120000"}),
+                json!({"task_id": "task-unknown", "schedule_value": "120000"}),
                 &ctx,
             )
             .await;
@@ -1061,9 +1369,18 @@ mod tests {
                 &ctx,
             )
             .await;
-        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, "Task task-x updated. Next run: not scheduled.");
+        drop(host);
+        // Without the host applying it, an update is not reported as done.
+        let out = t
+            .call(json!({"task_id": "task-x", "prompt": "newer"}), &ctx)
+            .await;
+        assert!(out.is_error && out.content.contains("has not updated task task-x"));
         let files = files_in(&ctx.ipc_dir.join("tasks"));
-        let last = files.iter().find(|v| v["taskId"] == "task-x").unwrap();
+        let last = files
+            .iter()
+            .find(|v| v["taskId"] == "task-x" && v["prompt"] == "new")
+            .unwrap();
         assert_eq!(last["type"], "update_task");
         assert_eq!(last["script"], "");
         assert_eq!(last["prompt"], "new");

@@ -3,14 +3,15 @@
 //! The script runs with `bash -c` in the group folder through the `bash`
 //! tool's runner (scrubbed environment, own process group, killed on
 //! timeout) with a 30 s budget. Its **last non-empty stdout line** must be
-//! `{"wakeAgent": bool, "data"?: any}`. A failing script, missing output or
-//! invalid JSON means "don't wake".
+//! `{"wakeAgent": bool, "data"?: any}`. A script that fails, times out or
+//! prints no such line is an error: the run is reported as failed (and
+//! retried by the scheduler), never as a run that decided not to wake.
 
 use std::path::Path;
 use std::time::Duration;
 
 use talon_core::protocol::ScriptResult;
-use talon_tools::{BashOptions, BashTool};
+use talon_tools::{BashOptions, BashTool, Termination};
 use tokio_util::sync::CancellationToken;
 
 /// Script time budget.
@@ -34,13 +35,13 @@ pub fn parse_script_output(stdout: &str) -> Option<ScriptResult> {
     }
 }
 
-/// Run `script` in `cwd`. `None` = don't wake the agent (error, timeout,
-/// bad output).
+/// Run `script` in `cwd`. `Err` says why the script failed (could not
+/// start, non-zero exit, timeout, no `{"wakeAgent": ...}` line).
 pub async fn run_task_script(
     script: &str,
     cwd: &Path,
     cancel: &CancellationToken,
-) -> Option<ScriptResult> {
+) -> Result<ScriptResult, String> {
     let tool = BashTool::new(BashOptions {
         max_output_bytes: SCRIPT_MAX_OUTPUT_BYTES,
         ..BashOptions::default()
@@ -49,7 +50,7 @@ pub async fn run_task_script(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "cannot start the task script");
-            return None;
+            return Err(format!("cannot start: {e}"));
         }
     };
     if !result.stderr.trim().is_empty() {
@@ -62,9 +63,17 @@ pub async fn run_task_script(
             termination = ?result.termination,
             "task script failed"
         );
-        return None;
+        return Err(match (result.termination, result.exit_code) {
+            (Termination::TimedOut, _) => {
+                format!("timed out after {} s", SCRIPT_TIMEOUT.as_secs())
+            }
+            (Termination::Cancelled, _) => "cancelled".to_string(),
+            (Termination::Exited, Some(code)) => format!("exited with status {code}"),
+            (Termination::Exited, None) => "killed by a signal".to_string(),
+        });
     }
     parse_script_output(&result.stdout)
+        .ok_or_else(|| "printed no {\"wakeAgent\": true|false} line".to_string())
 }
 
 #[cfg(test)]
@@ -98,15 +107,17 @@ mod tests {
         .await
         .unwrap();
         assert!(r.wake_agent);
-        assert!(
-            run_task_script("exit 3", dir.path(), &cancel)
-                .await
-                .is_none()
+        assert_eq!(
+            run_task_script("exit 3", dir.path(), &cancel).await,
+            Err("exited with status 3".to_string())
         );
-        assert!(
-            run_task_script("echo nothing-useful", dir.path(), &cancel)
-                .await
-                .is_none()
-        );
+        let err = run_task_script("echo nothing-useful", dir.path(), &cancel)
+            .await
+            .unwrap_err();
+        assert!(err.contains("wakeAgent"), "{err}");
+        let quiet = run_task_script("echo '{\"wakeAgent\": false}'", dir.path(), &cancel)
+            .await
+            .unwrap();
+        assert!(!quiet.wake_agent);
     }
 }

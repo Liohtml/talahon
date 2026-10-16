@@ -44,7 +44,7 @@ use std::future::Future;
 use serde_json::{Map, Value, json};
 use talon_core::audit::event;
 use talon_core::protocol::{IpcOutbound, IpcTask};
-use talon_core::schedule::first_run;
+use talon_core::schedule::{ensure_not_past, first_run};
 use talon_core::time::{now_iso, to_iso};
 use talon_core::types::{RegisteredGroup, ScheduleType, ScheduledTask, TaskStatus, TaskUpdate};
 use talon_security::ipc_authz::{IpcDecision, TaskOwner};
@@ -553,7 +553,11 @@ impl IpcWatcher {
         }
 
         let now = chrono::Utc::now();
-        let next_run = match first_run(*schedule_type, schedule_value, self.config.timezone, now) {
+        let next_run = match first_run(*schedule_type, schedule_value, self.config.timezone, now)
+            .and_then(|n| {
+                ensure_not_past(*schedule_type, schedule_value, self.config.timezone, now)
+                    .map(|()| n)
+            }) {
             Ok(n) => n,
             Err(e) => return IpcOutcome::Rejected(format!("invalid schedule: {e}")),
         };
@@ -658,6 +662,32 @@ impl IpcWatcher {
             Ok(t) => t,
             Err(outcome) => return outcome,
         };
+        // A resumed task needs a time to run at: a completed task has none
+        // left, and a `once` task whose time has passed would run at once.
+        let mut resume_at = None;
+        if matches!(op, StatusOp::Resume) && current.status != TaskStatus::Active {
+            let now = chrono::Utc::now();
+            let tz = self.config.timezone;
+            if let Err(e) = ensure_not_past(current.schedule_type, &current.schedule_value, tz, now)
+            {
+                return IpcOutcome::Rejected(format!(
+                    "cannot resume: {e}; update the task's schedule instead"
+                ));
+            }
+            if current.status == TaskStatus::Completed || current.next_run.is_none() {
+                match first_run(current.schedule_type, &current.schedule_value, tz, now) {
+                    Ok(next) => {
+                        details.insert("nextRun".into(), json!(next));
+                        resume_at = Some(next);
+                    }
+                    Err(e) => {
+                        return IpcOutcome::Rejected(format!(
+                            "cannot resume: invalid schedule: {e}"
+                        ));
+                    }
+                }
+            }
+        }
         // Re-activating a task is held to the same quotas as creating one
         // (N-3): its schedule must respect the lane's minimum frequency, and
         // a completed task needs a free slot (completed tasks do not count).
@@ -693,6 +723,7 @@ impl IpcWatcher {
                 task_id,
                 &TaskUpdate {
                     status: Some(TaskStatus::Active),
+                    next_run: resume_at.map(Some),
                     ..TaskUpdate::default()
                 },
             ),
@@ -751,7 +782,10 @@ impl IpcWatcher {
         if schedule_type.is_some() || schedule_value.is_some() {
             let ty = schedule_type.unwrap_or(current.schedule_type);
             let value = schedule_value.as_deref().unwrap_or(&current.schedule_value);
-            match first_run(ty, value, self.config.timezone, chrono::Utc::now()) {
+            let (tz, now) = (self.config.timezone, chrono::Utc::now());
+            match first_run(ty, value, tz, now)
+                .and_then(|next| ensure_not_past(ty, value, tz, now).map(|()| next))
+            {
                 Ok(next) => {
                     details.insert("nextRun".into(), json!(next));
                     update.next_run = Some(Some(next));
@@ -760,6 +794,14 @@ impl IpcWatcher {
             }
             if let Err(o) = self.check_frequency(source, ty, value, details) {
                 return o;
+            }
+            // A new schedule for a finished task means it should run again;
+            // like a resume, that takes a free slot.
+            if current.status == TaskStatus::Completed {
+                if let Err(o) = self.check_task_quota(source, details) {
+                    return o;
+                }
+                update.status = Some(TaskStatus::Active);
             }
         }
         let mut fields = Vec::new();
@@ -774,6 +816,9 @@ impl IpcWatcher {
         }
         if update.schedule_value.is_some() {
             fields.push("schedule_value");
+        }
+        if update.status.is_some() {
+            fields.push("status");
         }
         details.insert("fields".into(), json!(fields));
         // A no-op update is still an applied (and always audited) request,

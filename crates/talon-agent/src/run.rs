@@ -7,7 +7,7 @@
 //! 3. build the first prompt (scheduled-task prefix, pending IPC input);
 //! 4. `/compact` as the whole prompt -> compact the session and report;
 //! 5. scheduled task with a script -> pre-flight; `wakeAgent=false` ->
-//!    `success(null)` and exit;
+//!    `success(null)` and exit; a failed script -> error frame;
 //! 6. tools: built-in (+ `register_group` for main), fenced intel tools,
 //!    MCP tools (sockets from the supervisor, or spawned in dev mode);
 //! 7. system prompt (trusted, read-only `CLAUDE.md`), the first user
@@ -216,22 +216,16 @@ async fn execute_inner(
         if let Some(script) = input.script.as_deref().filter(|s| !s.trim().is_empty()) {
             tracing::info!("running the task pre-flight script");
             match script::run_task_script(script, &paths.group, &cancel).await {
-                Some(r) if r.wake_agent => {
+                Ok(r) if r.wake_agent => {
                     tracing::info!("task script asked to wake the agent");
                     first_prompt = prompt::script_prompt(r.data.as_ref(), &input.prompt);
                 }
-                other => {
-                    tracing::info!(
-                        reason = if other.is_some() {
-                            "wakeAgent=false"
-                        } else {
-                            "script error or no output"
-                        },
-                        "task script decided not to wake the agent"
-                    );
+                Ok(_) => {
+                    tracing::info!("task script decided not to wake the agent");
                     output.emit(&ContainerOutput::success(None, None));
                     return Ok(());
                 }
+                Err(reason) => return Err(AgentError::TaskScript(reason)),
             }
         }
     }
@@ -675,6 +669,25 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].status, OutputStatus::Success);
         assert!(frames[0].result.is_none());
+        assert!(backend.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_script_fails_the_run() {
+        let env = env();
+        let backend = Arc::new(ScriptedBackend::new([]));
+        let mut i = input("check things");
+        i.is_scheduled_task = true;
+        i.script = Some("echo boom >&2; exit 2".into());
+        let err = run(&env, i, backend.clone()).await.unwrap_err();
+        assert!(matches!(err, AgentError::TaskScript(_)), "{err:?}");
+        let frames = env.sink.frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].status, OutputStatus::Error);
+        assert_eq!(
+            frames[0].error.as_deref(),
+            Some("task script failed: exited with status 2")
+        );
         assert!(backend.requests().is_empty());
     }
 
