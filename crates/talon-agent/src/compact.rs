@@ -22,8 +22,10 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use talon_llm::{ChatMessage, Role, estimate_tokens};
 
-/// Messages longer than this are cut in the Markdown archive.
-const ARCHIVE_MAX_MESSAGE_CHARS: usize = 2_000;
+/// Messages longer than this are cut in the Markdown archive. The archive
+/// is the only full record of the compacted turns (the session keeps just
+/// the summary), so the cap only guards against pathological sizes.
+const ARCHIVE_MAX_MESSAGE_CHARS: usize = 256 * 1024;
 /// Starting per-message cap when rendering a transcript for summarization.
 const SUMMARY_MESSAGE_CHARS: usize = 6_000;
 /// Floor for the per-message cap when the transcript has to shrink.
@@ -295,9 +297,13 @@ pub fn archive_markdown(
         if text.is_empty() {
             continue;
         }
-        let content = if text.chars().count() > ARCHIVE_MAX_MESSAGE_CHARS {
+        let total = text.chars().count();
+        let content = if total > ARCHIVE_MAX_MESSAGE_CHARS {
             let head: String = text.chars().take(ARCHIVE_MAX_MESSAGE_CHARS).collect();
-            format!("{head}...")
+            format!(
+                "{head}\n\n[… {} more characters not archived]",
+                total - ARCHIVE_MAX_MESSAGE_CHARS
+            )
         } else {
             text.to_string()
         };
@@ -473,11 +479,14 @@ mod tests {
             ChatMessage::user("hello"),
             ChatMessage::tool_result("1", "hidden"),
             ChatMessage::assistant("y".repeat(3_000)),
+            ChatMessage::user("z".repeat(ARCHIVE_MAX_MESSAGE_CHARS + 5)),
         ];
         let md = archive_markdown(&h, Some("Alert triage"), "Talon", now);
         assert!(md.starts_with("# Alert triage\n\nArchived: Oct 14, 9:47 AM"));
         assert!(md.contains("**User**: hello"));
-        assert!(md.contains(&format!("**Talon**: {}...", "y".repeat(2_000))));
+        // A long answer is kept whole: the archive is its only full copy.
+        assert!(md.contains(&format!("**Talon**: {}\n", "y".repeat(3_000))));
+        assert!(md.contains("[… 5 more characters not archived]"));
         assert!(!md.contains("hidden"));
 
         let archives = dir.path().join("state").join("conversations");
