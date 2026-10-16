@@ -170,13 +170,11 @@ Steps:
      WHERE a.id = {alert_id} AND a.customer_code = "{customer_code}";
 
    Treat the returned (index_name, index_id) as the authoritative pointer to the raw event for every subsequent SIEM lookup. The 'source' column ("wazuh", "office365", "misp", …) tells you which OpenSearch index family the event lives in. If the row is missing, ast.index_name is empty, or the source is unrecognised, mark the job 'failed' with a descriptive error_message rather than guessing from timestamps.
-3. Follow Steps 2–6 from CLAUDE.md exactly (fetch raw event + index mapping, detect alert type, load template, extract IOCs, threat intel, SIEM correlation).
-{step_override_instruction}3b. Complete Step 5.5 from CLAUDE.md: call score_alert, verify every claim against the evidence you collected, then call submit_triage_report with report_id="{job_id}". Use the severity_assessment label and the Markdown it returns for step 4b. Talon records this structured verdict on the investigation.
+3. Follow Step 0.5 (MemPalace prior context for the asset, customer and IOCs) and Steps 2–6 from CLAUDE.md exactly (fetch raw event + index mapping, detect alert type, load template, extract IOCs, threat intel, SIEM correlation).
+{step_override_instruction}3b. Complete Step 5.5 from CLAUDE.md: call score_alert, verify every claim against the evidence you collected, then call submit_triage_report with report_id="{job_id}". Use the severity_assessment label and the Markdown it returns for step 4a. Talon records this structured verdict on the investigation.
 4. Write back to CoPilot — call these three tools in order. The four body fields on SubmitAiAnalystReportTool (severity_assessment, summary, report_markdown, recommended_actions) carry the entire human-readable investigation output; a call missing any of them persists a blank row that surfaces as an empty report in CoPilot. Pass all of them every time, even on trivial false positives.
 
-   a. mcp__copilot__UpdateAiAnalystJobTool(job_id="{job_id}", status="completed", template_used=<template key or null>)
-
-   b. mcp__copilot__SubmitAiAnalystReportTool — returns report_id:
+   a. mcp__copilot__SubmitAiAnalystReportTool — returns report_id:
         job_id="{job_id}"
         alert_id={alert_id}
         customer_code="{customer_code}"
@@ -185,7 +183,9 @@ Steps:
         report_markdown=<full structured markdown report>
         recommended_actions=<action list>
 
-   c. mcp__copilot__SubmitAiAnalystIocsTool(report_id=<from 4b>, alert_id={alert_id}, customer_code="{customer_code}", iocs=[...])
+   b. mcp__copilot__SubmitAiAnalystIocsTool(report_id=<from 4a>, alert_id={alert_id}, customer_code="{customer_code}", iocs=[...])
+
+   c. Only after 4a succeeded: mcp__copilot__UpdateAiAnalystJobTool(job_id="{job_id}", status="completed", template_used=<template key or null>). If 4a failed, set status="failed" with error_message instead: a job marked completed without a report is never investigated again.
 
 5. Write the eval JSON to /home/agent/.talon/evals/{alert_id}-{job_id}.json as instructed in CLAUDE.md Step 6 (create the directory if needed). That directory is private to this investigation lane; never write evals under /workspace/group.
 6. Send the full investigation report via send_message."#
@@ -203,7 +203,9 @@ pub fn digest_task(group_folder: &str, tz: Tz, now: DateTime<Utc>) -> Result<Sch
         script: None,
         schedule_type: ScheduleType::Cron,
         schedule_value: DIGEST_CRON.to_string(),
-        context_mode: ContextMode::Group,
+        // A fresh session per run: the webhook lane's chat history and an
+        // earlier digest's raw SIEM data have no business in this one.
+        context_mode: ContextMode::Isolated,
         next_run: Some(next_run),
         last_run: None,
         last_result: None,
@@ -252,7 +254,10 @@ pub(crate) fn persist_investigation(
 /// Prompt of the scheduled SOC monitor (digest) task.
 pub const DIGEST_PROMPT: &str = r#"You are running as a scheduled SOC monitor. Follow these steps exactly for each alert.
 
-1. Query MySQL for OPEN alerts with no completed AI investigation:
+1. Query MySQL for OPEN alerts of the last 24 hours that have no AI
+   investigation yet. A completed job, or a pending/running one younger
+   than 2 hours (an older one is a dead run), counts as an investigation;
+   failed jobs do not:
 
    SELECT a.id, a.alert_name, a.source, a.alert_creation_time,
           a.customer_code, ast.asset_name, ast.agent_id,
@@ -260,17 +265,27 @@ pub const DIGEST_PROMPT: &str = r#"You are running as a scheduled SOC monitor. F
    FROM incident_management_alert a
    JOIN incident_management_asset ast ON ast.alert_linked = a.id
    WHERE a.status = 'OPEN'
-     AND a.alert_creation_time >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+     AND a.alert_creation_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
      AND ast.index_name != ''
      AND ast.index_id != ''
-   ORDER BY a.alert_creation_time DESC;
+     AND NOT EXISTS (
+       SELECT 1 FROM ai_analyst_job j
+       WHERE j.alert_id = a.id
+         AND (j.status = 'completed'
+              OR (j.status IN ('pending', 'running')
+                  AND j.created_at >= DATE_SUB(NOW(), INTERVAL 2 HOUR)))
+     )
+   ORDER BY a.alert_creation_time DESC
+   LIMIT 20;
 
 2. If no rows are returned, stop here. Do not send any message.
 
 3. For each alert:
 
-   a. DEDUPLICATION — call ListAiAnalystJobsByAlertTool(alert_id=<id>).
-      If a job with status "completed" already exists, skip this alert.
+   a. DEDUPLICATION — call ListAiAnalystJobsByAlertTool(alert_id=<id>)
+      right before you start (a real-time investigation may have begun
+      since the query). Skip this alert if a job is "completed", or
+      "pending"/"running" and created less than 2 hours ago.
 
    b. REGISTER JOB — call CreateAiAnalystJobTool:
         id="copilot-inv-<alert_id>-<unix_timestamp>"
@@ -313,20 +328,21 @@ pub const DIGEST_PROMPT: &str = r#"You are running as a scheduled SOC monitor. F
       - Check rule_level, rule_description, rule_mitre_tactic
 
    g. WRITE BACK TO COPILOT — call in order:
-      1. UpdateAiAnalystJobTool(job_id=<id>, status="completed",
-           template_used=<alert_type or null>)
-      2. SubmitAiAnalystReportTool(
+      1. SubmitAiAnalystReportTool(
            job_id=<id>, alert_id=<id>, customer_code=<code>,
            severity_assessment=<Critical|High|Medium|Low|Informational>,
            summary=<1-2 sentence tl;dr>,
            report_markdown=<full markdown report>,
            recommended_actions=<action list>)
          → note the returned report_id
-      3. SubmitAiAnalystIocsTool(
-           report_id=<from step 2>, alert_id=<id>, customer_code=<code>,
+      2. SubmitAiAnalystIocsTool(
+           report_id=<from step 1>, alert_id=<id>, customer_code=<code>,
            iocs=[{ ioc_value, ioc_type, vt_verdict, vt_score, details }, ...])
          ioc_type: ip|domain|hash|process|url|user|command
          vt_verdict: malicious|suspicious|clean|unknown
+      3. Only after step 1 succeeded: UpdateAiAnalystJobTool(job_id=<id>,
+           status="completed", template_used=<alert_type or null>).
+         If step 1 failed: status="failed" with error_message.
 
    h. SEND REPORT via send_message:
       🔍 **SOC Investigation** — <alert_name>
@@ -378,7 +394,17 @@ mod tests {
         assert!(!p.contains("TEMPLATE OVERRIDE"));
         assert!(p.contains("SIEM correlation).\n3b. Complete Step 5.5"));
         assert!(p.contains(r#"submit_triage_report with report_id="copilot-inv-1234-1""#));
-        assert!(p.contains("for step 4b. Talon records this structured verdict on the investigation.\n4. Write back"));
+        assert!(p.contains("for step 4a. Talon records this structured verdict on the investigation.\n4. Write back"));
+        // MemPalace lessons are recalled on the real-time path too.
+        assert!(p.contains("3. Follow Step 0.5 (MemPalace"));
+        // The job is completed only after its report exists.
+        let report = p
+            .find("a. mcp__copilot__SubmitAiAnalystReportTool")
+            .unwrap();
+        let completed = p
+            .find(r#"UpdateAiAnalystJobTool(job_id="copilot-inv-1234-1", status="completed""#)
+            .unwrap();
+        assert!(report < completed);
         // The agent registers the job itself, carrying the real trigger, before
         // marking it running (CoPilot's auto-create would record "webhook").
         let create = p
@@ -466,7 +492,7 @@ mod tests {
         assert_eq!(t.id, DIGEST_TASK_ID);
         assert_eq!(t.status, TaskStatus::Paused);
         assert_eq!(t.chat_jid, WEBHOOK_JID);
-        assert_eq!(t.context_mode, ContextMode::Group);
+        assert_eq!(t.context_mode, ContextMode::Isolated);
         assert_eq!(t.schedule_value, "*/15 * * * *");
         assert_eq!(t.next_run.as_deref(), Some("2026-10-14T12:15:00.000Z"));
         assert!(
@@ -474,6 +500,17 @@ mod tests {
                 .starts_with("You are running as a scheduled SOC monitor.")
         );
         assert!(t.prompt.contains("{{ alert }} → raw OpenSearch event JSON"));
+        // Alerts already being investigated are left out in SQL, and a late
+        // run still finds alerts older than one 15-minute window.
+        assert!(t.prompt.contains("NOT EXISTS ("));
+        assert!(t.prompt.contains("INTERVAL 24 HOUR"));
+        assert!(!t.prompt.contains("INTERVAL 15 MINUTE"));
+        let report = t.prompt.find("1. SubmitAiAnalystReportTool(").unwrap();
+        let completed = t
+            .prompt
+            .find("UpdateAiAnalystJobTool(job_id=<id>,\n           status=\"completed\"")
+            .unwrap();
+        assert!(report < completed);
         assert!(t.prompt.ends_with("error_message=<exception details>."));
     }
 }

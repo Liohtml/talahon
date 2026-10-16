@@ -200,6 +200,10 @@ struct ActiveRun {
     id: u64,
     kind: RunKind,
     idle_waiting: bool,
+    /// The `_close` sentinel was written: the container exits after its
+    /// current turn without reading further input, so nothing more may be
+    /// piped into it.
+    closing: bool,
     container: Option<Arc<dyn RunningContainer>>,
     ipc_key: Option<String>,
     started: Instant,
@@ -473,7 +477,8 @@ impl GroupQueue {
     /// Pipe a follow-up message into the lane's running container via an IPC
     /// input file. Returns `false` when there is no message container to
     /// receive it (no running job, a task container, nothing registered yet,
-    /// or the write failed) — the caller should then
+    /// a container that was asked to close, or the write failed) — the caller
+    /// should then
     /// [`enqueue_message_check`](Self::enqueue_message_check).
     pub fn send_message(&self, chat_jid: &str, text: &str) -> bool {
         let (run_id, ipc_key, was_idle) = {
@@ -481,7 +486,10 @@ impl GroupQueue {
             let Some(active) = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut()) else {
                 return false;
             };
-            if active.is_task() {
+            // A closing container takes `_close` before any input file and
+            // exits: a message piped now would sit unread in its input
+            // directory while the cursor already moved past it.
+            if active.is_task() || active.closing {
                 return false;
             }
             let Some(key) = active.ipc_key.clone() else {
@@ -511,23 +519,30 @@ impl GroupQueue {
     }
 
     /// Ask the lane's container to wind down by writing the `_close`
-    /// sentinel. Returns whether the sentinel was written.
+    /// sentinel. Returns whether the sentinel was written. From then on
+    /// [`send_message`](Self::send_message) refuses the lane, so follow-ups
+    /// wait for the next run instead of being lost.
     pub fn close_stdin(&self, chat_jid: &str) -> bool {
-        let ipc_key = {
+        let (run_id, ipc_key) = {
             let st = self.inner.lock();
-            match st
-                .lanes
-                .get(chat_jid)
-                .and_then(|l| l.active.as_ref())
-                .and_then(|a| a.ipc_key.clone())
-            {
-                Some(key) => key,
-                None => return false,
+            match st.lanes.get(chat_jid).and_then(|l| l.active.as_ref()) {
+                Some(ActiveRun {
+                    id,
+                    ipc_key: Some(key),
+                    ..
+                }) => (*id, key.clone()),
+                _ => return false,
             }
         };
         match ipc_input::write_close_sentinel(&self.inner.config.data_dir, &ipc_key) {
             Ok(_) => {
                 debug!(jid = chat_jid, "close sentinel written");
+                let mut st = self.inner.lock();
+                if let Some(active) = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut()) {
+                    if active.id == run_id {
+                        active.closing = true;
+                    }
+                }
                 true
             }
             Err(e) => {
@@ -775,6 +790,7 @@ impl Inner {
             id: self.next_run_id.fetch_add(1, Ordering::Relaxed),
             kind: kind.clone(),
             idle_waiting: false,
+            closing: false,
             container: None,
             ipc_key: None,
             started: Instant::now(),

@@ -119,6 +119,9 @@ pub(crate) struct State {
     pub(crate) last_timestamp: String,
     /// Per-lane cursor: newest message handed to the agent.
     pub(crate) last_agent_timestamp: BTreeMap<String, String>,
+    /// Session key -> number of times its session was cleared. A run keeps
+    /// the session it ends with only if no reset happened meanwhile.
+    pub(crate) session_epochs: HashMap<String, u64>,
     /// Lanes with a running message container: when its LLM token expires.
     pub(crate) token_deadlines: HashMap<String, Instant>,
     /// Lanes with a running message container: its LLM token and TTL, so a
@@ -343,6 +346,7 @@ impl Orchestrator {
     }
 
     /// Record a lane's session. Ephemeral lanes keep nothing.
+    #[cfg(test)]
     pub(crate) fn persist_session(
         &self,
         group: &RegisteredGroup,
@@ -350,13 +354,49 @@ impl Orchestrator {
         fingerprint: &str,
         usage: Option<&SessionUsage>,
     ) {
+        self.store_session(group, session_id, fingerprint, usage, None);
+    }
+
+    /// How often the session under `key` has been cleared so far.
+    pub(crate) fn session_epoch(&self, key: &str) -> u64 {
+        self.lock().session_epochs.get(key).copied().unwrap_or(0)
+    }
+
+    /// [`Self::persist_session`] for a run that started at session `epoch`:
+    /// when the lane's session was cleared during the run (`/session/reset`,
+    /// `/reset`), the run's session is not kept, so the reset sticks.
+    pub(crate) fn persist_run_session(
+        &self,
+        group: &RegisteredGroup,
+        session_id: &str,
+        fingerprint: &str,
+        usage: Option<&SessionUsage>,
+        epoch: u64,
+    ) {
+        self.store_session(group, session_id, fingerprint, usage, Some(epoch));
+    }
+
+    fn store_session(
+        &self,
+        group: &RegisteredGroup,
+        session_id: &str,
+        fingerprint: &str,
+        usage: Option<&SessionUsage>,
+        epoch: Option<u64>,
+    ) {
         if !group.should_persist_session() || session_id.is_empty() {
             return;
         }
         let key = group.session_key().to_string();
-        self.lock()
-            .sessions
-            .insert(key.clone(), session_id.to_string());
+        {
+            let mut st = self.lock();
+            let current = st.session_epochs.get(&key).copied().unwrap_or(0);
+            if epoch.is_some_and(|e| e != current) {
+                tracing::info!(group = %group.name, "Session was cleared during the run; not keeping the run's session");
+                return;
+            }
+            st.sessions.insert(key.clone(), session_id.to_string());
+        }
         if let Err(e) = self.db.set_session(&key, session_id, Some(fingerprint)) {
             tracing::error!(group = %group.name, error = %e, "failed to persist session");
             return;
@@ -373,7 +413,11 @@ impl Orchestrator {
     /// Drop a lane's session in memory *and* in the database.
     pub(crate) fn clear_session_for(&self, group: &RegisteredGroup) {
         let key = group.session_key().to_string();
-        let had = self.lock().sessions.remove(&key).is_some();
+        let had = {
+            let mut st = self.lock();
+            *st.session_epochs.entry(key.clone()).or_default() += 1;
+            st.sessions.remove(&key).is_some()
+        };
         if let Err(e) = self.db.delete_session(&key) {
             tracing::error!(group = %group.name, error = %e, "failed to delete session");
         }
@@ -625,6 +669,7 @@ fn load_state(db: &Db) -> Result<State> {
         sessions,
         last_timestamp,
         last_agent_timestamp,
+        session_epochs: HashMap::new(),
         token_deadlines: HashMap::new(),
         run_tokens: HashMap::new(),
     })

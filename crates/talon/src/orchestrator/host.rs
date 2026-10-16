@@ -99,6 +99,9 @@ impl ChannelHost for Orchestrator {
             return false;
         };
         self.clear_session_for(&group);
+        // A running container still holds the old conversation: let it
+        // finish its turn and exit, so the next message starts fresh.
+        self.queue.close_stdin(jid);
         tracing::info!(jid, group = %group.name, "Session cleared");
         true
     }

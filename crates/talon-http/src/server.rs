@@ -1219,9 +1219,30 @@ async fn templates(State(st): State<HttpState>) -> ApiResult {
     Ok(Json(json!({ "templates": templates })).into_response())
 }
 
+/// The failure a palace answer reports, if any. `palace_call.py` exits 0
+/// and prints `{"error": ...}` (or a tool's `{"success": false, ...}`) when
+/// the operation failed.
+fn palace_reported_error(v: &Value) -> Option<String> {
+    let obj = v.as_object()?;
+    if let Some(e) = obj.get("error").filter(|e| !e.is_null()) {
+        return Some(e.as_str().map_or_else(|| e.to_string(), str::to_string));
+    }
+    (obj.get("success") == Some(&Value::Bool(false))).then(|| "success: false".to_string())
+}
+
 fn palace_response(s: &Shared, op: &str, result: Result<Value, PalaceError>) -> ApiResult {
     match result {
         Ok(v) => {
+            if let Some(reason) = palace_reported_error(&v) {
+                // A 200 would make CoPilot's drainer mark a lesson as
+                // ingested that the palace never stored.
+                Metrics::inc(&s.metrics.palace_failed);
+                tracing::error!(op, error = %reason, "palace reported a failure");
+                return Err(ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    format!("palace {op} failed"),
+                ));
+            }
             Metrics::inc(&s.metrics.palace_ok);
             Ok(Json(v).into_response())
         }

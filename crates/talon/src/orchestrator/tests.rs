@@ -1809,6 +1809,58 @@ async fn queue_status_and_clear_session_via_channel_host() {
 }
 
 #[tokio::test]
+async fn session_reset_during_a_run_is_not_undone_by_the_run() {
+    // `/session/reset` while the lane's container is answering: the run
+    // ends with its (old) session id, which must not be stored again.
+    let h = harness();
+    let g = group("Main", "main", true);
+    h.orch
+        .register_group_inner(MAIN, g.clone(), true, false)
+        .unwrap();
+    let gate = Arc::new(Notify::new());
+    h.launcher.push(Script {
+        outputs: vec![ContainerOutput::success(
+            Some("answer".into()),
+            Some("old-conversation".into()),
+        )],
+        gate: Some(gate.clone()),
+        ..Script::default()
+    });
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "1", "me", "hello", &ts(1)));
+    let run = tokio::spawn({
+        let orch = h.orch.clone();
+        async move { orch.process_group_messages(MAIN).await }
+    });
+    h.launcher.wait_started(1).await;
+    assert!(ChannelHost::clear_session(h.orch.as_ref(), MAIN).await);
+    gate.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(h.orch.session_for_key("main"), None);
+
+    // Without a reset the run's session is kept as before.
+    h.launcher.push(Script {
+        outputs: vec![ContainerOutput::success(
+            Some("again".into()),
+            Some("new-conversation".into()),
+        )],
+        ..Script::default()
+    });
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "2", "me", "next", &ts(2)));
+    assert!(h.orch.process_group_messages(MAIN).await);
+    assert_eq!(
+        h.orch.session_for_key("main").as_deref(),
+        Some("new-conversation")
+    );
+}
+
+#[tokio::test]
 async fn injection_attempts_in_untrusted_lanes_are_audited_not_dropped() {
     let h = harness();
     let mut g = group("Team", "team", false);

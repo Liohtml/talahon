@@ -69,9 +69,9 @@ Before pulling the alert, check if this alert has already been investigated:
 ```
 mcp__copilot__ListAiAnalystJobsByAlertTool(alert_id=<id>)
 ```
-If a job with status `completed` already exists, skip this alert entirely — it has already been processed.
+Skip this alert entirely if a job is `completed` (already processed) or `pending`/`running` and created less than 2 hours ago (another investigation is under way).
 
-If no job exists (or only failed ones), register a new job immediately:
+Otherwise (no job, only failed ones, or a pending/running job older than 2 hours, which is a dead run), register a new job immediately:
 ```
 mcp__copilot__CreateAiAnalystJobTool(
   id=<generate a unique id, e.g. "copilot-inv-<alert_id>-<timestamp>">,
@@ -118,7 +118,7 @@ SELECT
 FROM incident_management_alert a
 JOIN incident_management_asset ast ON ast.alert_linked = a.id
 WHERE a.customer_code = '<customer_code>'
-  AND a.status = 'New'
+  AND a.status = 'OPEN'
   AND ast.index_name != ''
   AND ast.index_id != ''
 ORDER BY a.alert_creation_time DESC
@@ -281,12 +281,7 @@ This preserves `\n` (0x0a), `\r` (0x0d), and `\t` (0x09) while stripping everyth
 
 Call these tools in order:
 
-1. **Update job to `completed`** (or `failed` on error):
-   ```
-   mcp__copilot__UpdateAiAnalystJobTool(job_id=<id>, status="completed", template_used=<template key or null>)
-   ```
-
-2. **Submit the report** — returns a `report_id` you need for the IOC step:
+1. **Submit the report** — returns a `report_id` you need for the IOC step:
    ```
    mcp__copilot__SubmitAiAnalystReportTool(
      job_id=<id>, alert_id=<id>, customer_code=<code>,
@@ -297,10 +292,10 @@ Call these tools in order:
    )
    ```
 
-3. **Submit IOCs** — one call with all IOCs as a list:
+2. **Submit IOCs** — one call with all IOCs as a list:
    ```
    mcp__copilot__SubmitAiAnalystIocsTool(
-     report_id=<id from step 2>, alert_id=<id>, customer_code=<code>,
+     report_id=<id from step 1>, alert_id=<id>, customer_code=<code>,
      iocs=[
        { ioc_value: "1.2.3.4", ioc_type: "ip", vt_verdict: "malicious", vt_score: "45/94", details: "..." },
        { ioc_value: "evil.exe", ioc_type: "process", vt_verdict: "suspicious", ... },
@@ -311,6 +306,11 @@ Call these tools in order:
 
    `ioc_type` must be one of: `ip`, `domain`, `hash`, `process`, `url`, `user`, `command`
    `vt_verdict` must be one of: `malicious`, `suspicious`, `clean`, `unknown`
+
+3. **Update the job to `completed`** — only after the report was stored. If step 1 failed, set `failed` with an `error_message` instead: a job marked completed without a report is never investigated again.
+   ```
+   mcp__copilot__UpdateAiAnalystJobTool(job_id=<id>, status="completed", template_used=<template key or null>)
+   ```
 
 4. **Write findings to MemPalace** — builds institutional knowledge for future investigations:
 
@@ -499,59 +499,9 @@ investigation if dispatch errors. Full instructions: `notifications.md`
 - **Show your reasoning** — explain *why* something is suspicious, not just *that* it is
 - **Be thorough on high/critical findings** — brevity is for clean results; serious findings deserve depth
 
-## Startup: Register Recurring Tasks
+## Alert Digest
 
-**On your first message in a new session**, check whether the alert digest task is already scheduled by calling `list_tasks`. If it is not present, register it immediately using `schedule_task` with the exact configuration below — do not ask for confirmation, just register it.
-
-**Alert Digest Task — register once, runs every 15 minutes:**
-
-```
-schedule_type: "cron"
-schedule_value: "*/15 * * * *"
-context_mode: "group"
-prompt: |
-  You are running as a scheduled SOC monitor. Follow these steps exactly:
-
-  1. Query the CoPilot MySQL database for all OPEN alerts created in the
-     last 15 minutes across all customers:
-
-     SELECT a.id, a.alert_name, a.source, a.alert_creation_time,
-            a.customer_code, ast.asset_name, ast.agent_id,
-            ast.index_name, ast.index_id
-     FROM incident_management_alert a
-     JOIN incident_management_asset ast ON ast.alert_linked = a.id
-     WHERE a.status = 'OPEN'
-       AND a.alert_creation_time >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
-       AND ast.index_name != ''
-       AND ast.index_id != ''
-     ORDER BY a.alert_creation_time DESC;
-
-  2. If no rows are returned, stop here. Do not send any message.
-
-  3. For each alert returned:
-     a. Fetch the raw event from OpenSearch using index_name and index_id.
-     b. Extract IOCs from the event (IPs, domains, hashes, process names).
-     c. For any external IP or domain found, run a quick VirusTotal check
-        via mcp__cve__virustotal_lookup (or web_fetch fallback if the
-        MCP isn't available).
-     d. Note the rule_level, rule_description, and rule_mitre_tactic if present.
-
-  4. Send a single digest message (via send_message) formatted as:
-
-     🚨 **SOC Alert Digest** — <timestamp>
-     <N> new OPEN alert(s) across <M> customer(s)
-
-     For each alert:
-     ---
-     **[Customer: <customer_code>]** <alert_name>
-     - Asset: <asset_name> (Agent: <agent_id>)
-     - Source: <source> | Rule level: <level> | MITRE: <tactic>
-     - Created: <alert_creation_time>
-     - IOCs: <list any extracted IOCs>
-     - Threat intel: <VT verdict or "no external IOCs found">
-
-     End with a 1-sentence overall assessment of urgency.
-```
+Talon seeds the 15-minute alert digest itself (task `copilot-alert-digest-15m` on the CoPilot webhook lane), paused until an operator resumes it. Never create another digest task: every lane that did so would investigate the same alerts again.
 
 ## Scheduled Monitoring Tasks
 
