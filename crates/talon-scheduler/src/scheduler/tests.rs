@@ -613,6 +613,82 @@ async fn recurring_failure_uses_the_earlier_of_retry_and_schedule() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_retry_does_not_shift_the_interval_grid() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let r = runs.clone();
+    let h = harness(move |_| {
+        let first = r.fetch_add(1, Ordering::SeqCst) == 0;
+        async move {
+            if first {
+                TaskExecution::failure("boom")
+            } else {
+                TaskExecution::success(None)
+            }
+        }
+    });
+    h.store.insert(new_task(
+        "hourly",
+        ScheduleType::Interval,
+        "3600000",
+        &at(0),
+    ));
+
+    let outcome = h.scheduler.run_task(MAIN_JID, "hourly").await;
+    assert_eq!(
+        finished(&outcome).next_run.as_deref(),
+        Some(at(60).as_str())
+    );
+    sleep(Duration::from_secs(60)).await;
+    let outcome = h.scheduler.run_task(MAIN_JID, "hourly").await;
+    // Back on the grid of the original schedule, not retry time + 1 h.
+    assert_eq!(
+        finished(&outcome).next_run.as_deref(),
+        Some(at(3600).as_str())
+    );
+
+    // A deferral does not shift it either.
+    h.groups.lock().unwrap().clear();
+    sleep(Duration::from_secs(3540)).await;
+    let outcome = h.scheduler.run_task(MAIN_JID, "hourly").await;
+    assert!(
+        matches!(outcome, TaskRunOutcome::Deferred { ref next_run, .. } if *next_run == at(3660))
+    );
+    *h.groups.lock().unwrap() = default_groups();
+    sleep(Duration::from_secs(60)).await;
+    let outcome = h.scheduler.run_task(MAIN_JID, "hourly").await;
+    assert_eq!(
+        finished(&outcome).next_run.as_deref(),
+        Some(at(7200).as_str())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lane_deferrals_do_not_spend_the_retry_budget() {
+    let mut config = test_config();
+    config.retry.max_retries = 1;
+    let h = harness_with(config, |_| async { TaskExecution::failure("boom") });
+    h.groups.lock().unwrap().clear();
+    h.store.insert(new_task(
+        "once",
+        ScheduleType::Once,
+        "2026-06-01T08:00:00",
+        &at(0),
+    ));
+    for _ in 0..3 {
+        let outcome = h.scheduler.run_task(MAIN_JID, "once").await;
+        assert!(matches!(outcome, TaskRunOutcome::Deferred { .. }));
+        let wait = parse_iso(&h.task("once").next_run.unwrap()).unwrap() - h.now();
+        sleep(wait.to_std().unwrap()).await;
+    }
+
+    *h.groups.lock().unwrap() = default_groups();
+    let outcome = h.scheduler.run_task(MAIN_JID, "once").await;
+    assert_eq!(finished(&outcome).retry_attempt, Some(1));
+    assert_eq!(h.calls()[0].ctx.attempt, 0);
+    assert_eq!(h.task("once").status, TaskStatus::Active);
+}
+
+#[tokio::test(start_paused = true)]
 async fn missing_group_defers_with_backoff_instead_of_spinning() {
     let h = ok_harness();
     h.groups.lock().unwrap().clear();

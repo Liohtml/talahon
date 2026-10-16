@@ -282,6 +282,35 @@ async fn drains_tasks_before_messages_for_same_group() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_task_backlog_does_not_starve_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let gates = Gates::default();
+    let events = Events::default();
+    let q = gated_queue(dir.path(), 2, &gates, &events);
+
+    assert_eq!(q.enqueue_task(G1, "t1"), EnqueueOutcome::Started);
+    settle().await;
+    q.enqueue_task(G1, "t2");
+    q.enqueue_task(G1, "t3");
+    assert_eq!(q.enqueue_message_check(G1), EnqueueOutcome::Queued);
+
+    for i in 0..4 {
+        gates.release(i);
+        settle().await;
+    }
+    // The chat goes right after the running task, not after the backlog.
+    assert_eq!(
+        events.all(),
+        vec![
+            format!("task:{G1}:t1"),
+            format!("msg:{G1}"),
+            format!("task:{G1}:t2"),
+            format!("task:{G1}:t3"),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn retries_with_exponential_backoff_on_failure() {
     let dir = tempfile::tempdir().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
