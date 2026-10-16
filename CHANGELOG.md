@@ -2,6 +2,10 @@
 
 All notable changes to Talon are documented in this file.
 
+## [2.0.5] - 2026-10-16
+
+- fix: remaining minor bugs carried over from the old version (#12)
+
 ## [2.0.4] - 2026-10-16
 
 - fix: message flow, Telegram and scheduling bugs carried over from the old version (#11)
