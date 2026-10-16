@@ -24,8 +24,8 @@ use talon_core::types::RegisteredGroup;
 use super::StepArgs;
 use crate::context::{SETUP_LOG, SetupContext};
 use crate::fsutil::{
-    exists_nofollow, file_mode, is_real_dir, is_regular_file_nofollow, upsert_env_line,
-    write_atomic,
+    exists_nofollow, file_mode, is_real_dir, is_regular_file_nofollow, read_env_value,
+    upsert_env_line, write_atomic,
 };
 use crate::status::{StatusBlock, StepOutcome};
 
@@ -54,7 +54,8 @@ pub struct RegisterRequest {
     pub requires_trigger: bool,
     /// Register as the main control group.
     pub is_main: bool,
-    /// Assistant name to apply to `CLAUDE.md` files and `.env`.
+    /// Assistant name to apply to `CLAUDE.md` files and `.env`; empty
+    /// keeps the current one.
     pub assistant_name: String,
 }
 
@@ -84,10 +85,11 @@ impl RegisterRequest {
             Some(c) if !c.trim().is_empty() => c.trim().to_lowercase(),
             _ => infer_channel(&jid).to_string(),
         };
-        let assistant_name = match args.value("--assistant-name") {
-            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-            _ => DEFAULT_ASSISTANT_NAME.to_string(),
-        };
+        let assistant_name = args
+            .value("--assistant-name")
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
         Self {
             name: get("--name"),
             trigger: get("--trigger"),
@@ -177,11 +179,11 @@ pub fn prepare_group_folder(
     Ok(true)
 }
 
-/// Replace the default assistant name in `content`: the first `# Talon`
-/// heading line and every `You are Talon`.
-pub fn rename_assistant(content: &str, new_name: &str) -> String {
-    // Static patterns: compile cannot fail.
-    let heading = Regex::new(&format!(r"(?m)^# {DEFAULT_ASSISTANT_NAME}$"));
+/// Replace assistant name `old_name` in `content` with `new_name`: the first
+/// `# <old>` heading line and every `You are <old>`.
+pub fn rename_assistant(content: &str, old_name: &str, new_name: &str) -> String {
+    // The name is escaped, so the pattern always compiles.
+    let heading = Regex::new(&format!(r"(?m)^# {}$", regex::escape(old_name)));
     let content = match heading {
         Ok(re) => re
             .replacen(content, 1, NoExpand(&format!("# {new_name}")))
@@ -189,7 +191,7 @@ pub fn rename_assistant(content: &str, new_name: &str) -> String {
         Err(_) => content.to_string(),
     };
     content.replace(
-        &format!("You are {DEFAULT_ASSISTANT_NAME}"),
+        &format!("You are {old_name}"),
         &format!("You are {new_name}"),
     )
 }
@@ -199,7 +201,11 @@ pub fn rename_assistant(content: &str, new_name: &str) -> String {
 ///
 /// # Errors
 /// I/O errors reading the groups directory or writing a file.
-pub fn apply_assistant_name(groups_dir: &Path, new_name: &str) -> io::Result<Vec<PathBuf>> {
+pub fn apply_assistant_name(
+    groups_dir: &Path,
+    old_name: &str,
+    new_name: &str,
+) -> io::Result<Vec<PathBuf>> {
     let mut changed = Vec::new();
     let entries = match std::fs::read_dir(groups_dir) {
         Ok(e) => e,
@@ -217,7 +223,7 @@ pub fn apply_assistant_name(groups_dir: &Path, new_name: &str) -> io::Result<Vec
             continue;
         }
         let content = std::fs::read_to_string(&md)?;
-        let updated = rename_assistant(&content, new_name);
+        let updated = rename_assistant(&content, old_name, new_name);
         if updated != content {
             write_atomic(&md, updated.as_bytes(), file_mode(&md))?;
             tracing::info!(file = %md.display(), "Updated CLAUDE.md");
@@ -276,17 +282,28 @@ pub async fn run(args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOutc
 
     let template_copied = prepare_group_folder(&ctx.config.groups_dir, &req.folder, req.is_main)?;
 
+    // The name in use: what an earlier run wrote to `.env`, else the one
+    // the templates ship with. Without `--assistant-name` it stays.
+    let current = read_env_value(&ctx.env_path(), "ASSISTANT_NAME")
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| DEFAULT_ASSISTANT_NAME.to_string());
+    let wanted = if req.assistant_name.is_empty() {
+        current.clone()
+    } else {
+        req.assistant_name.clone()
+    };
     let mut name_updated = false;
-    if req.assistant_name != DEFAULT_ASSISTANT_NAME {
-        apply_assistant_name(&ctx.config.groups_dir, &req.assistant_name)?;
-        upsert_env_line(
-            &ctx.env_path(),
-            "ASSISTANT_NAME",
-            &format!("\"{}\"", req.assistant_name),
-        )
-        .context("writing ASSISTANT_NAME to .env")?;
+    if wanted != current {
+        apply_assistant_name(&ctx.config.groups_dir, &current, &wanted)?;
+        upsert_env_line(&ctx.env_path(), "ASSISTANT_NAME", &format!("\"{wanted}\""))
+            .context("writing ASSISTANT_NAME to .env")?;
         tracing::info!("Set ASSISTANT_NAME in .env");
         name_updated = true;
+    }
+    if wanted != DEFAULT_ASSISTANT_NAME {
+        // A folder just created from a template still has the shipped name.
+        apply_assistant_name(&ctx.config.groups_dir, DEFAULT_ASSISTANT_NAME, &wanted)?;
     }
 
     Ok(StepOutcome::ok(
@@ -298,7 +315,7 @@ pub async fn run(args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOutc
             .field("TRIGGER", &req.trigger)
             .field("REQUIRES_TRIGGER", req.requires_trigger)
             .field("IS_MAIN", req.is_main)
-            .field("ASSISTANT_NAME", &req.assistant_name)
+            .field("ASSISTANT_NAME", &wanted)
             .field("NAME_UPDATED", name_updated)
             .field("TEMPLATE_COPIED", template_copied)
             .field("UPDATED_EXISTING", preserved)
@@ -340,7 +357,7 @@ mod tests {
         assert_eq!(r.channel, "telegram");
         assert!(r.requires_trigger);
         assert!(!r.is_main);
-        assert_eq!(r.assistant_name, "Talon");
+        assert_eq!(r.assistant_name, "", "no name: keep the current one");
         let r = RegisterRequest::from_args(&args(&[
             "--no-trigger-required",
             "--is-main",
@@ -432,19 +449,28 @@ mod tests {
     #[test]
     fn rename_replaces_heading_and_intro() {
         assert_eq!(
-            rename_assistant("# Talon\n\nYou are Talon, a personal assistant.", "Nova"),
+            rename_assistant(
+                "# Talon\n\nYou are Talon, a personal assistant.",
+                "Talon",
+                "Nova"
+            ),
             "# Nova\n\nYou are Nova, a personal assistant."
         );
     }
 
     #[test]
     fn rename_handles_regex_special_names() {
-        let out = rename_assistant("# Talon\n\nYou are Talon.", "C.L.A.U.D.E");
+        let out = rename_assistant("# Talon\n\nYou are Talon.", "Talon", "C.L.A.U.D.E");
         assert!(out.contains("# C.L.A.U.D.E"));
         assert!(out.contains("You are C.L.A.U.D.E."));
         // `$` in a name is not a capture reference (rejected by validation
         // anyway, but the renamer must stay literal).
-        assert_eq!(rename_assistant("# Talon", "$1"), "# $1");
+        assert_eq!(rename_assistant("# Talon", "Talon", "$1"), "# $1");
+        // An old name with regex metacharacters is matched literally.
+        assert_eq!(
+            rename_assistant("# C.L.A.U.D.E\n# CxLxAxUxDxE", "C.L.A.U.D.E", "Nova"),
+            "# Nova\n# CxLxAxUxDxE"
+        );
     }
 
     struct Fixture {
@@ -473,7 +499,7 @@ mod tests {
     fn simulate(f: &Fixture, folder: &str, is_main: bool, name: &str) {
         prepare_group_folder(&f.groups, folder, is_main).unwrap();
         if name != DEFAULT_ASSISTANT_NAME {
-            apply_assistant_name(&f.groups, name).unwrap();
+            apply_assistant_name(&f.groups, DEFAULT_ASSISTANT_NAME, name).unwrap();
         }
     }
 
@@ -676,15 +702,40 @@ mod tests {
         assert!(!g.is_main);
         drop(db);
 
-        // Re-registering keeps added_at and updates fields.
+        // Re-registering keeps added_at and updates fields — and, without
+        // --assistant-name, the name.
         let out = run(&args(&["--no-trigger-required", "--is-main"]), &ctx)
             .await
             .unwrap();
-        assert_eq!(out.block.unwrap().get("UPDATED_EXISTING"), Some("true"));
+        let b = out.block.unwrap();
+        assert_eq!(b.get("UPDATED_EXISTING"), Some("true"));
+        assert_eq!(b.get("ASSISTANT_NAME"), Some("Nova"));
+        assert_eq!(b.get("NAME_UPDATED"), Some("false"));
+        let md = root.join("groups/soc-team/CLAUDE.md");
+        assert!(
+            std::fs::read_to_string(&md)
+                .unwrap()
+                .contains("You are Nova")
+        );
         let db = Db::open(&ctx.db_path()).unwrap();
         let g2 = db.get_registered_group("tg:-100123").unwrap().unwrap();
         assert_eq!(g2.added_at, g.added_at);
         assert!(g2.is_main);
         assert_eq!(g2.requires_trigger, Some(false));
+        drop(db);
+
+        // A second rename replaces the current name, not only the shipped one.
+        let out = run(&args(&["--assistant-name", "Atlas"]), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(out.block.unwrap().get("NAME_UPDATED"), Some("true"));
+        let content = std::fs::read_to_string(&md).unwrap();
+        assert!(content.contains("You are Atlas"), "{content}");
+        assert!(!content.contains("Nova"), "{content}");
+        assert!(
+            std::fs::read_to_string(root.join(".env"))
+                .unwrap()
+                .contains("ASSISTANT_NAME=\"Atlas\"")
+        );
     }
 }
