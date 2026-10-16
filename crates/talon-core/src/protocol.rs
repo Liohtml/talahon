@@ -163,6 +163,12 @@ pub struct ContainerOutput {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsage>,
+    /// Success frames of agents that report it: the names of the IPC input
+    /// files (`input/*.json`) whose follow-up messages went into the turn
+    /// this frame ends. The host uses them to tell answered follow-ups from
+    /// ones that still need a run. `None` from agents that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_inputs: Option<Vec<String>>,
 }
 
 impl ContainerOutput {
@@ -173,6 +179,7 @@ impl ContainerOutput {
             new_session_id,
             error: None,
             usage: None,
+            consumed_inputs: None,
         }
     }
 
@@ -183,6 +190,7 @@ impl ContainerOutput {
             new_session_id: None,
             error: Some(message.into()),
             usage: None,
+            consumed_inputs: None,
         }
     }
 

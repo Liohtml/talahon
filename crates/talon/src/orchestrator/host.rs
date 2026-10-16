@@ -200,6 +200,10 @@ impl LaneProcessor for Orchestrator {
             None => tracing::error!(chat_jid, task_id, "task scheduler not installed"),
         }
     }
+
+    async fn retries_exhausted(&self, chat_jid: &str) {
+        self.notify_retries_exhausted(chat_jid).await;
+    }
 }
 
 impl GroupDirectory for Orchestrator {

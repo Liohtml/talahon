@@ -527,6 +527,10 @@ async fn session_emits_frames_handles_follow_ups_and_close() {
     assert_eq!(usage.output_tokens, Some(20));
     // The follow-up was absorbed by the running turn.
     assert!(agent.history().iter().any(|m| m.text() == "follow-up"));
+    assert_eq!(
+        f.consumed_inputs.as_deref(),
+        Some(&["1.json".to_string()][..])
+    );
 }
 
 #[tokio::test]
@@ -550,6 +554,9 @@ async fn idle_follow_up_starts_a_new_turn_then_close_ends() {
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].result.as_deref(), Some("first"));
     assert_eq!(frames[1].result.as_deref(), Some("second"));
+    // The follow-up started (and was answered by) the second turn.
+    assert_eq!(frames[0].consumed_inputs, Some(vec![]));
+    assert_eq!(frames[1].consumed_inputs, Some(vec!["1.json".to_string()]));
     // Ephemeral sessions report no id and write nothing.
     assert!(frames.iter().all(|f| f.new_session_id.is_none()));
     assert!(!h.sessions().exists());
@@ -570,8 +577,8 @@ async fn close_during_turn_finishes_the_turn_and_ends() {
         text_resp("done"),
     ]);
     let mut agent = h.agent();
+    h.write_ipc("1.json", r#"{"type":"message","text":"sent before close"}"#);
     h.write_ipc("_close", "");
-    h.write_ipc("1.json", r#"{"type":"message","text":"late"}"#);
     tokio::time::timeout(Duration::from_secs(5), agent.run_session("work".into()))
         .await
         .unwrap()
@@ -579,8 +586,20 @@ async fn close_during_turn_finishes_the_turn_and_ends() {
     let frames = h.sink.frames();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].result.as_deref(), Some("done"));
-    // Messages after _close are left for the next container.
-    assert!(h.inbox_dir().join("1.json").exists());
+    // A message written before _close is answered by the turn, and the
+    // host is told so.
+    assert!(
+        agent
+            .history()
+            .iter()
+            .any(|m| m.text() == "sent before close")
+    );
+    assert_eq!(
+        frames[0].consumed_inputs.as_deref(),
+        Some(&["1.json".to_string()][..])
+    );
+    assert!(!h.inbox_dir().join("1.json").exists());
+    assert!(!h.inbox_dir().join("_close").exists());
 }
 
 #[tokio::test]

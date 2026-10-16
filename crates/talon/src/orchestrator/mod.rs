@@ -16,6 +16,7 @@
 
 pub mod commands;
 pub mod host;
+mod ledger;
 pub mod messages;
 pub mod run;
 pub mod tasks;
@@ -127,6 +128,13 @@ pub(crate) struct State {
     /// Lanes with a running message container: its LLM token and TTL, so a
     /// piped follow-up can extend the token instead of recycling the run.
     pub(crate) run_tokens: HashMap<String, (String, Duration)>,
+    /// Lanes with a message run in flight: what it was handed and what it
+    /// answered. Lock order: a ledger before this state, never the reverse.
+    pub(crate) ledgers: HashMap<String, Arc<Mutex<ledger::LaneLedger>>>,
+    /// Lanes with a message run in flight: the cursor through which their
+    /// messages are answered. Persisted instead of the lane cursor, so a
+    /// host crash runs the unanswered ones again.
+    pub(crate) committed: HashMap<String, String>,
 }
 
 /// The host orchestrator. Share it as `Arc<Orchestrator>`.
@@ -282,14 +290,16 @@ impl Orchestrator {
 
     // ---- persistence -----------------------------------------------------
 
-    /// Persist both cursors. Failures are logged.
+    /// Persist both cursors. Failures are logged. A lane with a run in
+    /// flight is persisted at its committed cursor (see [`ledger`]).
     pub(crate) fn save_state(&self) {
         let (last, agent) = {
             let st = self.lock();
-            (
-                st.last_timestamp.clone(),
-                serde_json::to_string(&st.last_agent_timestamp),
-            )
+            let mut cursors = st.last_agent_timestamp.clone();
+            for (jid, committed) in &st.committed {
+                cursors.insert(jid.clone(), committed.clone());
+            }
+            (st.last_timestamp.clone(), serde_json::to_string(&cursors))
         };
         if let Err(e) = self.db.set_router_state(LAST_TIMESTAMP_KEY, &last) {
             tracing::error!(error = %e, "failed to save last_timestamp");
@@ -667,8 +677,6 @@ fn load_state(db: &Db) -> Result<State> {
         sessions,
         last_timestamp,
         last_agent_timestamp,
-        session_epochs: HashMap::new(),
-        token_deadlines: HashMap::new(),
-        run_tokens: HashMap::new(),
+        ..State::default()
     })
 }

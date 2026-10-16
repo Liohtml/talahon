@@ -4,7 +4,16 @@
 //! Files are consumed in name order (names are `<millis>-<rand>.json`, so
 //! lexical order is arrival order) and deleted after reading, valid or not.
 //! Only regular files up to [`MAX_INPUT_FILE_BYTES`] are read; temp files
-//! (`*.json.tmp`) are left for the writer to rename.
+//! (`*.json.tmp`) are left for the writer to rename. The names of the files
+//! a turn consumed go back to the host with the turn's output frame, which
+//! is how the host knows which follow-ups were answered.
+//!
+//! Messages the host wrote before `_close` are still read: the host stops
+//! writing once it has written `_close`, so whatever is in the directory
+//! when `_close` is seen was sent before it and is answered before the
+//! session ends. The host clears the directory (stale messages and
+//! `_close`) before it starts a container, so a `_close` present at start
+//! was written for this container and is honoured.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,11 +33,25 @@ pub struct IpcInbox {
     dir: PathBuf,
 }
 
+/// One follow-up message read from the inbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputMessage {
+    /// The input file's name (reported back to the host).
+    pub file: String,
+    /// The message text.
+    pub text: String,
+}
+
 /// What [`IpcInbox::wait_next`] returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inbound {
-    /// One or more follow-up messages, joined with `\n`.
-    Messages(String),
+    /// One or more follow-up messages.
+    Messages {
+        /// Their texts, joined with `\n`.
+        text: String,
+        /// The input files they came from.
+        files: Vec<String>,
+    },
     /// `_close` was found (and removed).
     Close,
     /// The cancellation token fired.
@@ -46,13 +69,18 @@ impl IpcInbox {
         &self.dir
     }
 
-    /// Create the directory if needed and remove a stale `_close` left by
-    /// a previous container run.
+    /// Create the directory if needed. A `_close` already there is kept:
+    /// the host clears stale ones before it starts a container, so this one
+    /// arrived while the container was starting.
     pub fn prepare(&self) {
         if let Err(e) = fs::create_dir_all(&self.dir) {
             tracing::warn!(error = %e, "cannot create IPC input directory");
         }
-        let _ = fs::remove_file(self.dir.join(IPC_CLOSE_SENTINEL));
+    }
+
+    /// Whether `_close` exists (it is left in place).
+    pub fn close_pending(&self) -> bool {
+        fs::symlink_metadata(self.dir.join(IPC_CLOSE_SENTINEL)).is_ok()
     }
 
     /// If `_close` exists, remove it and return true.
@@ -67,7 +95,7 @@ impl IpcInbox {
     }
 
     /// Consume every pending follow-up message (in arrival order).
-    pub fn drain(&self) -> Vec<String> {
+    pub fn drain(&self) -> Vec<InputMessage> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(e) => e,
             Err(e) => {
@@ -88,7 +116,10 @@ impl IpcInbox {
         for name in names {
             let path = self.dir.join(&name);
             match read_input_file(&path) {
-                Ok(Some(text)) => out.push(text),
+                Ok(Some(text)) => out.push(InputMessage {
+                    file: name.clone(),
+                    text,
+                }),
                 Ok(None) => {}
                 Err(reason) => tracing::warn!(file = %name, %reason, "discarding IPC input file"),
             }
@@ -102,21 +133,36 @@ impl IpcInbox {
     }
 
     /// Poll every `interval` until messages arrive, `_close` appears or
-    /// `cancel` fires. `_close` wins over messages found in the same poll.
+    /// `cancel` fires. Messages sent before `_close` come first; `_close`
+    /// then ends the session on the next call.
     pub async fn wait_next(&self, interval: Duration, cancel: &CancellationToken) -> Inbound {
         loop {
-            if self.take_close() {
-                return Inbound::Close;
-            }
+            // `_close` first: every message written before it is already in
+            // place when it is seen, so the drain below cannot miss one.
+            let closing = self.close_pending();
             let messages = self.drain();
             if !messages.is_empty() {
-                return Inbound::Messages(messages.join("\n"));
+                return joined(messages);
+            }
+            if closing {
+                self.take_close();
+                return Inbound::Close;
             }
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
                 _ = cancel.cancelled() => return Inbound::Cancelled,
             }
         }
+    }
+}
+
+/// Several messages as one [`Inbound::Messages`].
+pub fn joined(messages: Vec<InputMessage>) -> Inbound {
+    let (texts, files): (Vec<String>, Vec<String>) =
+        messages.into_iter().map(|m| (m.text, m.file)).unzip();
+    Inbound::Messages {
+        text: texts.join("\n"),
+        files,
     }
 }
 
@@ -166,7 +212,11 @@ mod tests {
             r#"{"type":"message","text":"later"}"#,
         );
         std::os::unix::fs::symlink("/etc/passwd", dir.path().join("6-f.json")).unwrap();
-        assert_eq!(inbox.drain(), vec!["first", "second"]);
+        let drained = inbox.drain();
+        let texts: Vec<&str> = drained.iter().map(|m| m.text.as_str()).collect();
+        let files: Vec<&str> = drained.iter().map(|m| m.file.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second"]);
+        assert_eq!(files, vec!["1-a.json", "2-b.json"]);
         let left: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -189,17 +239,17 @@ mod tests {
     }
 
     #[test]
-    fn prepare_clears_stale_close() {
+    fn prepare_keeps_a_close_sent_during_startup() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("input");
         let inbox = IpcInbox::new(&input);
         inbox.prepare();
         write(&input, IPC_CLOSE_SENTINEL, "");
         inbox.prepare();
-        assert!(!inbox.take_close());
-        write(&input, IPC_CLOSE_SENTINEL, "");
+        assert!(inbox.close_pending());
         assert!(inbox.take_close());
         assert!(!inbox.take_close());
+        assert!(!inbox.close_pending());
         assert_eq!(inbox.dir(), input.as_path());
     }
 
@@ -216,14 +266,29 @@ mod tests {
         });
         let got = inbox.wait_next(Duration::from_millis(10), &cancel).await;
         writer.await.unwrap();
-        assert_eq!(got, Inbound::Messages("a\nb".into()));
+        assert_eq!(
+            got,
+            Inbound::Messages {
+                text: "a\nb".into(),
+                files: vec!["1.json".into(), "2.json".into()],
+            }
+        );
 
-        write(dir.path(), IPC_CLOSE_SENTINEL, "");
+        // A message sent before `_close` is answered first.
         write(dir.path(), "3.json", r#"{"type":"message","text":"c"}"#);
+        write(dir.path(), IPC_CLOSE_SENTINEL, "");
+        assert_eq!(
+            inbox.wait_next(Duration::from_millis(10), &cancel).await,
+            Inbound::Messages {
+                text: "c".into(),
+                files: vec!["3.json".into()],
+            }
+        );
         assert_eq!(
             inbox.wait_next(Duration::from_millis(10), &cancel).await,
             Inbound::Close
         );
+        assert!(!inbox.close_pending());
 
         cancel.cancel();
         let empty = tempfile::tempdir().unwrap();

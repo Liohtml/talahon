@@ -14,6 +14,12 @@
 //!    `set_typing(jid, false)` when the container exits);
 //! 5. removed whenever the client disconnects.
 //!
+//! A writer whose container exited before its turn produced any text was
+//! not answered: its turn failed and the host runs it again. It goes back to
+//! the front of the queue (at most [`MAX_REQUEUES`] times) instead of
+//! receiving an empty `done`, so the retry's answer reaches the request that
+//! asked for it rather than the next caller's stream.
+//!
 //! A turn start that arrives while the lane still has an active writer (a
 //! follow-up piped into a running container) never replaces it mid-answer;
 //! it is remembered and the next queued writer is promoted when the current
@@ -55,6 +61,10 @@ const _: () = assert!(
 const _: () = assert!(USER_KEY_HASH_HEX % 2 == 0 && USER_KEY_HASH_HEX <= 64);
 /// Frames buffered per SSE writer before chunks are dropped.
 pub(crate) const WRITER_BUFFER: usize = 256;
+/// How often an unanswered writer waits for another turn before it is
+/// closed anyway (the host retries a failed turn a few times, then tells
+/// the user).
+pub(crate) const MAX_REQUEUES: u8 = 10;
 
 /// The JIDs this channel hands out, derived from the base JID.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +225,10 @@ impl SseFrame {
 struct Writer {
     id: u64,
     tx: mpsc::Sender<SseFrame>,
+    /// Text was written to it.
+    answered: bool,
+    /// Times it went back to the queue unanswered.
+    requeues: u8,
 }
 
 #[derive(Default)]
@@ -308,7 +322,12 @@ impl StreamRegistry {
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(WRITER_BUFFER);
-        lane.pending.push_back(Writer { id, tx });
+        lane.pending.push_back(Writer {
+            id,
+            tx,
+            answered: false,
+            requeues: 0,
+        });
         inner.total_writers += 1;
         Ok((id, rx))
     }
@@ -384,14 +403,21 @@ impl StreamRegistry {
     }
 
     /// `set_typing(jid, false)`: the container exited. Safety net that
-    /// closes a still-active writer. Returns true if one was closed.
+    /// closes a still-active writer — unless it got no text, which means its
+    /// turn failed and will be run again: then it waits at the front of the
+    /// queue (see the module docs). Returns true if a writer was closed.
     pub(crate) fn turn_ended(&self, jid: &str) -> bool {
         let mut inner = self.lock();
         let mut closed = false;
         if let Some(lane) = inner.lanes.get_mut(jid) {
-            if let Some(w) = lane.active.take() {
-                let _ = w.tx.try_send(SseFrame::Done);
-                closed = true;
+            if let Some(mut w) = lane.active.take() {
+                if !w.answered && w.requeues < MAX_REQUEUES {
+                    w.requeues += 1;
+                    lane.pending.push_front(w);
+                } else {
+                    let _ = w.tx.try_send(SseFrame::Done);
+                    closed = true;
+                }
             }
             lane.owed = 0;
             lane.in_turn = false;
@@ -412,9 +438,10 @@ impl StreamRegistry {
         let Some(lane) = inner.lanes.get_mut(jid) else {
             return SendOutcome::NoWriter;
         };
-        let Some(w) = lane.active.as_ref() else {
+        let Some(w) = lane.active.as_mut() else {
             return SendOutcome::NoWriter;
         };
+        w.answered = true;
         match w.tx.try_send(SseFrame::Text(text.to_string())) {
             Ok(()) => SendOutcome::Delivered,
             Err(mpsc::error::TrySendError::Full(_)) => SendOutcome::Overflow,
@@ -628,10 +655,49 @@ mod tests {
         let reg = StreamRegistry::default();
         let mut w = enqueue(&reg, COPILOT_JID);
         reg.turn_started(COPILOT_JID);
+        reg.send_text(COPILOT_JID, "partial answer");
         assert!(reg.turn_ended(COPILOT_JID));
-        assert_eq!(w.drain(), vec![SseFrame::Done]);
+        assert_eq!(
+            w.drain(),
+            vec![SseFrame::Text("partial answer".into()), SseFrame::Done]
+        );
         assert!(w.ended());
         assert!(!reg.turn_ended(COPILOT_JID));
+    }
+
+    #[test]
+    fn an_unanswered_writer_gets_the_retry_not_the_next_caller() {
+        let reg = StreamRegistry::default();
+        let mut first = enqueue(&reg, COPILOT_JID);
+        reg.turn_started(COPILOT_JID);
+        let mut second = enqueue(&reg, COPILOT_JID);
+        // The turn fails: no text, the container exits.
+        assert!(!reg.turn_ended(COPILOT_JID));
+        assert!(first.drain().is_empty());
+        assert_eq!(reg.pending_len(COPILOT_JID), 2);
+        // The host's retry answers the first request in its own stream.
+        reg.turn_started(COPILOT_JID);
+        reg.send_text(COPILOT_JID, "first answer");
+        reg.turn_complete(COPILOT_JID);
+        reg.turn_ended(COPILOT_JID);
+        assert_eq!(first.texts(), vec!["first answer"]);
+        assert!(first.ended());
+        assert!(second.drain().is_empty());
+        assert_eq!(reg.pending_len(COPILOT_JID), 1);
+    }
+
+    #[test]
+    fn an_unanswered_writer_is_closed_after_too_many_failed_turns() {
+        let reg = StreamRegistry::default();
+        let mut w = enqueue(&reg, COPILOT_JID);
+        for _ in 0..MAX_REQUEUES {
+            reg.turn_started(COPILOT_JID);
+            assert!(!reg.turn_ended(COPILOT_JID));
+        }
+        reg.turn_started(COPILOT_JID);
+        assert!(reg.turn_ended(COPILOT_JID));
+        assert_eq!(w.drain(), vec![SseFrame::Done]);
+        assert_eq!(reg.counts(), StreamCounts::default());
     }
 
     #[test]

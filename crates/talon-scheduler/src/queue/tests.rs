@@ -368,6 +368,38 @@ async fn stops_retrying_after_max_retries_and_resets() {
     assert_eq!(calls.load(Ordering::SeqCst), 8);
 }
 
+/// Always fails; counts the `retries_exhausted` calls.
+#[derive(Default)]
+struct GivingUp {
+    exhausted: AtomicUsize,
+}
+
+#[async_trait]
+impl LaneProcessor for GivingUp {
+    async fn process_messages(&self, _chat_jid: &str) -> bool {
+        false
+    }
+
+    async fn run_task(&self, _chat_jid: &str, _task_id: &str) {}
+
+    async fn retries_exhausted(&self, chat_jid: &str) {
+        assert_eq!(chat_jid, G1);
+        self.exhausted.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_processor_hears_when_retries_are_exhausted() {
+    let dir = tempfile::tempdir().unwrap();
+    let processor = Arc::new(GivingUp::default());
+    let q = GroupQueue::with_processor(config(dir.path(), 2), processor.clone());
+    q.enqueue_message_check(G1);
+    sleep(Duration::from_secs(150)).await;
+    assert_eq!(processor.exhausted.load(Ordering::SeqCst), 0);
+    sleep(Duration::from_secs(200)).await;
+    assert_eq!(processor.exhausted.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn drains_waiting_groups_when_active_slots_free_up() {
     let dir = tempfile::tempdir().unwrap();

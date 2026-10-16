@@ -176,13 +176,17 @@ async fn execute_inner(
         input.prompt.clone()
     };
     let pending = inbox.drain();
+    let mut pending_files = Vec::with_capacity(pending.len());
     if !pending.is_empty() {
         tracing::info!(
             count = pending.len(),
             "draining pending IPC messages into the initial prompt"
         );
-        first_prompt.push('\n');
-        first_prompt.push_str(&pending.join("\n"));
+        for message in pending {
+            first_prompt.push('\n');
+            first_prompt.push_str(&message.text);
+            pending_files.push(message.file);
+        }
     }
 
     let archive = ArchiveOptions {
@@ -295,6 +299,7 @@ async fn execute_inner(
         archive,
         investigation,
     });
+    agent.note_consumed(pending_files);
     let first = agent.with_turn_header(&first_prompt);
     let result = agent.run_session(first).await;
     if let Some(m) = &mcp.manager {
@@ -459,10 +464,10 @@ async fn compact_command(cmd: CompactCommand<'_>) -> Result<(), AgentError> {
     } else {
         NOTHING_TO_COMPACT_MESSAGE
     };
-    output.emit(&ContainerOutput::success(
-        Some(message.to_string()),
-        agent.reported_session_id(),
-    ));
+    let mut frame =
+        ContainerOutput::success(Some(message.to_string()), agent.reported_session_id());
+    frame.consumed_inputs = Some(agent.take_consumed());
+    output.emit(&frame);
     Ok(())
 }
 
@@ -714,15 +719,27 @@ mod tests {
             r#"{"type":"message","text":"pending note"}"#,
         )
         .unwrap();
-        // Stale _close from a previous run must be ignored.
+        // A _close sent while the container started (the host clears stale
+        // ones before it starts a container) ends the session after the
+        // first turn.
         std::fs::write(env.config.paths.ipc_input().join("_close"), "").unwrap();
         let backend = Arc::new(ScriptedBackend::new([text("ok")]));
         let mut i = input("sweep");
         i.group_folder = "copilot".into();
         i.is_scheduled_task = true;
         i.ephemeral = true;
-        close_soon(&env);
-        run(&env, i, backend.clone()).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(&env, i, backend.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The drained message is reported as part of the first turn.
+        assert_eq!(
+            env.sink.frames()[0].consumed_inputs,
+            Some(vec!["1.json".to_string()])
+        );
         let user = backend.requests()[0].messages[1].text().to_string();
         assert!(user.contains(prompt::SCHEDULED_TASK_PREFIX));
         assert!(user.contains("sweep\npending note"));

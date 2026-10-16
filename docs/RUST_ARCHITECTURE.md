@@ -83,6 +83,19 @@ snapshots `current_tasks.json`, `available_groups.json`; `_close` sentinel).
 IPC files are written atomically (`*.json.tmp` + rename), named with
 `talon_core::protocol::ipc_file_name()`.
 
+Follow-ups and the end of a container:
+- The host empties `input/` (leftover messages, a stale `_close`) before it
+  starts a container; a leftover message was never answered and is sent
+  again from the message store.
+- Each success frame ends one turn and names the `input/` files that turn
+  consumed (`ContainerOutput.consumed_inputs`). The host keeps a ledger per
+  message run and persists the cursor through which everything was
+  answered; a follow-up whose turn died, or that the container never read,
+  runs again (`orchestrator/ledger.rs`).
+- Messages written before `_close` are still answered: the host stops
+  writing once `_close` is written, and the agent checks for `_close` before
+  it drains `input/`.
+
 ### 3.2 Model access (vLLM via host gateway)
 - Host reads `TALON_VLLM_*` (see `talon_core::provider`) and the secret
   `TALON_VLLM_API_KEY` (via `EnvFile::file_value`).

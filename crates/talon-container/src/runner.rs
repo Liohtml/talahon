@@ -403,6 +403,7 @@ impl RunResult {
             new_session_id: self.new_session_id.clone(),
             error: self.error.clone(),
             usage: self.usage,
+            consumed_inputs: None,
         }
     }
 

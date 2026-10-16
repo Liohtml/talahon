@@ -69,6 +69,36 @@ pub fn write_close_sentinel(data_dir: &Path, ipc_key: &str) -> Result<PathBuf> {
     Ok(dir.path.join(IPC_CLOSE_SENTINEL))
 }
 
+/// Most directory entries [`clear_inbox`] looks at (the directory is
+/// writable by the container).
+const MAX_CLEAR_ENTRIES: usize = 10_000;
+
+/// Empty the lane's inbox before a container starts: follow-up messages
+/// (`*.json`) left by an earlier container and a stale `_close`. A leftover
+/// message was never answered; the host sends it again from the message
+/// store, so the next container must not also read the old file (and a
+/// stale `_close` would end it after its first turn). Entries are unlinked
+/// descriptor-relatively and never followed. Returns how many were removed.
+pub fn clear_inbox(data_dir: &Path, ipc_key: &str) -> Result<usize> {
+    let dir = open_input_dir(data_dir, ipc_key)?;
+    let reader = rfs::Dir::read_from(dir.fd.as_fd()).map_err(io::Error::from)?;
+    let mut names = Vec::new();
+    for entry in reader.take(MAX_CLEAR_ENTRIES) {
+        let entry = entry.map_err(io::Error::from)?;
+        let name = entry.file_name();
+        let bytes = name.to_bytes();
+        let stale = bytes == IPC_CLOSE_SENTINEL.as_bytes()
+            || (bytes.ends_with(b".json") && !bytes.starts_with(b"."));
+        if stale {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names
+        .iter()
+        .filter(|name| rfs::unlinkat(dir.fd.as_fd(), name.as_c_str(), AtFlags::empty()).is_ok())
+        .count())
+}
+
 /// A lane's `input/` directory, pinned by descriptor.
 struct InputDir {
     fd: OwnedFd,
@@ -234,6 +264,28 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(entries, 1);
+    }
+
+    #[test]
+    fn clear_inbox_removes_leftovers_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_message(tmp.path(), "g", "old").unwrap();
+        write_close_sentinel(tmp.path(), "g").unwrap();
+        let input = tmp.path().join("ipc/g/input");
+        fs::write(input.join("partial.json.tmp"), b"").unwrap();
+        let outside = tmp.path().join("outside.json");
+        fs::write(&outside, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside, input.join("link.json")).unwrap();
+        assert_eq!(clear_inbox(tmp.path(), "g").unwrap(), 3);
+        let left: Vec<String> = fs::read_dir(&input)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(left, vec!["partial.json.tmp".to_string()]);
+        // The symlink itself went, never its target.
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+        // A lane without an inbox yet is fine.
+        assert_eq!(clear_inbox(tmp.path(), "fresh").unwrap(), 0);
     }
 
     #[test]

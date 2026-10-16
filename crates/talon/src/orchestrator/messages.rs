@@ -14,14 +14,19 @@
 //!   non-trigger messages accumulate and are sent as context later;
 //! - follow-ups are piped into the lane's running container (IPC input)
 //!   instead of starting a new one;
+//! - a run's ledger records what it was handed and which of it its turns
+//!   answered (the agent names the input files each turn consumed); what a
+//!   run leaves unanswered — its turn died, or the container closed before
+//!   reading a follow-up — runs again from the committed cursor, which is
+//!   also what is persisted while the run is in flight (crash recovery).
+//!   An error after everything was answered is not retried (no duplicates);
 //! - session commands close an active container (authorized senders only)
 //!   and are handled by a fresh run;
-//! - on agent error the lane cursor is rolled back for the queue's retry —
-//!   unless output already reached the user (no duplicates).
+//! - when the queue gives up retrying, the user is told.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 use talon_core::channel::Channel;
@@ -38,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::Orchestrator;
 use super::commands::LaneCommandDeps;
+use super::ledger::LaneLedger;
 use super::run::RunOptions;
 
 /// Extra headroom (on top of the idle timeout) a running container's LLM
@@ -66,8 +72,8 @@ struct ChatSink<'a> {
     group_name: &'a str,
     channel: Arc<dyn Channel>,
     idle: CloseTimer,
+    ledger: Arc<Mutex<LaneLedger>>,
     had_error: bool,
-    output_sent: bool,
 }
 
 #[async_trait]
@@ -77,29 +83,41 @@ impl AgentOutputHandler for ChatSink<'_> {
             let text = strip_internal_tags(raw);
             tracing::info!(group = %self.group_name, chars = raw.len(), "Agent output");
             if !text.is_empty() {
-                match self.host.send_outbound(self.jid, &text).await {
-                    Ok(true) => self.output_sent = true,
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!(chat_jid = %self.jid, error = %e, "failed to deliver agent output");
-                    }
+                if let Err(e) = self.host.send_outbound(self.jid, &text).await {
+                    tracing::warn!(chat_jid = %self.jid, error = %e, "failed to deliver agent output");
                 }
             }
-            // Only actual results reset the idle timer, not session-update
-            // markers (result: null).
-            self.idle.reset();
         }
         match output.status {
             OutputStatus::Success => {
+                // Every success frame ends a turn, an empty answer too: the
+                // container now waits for input, so the idle countdown runs.
+                self.idle.reset();
+                let (completions, committed) = {
+                    let mut ledger = lock_ledger(&self.ledger);
+                    let n = ledger.turn_answered(output.consumed_inputs.as_deref());
+                    (n, ledger.committed().to_string())
+                };
+                self.host.commit_cursor(self.jid, &committed);
                 self.host.queue.notify_idle(self.jid);
-                if let Err(e) = self.channel.on_turn_complete(self.jid).await {
-                    tracing::debug!(chat_jid = %self.jid, error = %e, "on_turn_complete failed");
+                for _ in 0..completions {
+                    if let Err(e) = self.channel.on_turn_complete(self.jid).await {
+                        tracing::debug!(chat_jid = %self.jid, error = %e, "on_turn_complete failed");
+                    }
                 }
             }
             OutputStatus::Error => self.had_error = true,
         }
     }
 }
+
+fn lock_ledger(ledger: &Mutex<LaneLedger>) -> MutexGuard<'_, LaneLedger> {
+    ledger.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Notice sent when a lane's messages failed every retry.
+pub const RETRIES_EXHAUSTED_NOTICE: &str = "⚠️ Your last message could not be processed: the \
+     agent failed several times in a row. It will be picked up again with your next message.";
 
 /// Whether `msg` may wake the agent in a trigger-gated lane.
 pub(crate) fn trigger_ok(
@@ -230,13 +248,27 @@ impl Orchestrator {
         }
 
         let prompt = format_messages(&missed, &self.config.timezone_name);
+        let Some(last) = missed.last() else {
+            return true;
+        };
 
         // Advance the cursor so the piping path won't re-fetch these
-        // messages; keep the old one to roll back on error.
+        // messages; until they are answered the committed cursor (the old
+        // one) is what is persisted and what an error rolls back to.
         let previous_cursor = self.cursor(chat_jid);
-        if let Some(last) = missed.last() {
-            self.set_cursor(chat_jid, &last.timestamp);
+        let ledger = Arc::new(Mutex::new(LaneLedger::new(
+            previous_cursor.clone(),
+            last.timestamp.clone(),
+        )));
+        {
+            let mut st = self.lock();
+            st.last_agent_timestamp
+                .insert(chat_jid.to_string(), last.timestamp.clone());
+            st.committed
+                .insert(chat_jid.to_string(), previous_cursor.clone());
+            st.ledgers.insert(chat_jid.to_string(), Arc::clone(&ledger));
         }
+        self.save_state();
         tracing::info!(group = %group.name, message_count = missed.len(), "Processing messages");
 
         self.set_typing(&channel, chat_jid, true).await;
@@ -246,34 +278,86 @@ impl Orchestrator {
             group_name: &group.name,
             channel: Arc::clone(&channel),
             idle: self.queue.close_timer(chat_jid, self.config.idle_timeout),
+            ledger: Arc::clone(&ledger),
             had_error: false,
-            output_sent: false,
         };
         let outcome = self
             .run_agent(&group, &prompt, chat_jid, RunOptions::message(), &mut sink)
             .await;
         sink.idle.cancel();
-        let (had_error, output_sent) = (sink.had_error, sink.output_sent);
+        let failed = !outcome.is_success() || sink.had_error;
         drop(sink);
+
+        // Seal the run: nothing more is piped into it. Whatever it did not
+        // answer (the prompt or follow-ups) runs again from the committed
+        // cursor.
+        let (all_answered, committed) = {
+            let mut ledger = lock_ledger(&ledger);
+            ledger.finish(!failed);
+            (ledger.all_answered(), ledger.committed().to_string())
+        };
+        {
+            let mut st = self.lock();
+            st.ledgers.remove(chat_jid);
+            st.committed.remove(chat_jid);
+            if !all_answered {
+                st.last_agent_timestamp
+                    .insert(chat_jid.to_string(), committed);
+            }
+        }
+        self.save_state();
         self.set_typing(&channel, chat_jid, false).await;
 
-        if !outcome.is_success() || had_error {
-            if output_sent {
+        if failed {
+            if all_answered {
                 tracing::warn!(
                     group = %group.name,
-                    "Agent error after output was sent, skipping cursor rollback to prevent duplicates"
+                    "Agent error after every message was answered; nothing to retry"
                 );
                 return true;
             }
-            self.set_cursor(chat_jid, &previous_cursor);
             tracing::warn!(group = %group.name, "Agent error, rolled back message cursor for retry");
             return false;
         }
-        if more_pending {
+        if !all_answered {
+            // Follow-ups the container closed before reading.
+            tracing::info!(group = %group.name, "Follow-ups were not answered by the run; running them again");
+            self.queue.enqueue_message_check(chat_jid);
+        } else if more_pending {
             // Messages after the answered trigger: the lane runs again.
             self.queue.enqueue_message_check(chat_jid);
         }
         true
+    }
+
+    /// Record the cursor through which the lane's running container has
+    /// answered (persisted while the run is in flight).
+    pub(crate) fn commit_cursor(&self, jid: &str, committed: &str) {
+        {
+            let mut st = self.lock();
+            match st.committed.get_mut(jid) {
+                Some(c) if c != committed => committed.clone_into(c),
+                _ => return,
+            }
+        }
+        self.save_state();
+    }
+
+    /// Tell the user that the lane's messages failed every retry (see
+    /// [`talon_scheduler::LaneProcessor::retries_exhausted`]). The cursor
+    /// stays put, so they are picked up again with the next message.
+    pub async fn notify_retries_exhausted(&self, chat_jid: &str) {
+        let Some(channel) = self.find_channel(chat_jid) else {
+            return;
+        };
+        self.set_typing(&channel, chat_jid, true).await;
+        if let Err(e) = self.send_outbound(chat_jid, RETRIES_EXHAUSTED_NOTICE).await {
+            tracing::warn!(chat_jid, error = %e, "cannot tell the user that their message failed");
+        }
+        if let Err(e) = channel.on_turn_complete(chat_jid).await {
+            tracing::debug!(chat_jid, error = %e, "on_turn_complete failed");
+        }
+        self.set_typing(&channel, chat_jid, false).await;
     }
 
     /// Whether a follow-up may be piped into the lane's running container:
@@ -436,23 +520,30 @@ impl Orchestrator {
         let formatted = format_messages(to_send, &self.config.timezone_name);
 
         if self.may_pipe(jid) {
-            if self.queue.send_message(jid, &formatted) {
+            if let Some((ledger, file)) = self.pipe_into_run(jid, &formatted, &last.timestamp) {
                 tracing::debug!(
                     chat_jid = jid,
                     count = to_send.len(),
                     "Piped messages to active container"
                 );
-                self.set_cursor(jid, &last.timestamp);
                 if more_pending {
                     // The rest gets its own run once this container is done.
                     self.queue.enqueue_message_check(jid);
                 }
-                // Typing indicator while the container works on it.
+                // A turn starts for the follow-up (typing indicator; the
+                // HTTP channel moves on to this request's stream). Its
+                // completion is reported only after this, see
+                // `LaneLedger::signalled`.
                 let channel = Arc::clone(channel);
                 let jid_owned = jid.to_string();
                 tokio::spawn(async move {
                     if let Err(e) = channel.set_typing(&jid_owned, true).await {
                         tracing::warn!(chat_jid = %jid_owned, error = %e, "Failed to set typing indicator");
+                    }
+                    if lock_ledger(&ledger).signalled(&file) {
+                        if let Err(e) = channel.on_turn_complete(&jid_owned).await {
+                            tracing::debug!(chat_jid = %jid_owned, error = %e, "on_turn_complete failed");
+                        }
                     }
                 });
                 return LaneRoute::Piped;
@@ -469,6 +560,29 @@ impl Orchestrator {
         // No active container — enqueue for a new one.
         self.queue.enqueue_message_check(jid);
         LaneRoute::Enqueued
+    }
+
+    /// Pipe `text` into the lane's running message container, if it still
+    /// takes input, and advance the lane cursor to `cursor` (its newest
+    /// message). Returns the run's ledger and the input file written.
+    fn pipe_into_run(
+        &self,
+        jid: &str,
+        text: &str,
+        cursor: &str,
+    ) -> Option<(Arc<Mutex<LaneLedger>>, String)> {
+        let ledger = self.lock().ledgers.get(jid).cloned()?;
+        // The ledger stays locked until the cursor moved, so the run cannot
+        // be sealed (and roll the cursor back) in between.
+        let mut guard = lock_ledger(&ledger);
+        if guard.is_sealed() {
+            return None;
+        }
+        let file = self.queue.pipe_message(jid, text)?;
+        guard.record_pipe(file.clone(), cursor.to_string());
+        self.set_cursor(jid, cursor);
+        drop(guard);
+        Some((ledger, file))
     }
 
     /// The message loop: poll, then wait for a wake-up (new message) or

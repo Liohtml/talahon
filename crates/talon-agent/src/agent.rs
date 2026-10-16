@@ -143,6 +143,8 @@ pub struct Agent {
     archive: ArchiveOptions,
     investigation: bool,
     call_seq: u64,
+    /// IPC input files consumed since the last output frame.
+    consumed: Vec<String>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -173,7 +175,20 @@ impl Agent {
             archive: parts.archive,
             investigation: parts.investigation,
             call_seq: 0,
+            consumed: Vec::new(),
         }
+    }
+
+    /// Record IPC input files whose messages are part of the next turn's
+    /// prompt (follow-ups drained before the session started).
+    pub fn note_consumed(&mut self, files: impl IntoIterator<Item = String>) {
+        self.consumed.extend(files);
+    }
+
+    /// The IPC input files consumed since the last frame, for the next
+    /// frame (cleared).
+    pub fn take_consumed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.consumed)
     }
 
     /// The conversation so far (without the system prompt).
@@ -221,6 +236,7 @@ impl Agent {
             let mut frame =
                 ContainerOutput::success(outcome.result.clone(), self.reported_session_id());
             frame.usage = Some((&outcome.usage).into());
+            frame.consumed_inputs = Some(self.take_consumed());
             self.output.emit(&frame);
             if outcome.close_requested {
                 tracing::info!("close sentinel consumed during the turn; ending session");
@@ -232,11 +248,12 @@ impl Agent {
                 .wait_next(self.settings.ipc_poll, &self.tool_ctx.cancel)
                 .await
             {
-                Inbound::Messages(text) => {
+                Inbound::Messages { text, files } => {
                     tracing::info!(
                         chars = text.len(),
                         "follow-up message received; starting a new turn"
                     );
+                    self.consumed.extend(files);
                     prompt = self.with_turn_header(&text);
                 }
                 Inbound::Close => {
@@ -398,18 +415,24 @@ impl Agent {
         if st.close_requested {
             return;
         }
-        if self.inbox.take_close() {
-            tracing::info!("close sentinel received during the turn; finishing it first");
-            st.close_requested = true;
-            return;
-        }
+        // `_close` first, then the messages: everything written before
+        // `_close` is in place by then and still goes into this turn.
+        let closing = self.inbox.close_pending();
         let messages = self.inbox.drain();
         if !messages.is_empty() {
             tracing::info!(
                 count = messages.len(),
                 "piping follow-up messages into the active turn"
             );
-            self.push(ChatMessage::user(messages.join("\n")));
+            let (texts, files): (Vec<String>, Vec<String>) =
+                messages.into_iter().map(|m| (m.text, m.file)).unzip();
+            self.consumed.extend(files);
+            self.push(ChatMessage::user(texts.join("\n")));
+        }
+        if closing {
+            tracing::info!("close sentinel received during the turn; finishing it first");
+            self.inbox.take_close();
+            st.close_requested = true;
         }
     }
 
