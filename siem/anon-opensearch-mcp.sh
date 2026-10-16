@@ -7,7 +7,11 @@
 # `deanonymize` tool reverses the substitution for report writing.
 #
 # Implementation: the Rust proxy `talon-anon-proxy` (crates/talon-anon). If
-# the binary is not available, the Python fallback proxy (anon_proxy/) is used.
+# the binary is not available the server refuses to start, unless
+# TALON_ANON_ALLOW_PYTHON=1 allows the legacy Python proxy (anon_proxy/),
+# which misses PII the Rust proxy catches (list elements, nested and dotted
+# field names, names in free text and preserved fields) and keeps its token
+# map in the agent-writable group folder.
 #
 # Field definitions live in anon_proxy/fields.yaml — git pull to get updates.
 #
@@ -23,6 +27,7 @@
 #   TALON_ANON_FIELDS      field definitions (default: anon_proxy/fields.yaml)
 #   TALON_ANON_MAP         token map file
 #   TALON_ANON_LOG         log filter for the Rust proxy (stderr), e.g. "debug"
+#   TALON_ANON_ALLOW_PYTHON=1  allow the weaker Python fallback (see above)
 #
 # This script is the MCP server command. Do not run it directly.
 
@@ -113,7 +118,16 @@ fi
 #      branch in `if/then/fi` so a failure naturally falls through to the
 #      system-venv fallback instead of aborting the whole script.
 
-echo "[anon-opensearch-mcp] talon-anon-proxy not found; using the Python fallback proxy" >&2
+if [[ "${TALON_ANON_ALLOW_PYTHON:-}" != "1" ]]; then
+    echo "[anon-opensearch-mcp] ERROR: talon-anon-proxy not found; refusing to serve SIEM data without it." >&2
+    echo "[anon-opensearch-mcp]   Tried: \$TALON_ANON_PROXY_BIN, PATH, /usr/local/bin, $REPO_DIR/target/{release,debug}" >&2
+    echo "[anon-opensearch-mcp]   In a container: rebuild the image (container/build.sh)" >&2
+    echo "[anon-opensearch-mcp]   On the host: cargo build --release -p talahon-anon, or rerun siem/setup.sh" >&2
+    echo "[anon-opensearch-mcp]   TALON_ANON_ALLOW_PYTHON=1 allows the legacy Python proxy, which leaks PII the Rust proxy catches." >&2
+    exit 1
+fi
+
+echo "[anon-opensearch-mcp] WARNING: talon-anon-proxy not found; using the legacy Python proxy (TALON_ANON_ALLOW_PYTHON=1)" >&2
 
 _try_python() {
     local py="$1"

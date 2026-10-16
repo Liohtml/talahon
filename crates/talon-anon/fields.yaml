@@ -38,8 +38,6 @@ categories:
       - data_win_eventdata_subjectUserName
       - data_win_eventdata_subjectusername
       - data_win_eventdata_targetusername
-      - data_win_eventdata_callerProcessName
-      - data_win_eventdata_targetLogonId
       - data_win_system_user
       - syscheck_uname_after
       - syscheck_uname_before
@@ -86,7 +84,8 @@ categories:
   # ── Email addresses ───────────────────────────────────────────────────────
   # value_pattern (Rust): a field listed in several categories (e.g.
   # targetUserName) is EMAIL_n only when the value looks like an address,
-  # otherwise the other category (USER_n) applies.
+  # otherwise the other category (USER_n) applies. A field listed only here
+  # is EMAIL_n whatever its value.
   email:
     token_prefix: "EMAIL"
     description: "Email addresses (UPN-format usernames and explicit email fields)"

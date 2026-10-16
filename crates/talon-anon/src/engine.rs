@@ -35,8 +35,8 @@ use crate::config::{CategoryKind, CompiledConfig, FieldClass, key_atoms};
 use crate::detect::{
     DOMAIN_USER_RE, EMAIL_RE, FILE_EXTENSION_TLDS, IPV4_RE, IPV6_CANDIDATE_RE, MAC_RE,
     PROFILE_DIRS, SID_RE, UNC_RE, UNIX_HOME_RE, WIN_PROFILE_END_RE, WIN_PROFILE_RE, in_spans,
-    is_internal_ip, is_internal_ipv4, is_internal_ipv6, is_open_boundary, is_unc_boundary,
-    parse_ip, parse_ipv4_lenient, url_spans,
+    ipv4_bounded, is_internal_ip, is_internal_ipv4, is_internal_ipv6, is_open_boundary,
+    is_unc_boundary, parse_ip, parse_ipv4_lenient, url_spans,
 };
 use crate::text::{
     Candidate, char_after, char_before, fold, is_word_char, replace_matches, select_matches,
@@ -264,6 +264,66 @@ fn parse_text_doc(text: &str) -> TextDoc {
         segments.push(Segment::Text(text[cursor..].to_string()));
     }
     TextDoc { segments }
+}
+
+/// Whether the JSON `text` repeats a key inside one object (or does not
+/// parse). `serde_json` keeps the last value of a repeated key, so the
+/// parsed document never shows the earlier ones to the anonymizer: such a
+/// text must not be passed on as written (`{"msg":"login from 10.0.0.5",
+/// "msg":"ok"}` would leak the address).
+fn has_duplicate_keys(text: &str) -> bool {
+    use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
+
+    struct Check;
+
+    impl<'de> DeserializeSeed<'de> for Check {
+        type Value = ();
+        fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+
+    impl<'de> Visitor<'de> for Check {
+        type Value = ();
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON value")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            let mut seen = std::collections::HashSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !seen.insert(key) {
+                    return Err(serde::de::Error::custom("duplicate key"));
+                }
+                map.next_value_seed(Check)?;
+            }
+            Ok(())
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+            while seq.next_element_seed(Check)?.is_some() {}
+            Ok(())
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_str<E>(self, _: &str) -> Result<(), E> {
+            Ok(())
+        }
+        fn visit_unit<E>(self) -> Result<(), E> {
+            Ok(())
+        }
+    }
+
+    let mut de = serde_json::Deserializer::from_str(text);
+    !(Check.deserialize(&mut de).is_ok() && de.end().is_ok())
 }
 
 #[derive(Default)]
@@ -601,6 +661,14 @@ impl Anonymizer {
                     }
                 }
             }
+            Value::Number(n) => {
+                if let FieldClass::Categories(cats) = self.classify(path, hints) {
+                    let s = n.to_string();
+                    if let Some(c) = self.cfg.pick_category(&cats, &s) {
+                        let _ = self.tokenize_category(&s, c);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -688,6 +756,26 @@ impl Anonymizer {
                     None => false,
                 }
             }
+            // A number in a PII field (`"data_srcuser": 1001`, a numeric
+            // bucket key of a hinted aggregation) is an identifier like its
+            // string form; it becomes a token string.
+            Value::Number(n) => match self.classify(path, hints) {
+                FieldClass::Categories(cats) => {
+                    let s = n.to_string();
+                    let token = self
+                        .cfg
+                        .pick_category(&cats, &s)
+                        .and_then(|c| self.tokenize_category(&s, c));
+                    match token {
+                        Some(token) => {
+                            *v = Value::String(token);
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -720,6 +808,7 @@ impl Anonymizer {
                     let none = FieldHints::default();
                     self.register_walk(&inner, &mut FieldPath::default(), &none, 0);
                     if !self.rewrite_walk(&mut inner, &mut FieldPath::default(), &none, 0, nest + 1)
+                        && !has_duplicate_keys(value)
                     {
                         return None;
                     }
@@ -754,7 +843,9 @@ impl Anonymizer {
                     None => out.push_str(t),
                 },
                 Segment::Json { value, original } => {
-                    if self.rewrite_walk(value, &mut FieldPath::default(), hints, 0, 0) {
+                    if self.rewrite_walk(value, &mut FieldPath::default(), hints, 0, 0)
+                        || has_duplicate_keys(original)
+                    {
                         changed = true;
                         match serde_json::to_string(value) {
                             Ok(s) => out.push_str(&s),
@@ -1234,7 +1325,11 @@ impl Anonymizer {
         }
         let cfg = Arc::clone(&self.cfg);
         replace_matches(&IPV4_RE, text, |c| {
-            let s = c.get(0)?.as_str();
+            let m = c.get(0)?;
+            if !ipv4_bounded(text, m.start(), m.end()) {
+                return None;
+            }
+            let s = m.as_str();
             let ip = parse_ipv4_lenient(s)?;
             if !is_internal_ipv4(ip) {
                 return None;
