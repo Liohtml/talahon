@@ -10,17 +10,30 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use crate::text::{char_after, char_before};
+
 fn re(pattern: &str) -> Regex {
     // Only called with the static patterns of this module (see module docs).
     Regex::new(pattern).expect("static regex")
 }
 
-/// IPv4 dotted quad (the Python proxy's pattern, ASCII digits only).
+/// IPv4 dotted quad (ASCII digits only). Not word-bounded: an address glued
+/// to `_` or letters (`conn_from_10.0.0.5`, `ip10.1.2.3`) is still one;
+/// [`ipv4_bounded`] rejects matches inside longer digit/dot runs.
 pub(crate) static IPV4_RE: LazyLock<Regex> = LazyLock::new(|| {
-    re(
-        r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b",
-    )
+    re(r"(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)")
 });
+
+/// Whether an [`IPV4_RE`] match at `[start, end)` is a whole address: not
+/// preceded by a digit or `.`, not followed by a digit or by `.` and a digit
+/// (`999.1.1.1`, `10.0.19041.1` and `1.2.3.4.5` are no addresses).
+pub(crate) fn ipv4_bounded(text: &str, start: usize, end: usize) -> bool {
+    let before = char_before(text, start);
+    let after = char_after(text, end);
+    !before.is_some_and(|c| c.is_ascii_digit() || c == '.')
+        && !after.is_some_and(|c| c.is_ascii_digit())
+        && !(after == Some('.') && char_after(text, end + 1).is_some_and(|c| c.is_ascii_digit()))
+}
 
 /// IPv6 candidate: a run of hex digits, colons and dots containing at least
 /// two colons, with an optional zone id. Candidates are validated by
@@ -310,12 +323,22 @@ mod tests {
     }
 
     #[test]
-    fn ipv4_regex_finds_python_matches() {
-        let found: Vec<_> = IPV4_RE
-            .find_iter("a 10.0.0.1, 8.8.8.8:53 v1.2.3.4 999.1.1.1 10.0.19041.1")
-            .map(|m| m.as_str())
-            .collect();
-        assert_eq!(found, ["10.0.0.1", "8.8.8.8"]);
+    fn ipv4_matches_whole_addresses_even_when_glued() {
+        let found = |text: &str| -> Vec<String> {
+            IPV4_RE
+                .find_iter(text)
+                .filter(|m| ipv4_bounded(text, m.start(), m.end()))
+                .map(|m| m.as_str().to_string())
+                .collect()
+        };
+        assert_eq!(
+            found("a 10.0.0.1, 8.8.8.8:53 999.1.1.1 10.0.19041.1 1.2.3.4.5"),
+            ["10.0.0.1", "8.8.8.8"]
+        );
+        assert_eq!(
+            found("conn_from_10.0.0.5 backup_192.168.1.20_2024.tar ip10.1.2.3 v1.2.3.4"),
+            ["10.0.0.5", "192.168.1.20", "10.1.2.3", "1.2.3.4"]
+        );
     }
 
     #[test]

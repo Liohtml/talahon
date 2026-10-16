@@ -785,7 +785,10 @@ impl CompiledConfig {
 
     /// Pick the category for `value` among `cats` (file order): the first
     /// whose `value_pattern` matches, else the *last* one without a pattern
-    /// (the Python proxy let later categories override earlier ones).
+    /// (the Python proxy let later categories override earlier ones), else
+    /// the field's first category: a value in a field that only has
+    /// patterned categories (`data_office365_UserId: "jdoe"`) is still that
+    /// field's identifier and must not reach the model as free text.
     pub(crate) fn pick_category(&self, cats: &[usize], value: &str) -> Option<usize> {
         let mut fallback = None;
         for &c in cats {
@@ -798,7 +801,7 @@ impl CompiledConfig {
                 None => fallback = Some(c),
             }
         }
-        fallback
+        fallback.or_else(|| cats.iter().copied().find(|&c| c < self.categories.len()))
     }
 }
 
@@ -982,7 +985,9 @@ mod tests {
             "categories:\n  email:\n    token_prefix: EMAIL\n    value_pattern: '@'\n    fields: [mail]\n",
         )
         .unwrap();
-        assert_eq!(only_pattern.pick_category(&[0], "nope"), None);
+        // A field whose only category has a pattern keeps that category for
+        // values that don't match it: free text would leak them.
+        assert_eq!(only_pattern.pick_category(&[0], "nope"), Some(0));
         assert_eq!(only_pattern.pick_category(&[0], "a@b.c"), Some(0));
     }
 

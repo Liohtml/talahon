@@ -809,3 +809,104 @@ fn debug_output_has_no_pii() {
     a.anonymize_field("agent_name", "SECRET-HOST");
     assert!(!format!("{a:?}").contains("SECRET-HOST"));
 }
+
+// ---------------------------------------------------------------------------
+// Leaks carried over from the Python proxy, and Rust-only ones
+// ---------------------------------------------------------------------------
+
+#[test]
+fn numbers_in_pii_fields_are_tokenized() {
+    let mut a = shipped();
+    let mut doc = json!({"data_srcuser": 1001, "data_dstuser": 1001, "rule_level": 12});
+    assert!(a.anonymize_json(&mut doc));
+    assert_eq!(
+        doc,
+        json!({"data_srcuser": "USER_1", "data_dstuser": "USER_1", "rule_level": 12})
+    );
+}
+
+#[test]
+fn numeric_bucket_key_of_a_hinted_aggregation_is_tokenized() {
+    let mut a = shipped();
+    let hints = FieldHints::from_arguments(&json!({
+        "body": {"aggs": {"users": {"terms": {"field": "data_srcuser"}}}}
+    }));
+    let mut doc = json!({"aggregations": {"users": {"buckets": [{"key": 1001, "doc_count": 3}]}}});
+    assert!(a.anonymize_json_with_hints(&mut doc, &hints));
+    assert_eq!(doc["aggregations"]["users"]["buckets"][0]["key"], "USER_1");
+    assert_eq!(doc["aggregations"]["users"]["buckets"][0]["doc_count"], 3);
+}
+
+#[test]
+fn value_not_matching_the_only_category_pattern_is_still_tokenized() {
+    // data_office365_UserId is listed only under `email`; a value that is no
+    // address used to fall through to the free-text detectors and leak.
+    let mut a = shipped();
+    assert_eq!(
+        a.anonymize_field("data_office365_UserId", "jdoe"),
+        "EMAIL_1"
+    );
+    assert_eq!(
+        a.anonymize_field("data_office365_UserId", "jane@corp.example"),
+        "EMAIL_2"
+    );
+    // A field listed under user and email still picks user for a bare name.
+    assert_eq!(
+        a.anonymize_field("data_win_eventdata_targetUserName", "bob"),
+        "USER_1"
+    );
+}
+
+#[test]
+fn repeated_json_keys_never_pass_through_as_written() {
+    let mut a = shipped();
+    let t = r#"Result: {"msg":"login from 10.0.0.5","msg":"ok"}"#;
+    let out = a.anonymize_text_content(t, &FieldHints::new());
+    assert!(!out.contains("10.0.0.5"), "{out}");
+    // Also inside a JSON document encoded in a string field.
+    let mut doc = json!({"full_log": r#"{"src":"10.0.0.6","src":"x"}"#});
+    a.anonymize_json(&mut doc);
+    assert!(!doc.to_string().contains("10.0.0.6"), "{doc}");
+    // A document without repeated keys that needs no change stays as written.
+    let unchanged = r#"Result: {"a":  1, "b": "public 8.8.8.8"}"#;
+    assert_eq!(
+        a.anonymize_text_content(unchanged, &FieldHints::new()),
+        unchanged
+    );
+}
+
+#[test]
+fn process_paths_and_logon_ids_are_not_user_names() {
+    // callerProcessName / targetLogonId were listed as user fields: the path
+    // became USER_n and the sweep then rewrote it inside commandLine.
+    let mut a = shipped();
+    let mut doc = json!({
+        "data_win_eventdata_callerProcessName": r"C:\Windows\System32\net1.exe",
+        "data_win_eventdata_targetLogonId": "0x3e7",
+        "data_win_eventdata_commandLine": r"C:\Windows\System32\net1.exe localgroup administrators"
+    });
+    a.anonymize_json(&mut doc);
+    assert_eq!(
+        doc["data_win_eventdata_callerProcessName"],
+        r"C:\Windows\System32\net1.exe"
+    );
+    assert_eq!(doc["data_win_eventdata_targetLogonId"], "0x3e7");
+    assert_eq!(
+        doc["data_win_eventdata_commandLine"],
+        r"C:\Windows\System32\net1.exe localgroup administrators"
+    );
+}
+
+#[test]
+fn internal_ips_glued_to_names_are_tokenized() {
+    let mut a = shipped();
+    let out = text(
+        &mut a,
+        "conn_from_10.0.0.5 backup_192.168.1.20_2024.tar ip10.1.2.3 v1.2.3.4",
+    );
+    assert!(!out.contains("10.0.0.5"), "{out}");
+    assert!(!out.contains("192.168.1.20"), "{out}");
+    assert!(!out.contains("10.1.2.3"), "{out}");
+    // Public addresses stay (needed for threat intel).
+    assert!(out.contains("1.2.3.4"), "{out}");
+}
