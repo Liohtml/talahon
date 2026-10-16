@@ -586,16 +586,14 @@ impl Orchestrator {
     }
 
     /// Drop an in-memory lane (never a persisted one).
+    ///
+    /// The lane's agent cursor is kept: the lane is registered again with
+    /// its next message (an idle CoPilot user lane), and replies are never
+    /// stored, so a lost cursor could not be recovered from the last reply.
+    /// Every message the lane ever handled would come back as new.
     pub(crate) fn unregister_lane(&self, jid: &str) -> bool {
-        {
-            let mut st = self.lock();
-            if st.persisted.contains(jid) || st.groups.remove(jid).is_none() {
-                return false;
-            }
-            st.last_agent_timestamp.remove(jid);
-        }
-        self.save_state();
-        true
+        let mut st = self.lock();
+        !st.persisted.contains(jid) && st.groups.remove(jid).is_some()
     }
 
     /// Redact, format for the owning channel's dialect and send. Returns

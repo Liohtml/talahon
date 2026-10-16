@@ -1093,6 +1093,45 @@ async fn lanes_sharing_a_folder_stay_in_memory() {
 }
 
 #[tokio::test]
+async fn a_swept_lane_keeps_its_cursor_when_it_comes_back() {
+    const USER: &str = "fake:copilot:u:bob";
+    let h = harness();
+    ChannelHost::register_group(
+        h.orch.as_ref(),
+        "fake:copilot",
+        group("CoPilot", "copilot", false),
+        true,
+    )
+    .await;
+    let mut lane = group("CoPilot - bob", "copilot", false);
+    lane.session_key = Some("copilot-u-bob".into());
+    lane.ipc_key = Some("copilot-u-bob".into());
+    lane.requires_trigger = Some(false);
+    ChannelHost::register_group(h.orch.as_ref(), USER, lane.clone(), true).await;
+    h.launcher.push(Script::reply("first answer"));
+    h.orch
+        .accept_message(USER, msg(USER, "1", "bob", "yesterday's question", &ts(1)));
+    assert!(h.orch.process_group_messages(USER).await);
+
+    // The idle sweep drops the lane; its next message registers it again.
+    assert!(ChannelHost::unregister_group(h.orch.as_ref(), USER).await);
+    ChannelHost::register_group(h.orch.as_ref(), USER, lane, true).await;
+    h.launcher.push(Script::reply("second answer"));
+    h.orch
+        .accept_message(USER, msg(USER, "2", "bob", "today's question", &ts(2)));
+    assert!(h.orch.process_group_messages(USER).await);
+
+    let prompts = h.launcher.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("today's question"), "{}", prompts[1]);
+    assert!(
+        !prompts[1].contains("yesterday's question"),
+        "{}",
+        prompts[1]
+    );
+}
+
+#[tokio::test]
 async fn persisted_groups_survive_a_restart() {
     let h = harness();
     h.orch
