@@ -2,6 +2,12 @@
 
 All notable changes to Talon are documented in this file.
 
+## [2.0.1] - 2026-10-16
+
+- fix: lost messages, DST cron loop, fail-open sender allowlist, .env inline comments (#8)
+- docs: CoPilot integration reflects the Rust CoPilot side and the real endpoints (#7)
+- ci: publish from the CRATES environment (#6)
+
 ## [2.0.0] - 2026-10-14
 
 - Rust workspace (`crates/`): host orchestrator `talon` and in-container runtime `talon-agent` with a native agent loop.
