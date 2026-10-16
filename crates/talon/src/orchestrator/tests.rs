@@ -69,6 +69,38 @@ async fn trigger_gating_accumulates_context_until_trigger() {
 }
 
 #[tokio::test]
+async fn a_trigger_followed_by_a_busy_chat_is_still_answered() {
+    let h = harness();
+    h.orch
+        .register_group_inner(TEAM, group("Team", "team", false), true, false)
+        .unwrap();
+    h.orch.accept_message(
+        TEAM,
+        msg(TEAM, "1", "alice", "@Talon check host web-01", &ts(1)),
+    );
+    // More chatter than fits in one prompt (MAX_MESSAGES_PER_PROMPT = 10).
+    for i in 2..=13u32 {
+        h.orch.accept_message(
+            TEAM,
+            msg(TEAM, &i.to_string(), "bob", &format!("chatter {i}"), &ts(i)),
+        );
+    }
+    h.launcher.push(Script::reply("web-01 looks fine"));
+    assert!(h.orch.process_group_messages(TEAM).await);
+
+    let prompts = h.launcher.prompts();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("check host web-01"), "{}", prompts[0]);
+    assert!(prompts[0].contains("chatter 10"));
+    assert!(!prompts[0].contains("chatter 11"));
+    assert_eq!(h.orch.cursor(TEAM), ts(10));
+    // The rest is checked again; without a trigger it only waits as context.
+    assert!(h.orch.process_group_messages(TEAM).await);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.launcher.calls().len(), 1);
+}
+
+#[tokio::test]
 async fn trigger_from_disallowed_sender_is_ignored() {
     let allowlist = SenderAllowlist::from_json(serde_json::json!({
         "default": { "allow": "*", "mode": "trigger" },

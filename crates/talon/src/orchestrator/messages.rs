@@ -44,6 +44,10 @@ use super::run::RunOptions;
 /// token must have left before a follow-up is piped into it.
 const PIPE_TOKEN_HEADROOM: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// How many pending messages a trigger-gated lane searches for its trigger
+/// when the trigger is older than the prompt window.
+const TRIGGER_SCAN_LIMIT: usize = talon_db::DEFAULT_MESSAGE_LIMIT;
+
 /// What one poll of the message loop did (tests / debugging).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PollSummary {
@@ -116,19 +120,56 @@ impl Orchestrator {
     }
 
     fn pending_messages(&self, jid: &str) -> Vec<NewMessage> {
+        self.pending_messages_up_to(jid, self.config.max_messages_per_prompt)
+    }
+
+    /// The `limit` most recent messages after the lane's cursor.
+    fn pending_messages_up_to(&self, jid: &str, limit: usize) -> Vec<NewMessage> {
         let cursor = self.get_or_recover_cursor(jid);
-        match self.db.get_messages_since(
-            jid,
-            &cursor,
-            &self.config.assistant_name,
-            self.config.max_messages_per_prompt,
-        ) {
+        match self
+            .db
+            .get_messages_since(jid, &cursor, &self.config.assistant_name, limit)
+        {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!(chat_jid = jid, error = %e, "failed to load pending messages");
                 Vec::new()
             }
         }
+    }
+
+    /// The prompt of a trigger-gated lane, from `window` (its latest
+    /// pending messages): `window` itself when it holds an allowed trigger.
+    /// When more than `MAX_MESSAGES_PER_PROMPT` messages followed the
+    /// trigger, it is no longer in `window`; the prompt then starts at the
+    /// oldest pending trigger instead, and `true` says that messages after
+    /// it are still pending. `None`: no trigger is pending.
+    fn trigger_window(
+        &self,
+        jid: &str,
+        pattern: &regex::Regex,
+        allowlist: &talon_security::senders::SenderAllowlist,
+        window: Vec<NewMessage>,
+    ) -> Option<(Vec<NewMessage>, bool)> {
+        if window
+            .iter()
+            .any(|m| trigger_ok(jid, pattern, allowlist, m))
+        {
+            return Some((window, false));
+        }
+        let all = self.pending_messages_up_to(jid, TRIGGER_SCAN_LIMIT);
+        let first = all
+            .iter()
+            .position(|m| trigger_ok(jid, pattern, allowlist, m))?;
+        let end = all
+            .len()
+            .min(first.saturating_add(self.config.max_messages_per_prompt.max(1)));
+        tracing::info!(
+            chat_jid = jid,
+            later = all.len() - first - 1,
+            "trigger is older than the prompt window; answering it first"
+        );
+        Some((all[first..end].to_vec(), end < all.len()))
     }
 
     /// Process all pending messages of a lane.
@@ -144,7 +185,7 @@ impl Orchestrator {
         };
         let is_main = group.is_main;
 
-        let missed = self.pending_messages(chat_jid);
+        let mut missed = self.pending_messages(chat_jid);
         if missed.is_empty() {
             return true;
         }
@@ -176,13 +217,15 @@ impl Orchestrator {
         }
 
         // --- Trigger gating for non-main lanes ---
+        let mut more_pending = false;
         if group.needs_trigger() {
             let allowlist = self.allowlist.current();
-            if !missed
-                .iter()
-                .any(|m| trigger_ok(chat_jid, &pattern, &allowlist, m))
-            {
-                return true;
+            match self.trigger_window(chat_jid, &pattern, &allowlist, missed) {
+                Some((window, more)) => {
+                    missed = window;
+                    more_pending = more;
+                }
+                None => return true,
             }
         }
 
@@ -225,6 +268,10 @@ impl Orchestrator {
             self.set_cursor(chat_jid, &previous_cursor);
             tracing::warn!(group = %group.name, "Agent error, rolled back message cursor for retry");
             return false;
+        }
+        if more_pending {
+            // Messages after the answered trigger: the lane runs again.
+            self.queue.enqueue_message_check(chat_jid);
         }
         true
     }
@@ -361,18 +408,23 @@ impl Orchestrator {
 
         // Non-main lanes only act on (allowed) trigger messages; others
         // accumulate and are pulled in as context later.
-        if group.needs_trigger() {
-            let allowlist = self.allowlist.current();
-            if !lane_messages
+        let allowlist = self.allowlist.current();
+        if group.needs_trigger()
+            && !lane_messages
                 .iter()
                 .any(|m| trigger_ok(jid, &pattern, &allowlist, m))
-            {
-                return LaneRoute::Skipped;
-            }
+        {
+            return LaneRoute::Skipped;
         }
 
         // Everything since the lane cursor, so accumulated context goes too.
-        let all_pending = self.pending_messages(jid);
+        let mut more_pending = false;
+        let mut all_pending = self.pending_messages(jid);
+        if group.needs_trigger() && !all_pending.is_empty() {
+            (all_pending, more_pending) = self
+                .trigger_window(jid, &pattern, &allowlist, all_pending)
+                .unwrap_or_default();
+        }
         let to_send: &[NewMessage] = if all_pending.is_empty() {
             lane_messages
         } else {
@@ -391,6 +443,10 @@ impl Orchestrator {
                     "Piped messages to active container"
                 );
                 self.set_cursor(jid, &last.timestamp);
+                if more_pending {
+                    // The rest gets its own run once this container is done.
+                    self.queue.enqueue_message_check(jid);
+                }
                 // Typing indicator while the container works on it.
                 let channel = Arc::clone(channel);
                 let jid_owned = jid.to_string();
