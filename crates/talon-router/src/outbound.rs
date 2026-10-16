@@ -12,29 +12,46 @@ const INTERNAL_OPEN: &str = "<internal>";
 const INTERNAL_CLOSE: &str = "</internal>";
 
 /// Remove every `<internal>…</internal>` block (the agent's private notes)
-/// and trim the result.
+/// and trim the result. Blocks may nest: everything up to the matching
+/// close is hidden, not only up to the first `</internal>`.
 ///
 /// Hardening: an *unterminated* `<internal>`
 /// hides everything after it instead of leaking the agent's private notes
-/// to the chat.
+/// to the chat. A closing tag outside any block is kept as text.
 pub fn strip_internal_tags(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
     let mut rest = text;
     loop {
-        match rest.find(INTERNAL_OPEN) {
-            Some(start) => {
-                out.push_str(&rest[..start]);
-                let after = &rest[start + INTERNAL_OPEN.len()..];
-                match after.find(INTERNAL_CLOSE) {
-                    Some(end) => rest = &after[end + INTERNAL_CLOSE.len()..],
-                    None => break,
+        let open = rest.find(INTERNAL_OPEN);
+        let close = rest.find(INTERNAL_CLOSE);
+        let (at, is_open) = match (open, close) {
+            (Some(o), Some(c)) if o < c => (o, true),
+            (_, Some(c)) => (c, false),
+            (Some(o), None) => (o, true),
+            (None, None) => {
+                if depth == 0 {
+                    out.push_str(rest);
                 }
-            }
-            None => {
-                out.push_str(rest);
                 break;
             }
+        };
+        let tag_len = if is_open {
+            INTERNAL_OPEN.len()
+        } else {
+            INTERNAL_CLOSE.len()
+        };
+        if depth == 0 {
+            out.push_str(&rest[..at]);
         }
+        if is_open {
+            depth += 1;
+        } else if depth > 0 {
+            depth -= 1;
+        } else {
+            out.push_str(INTERNAL_CLOSE);
+        }
+        rest = &rest[at + tag_len..];
     }
     out.trim().to_string()
 }
@@ -142,6 +159,15 @@ mod tests {
             strip_internal_tags("visible <internal>private notes"),
             "visible"
         );
+    }
+
+    #[test]
+    fn nested_internal_blocks_stay_hidden() {
+        assert_eq!(
+            strip_internal_tags("a <internal>x <internal>y</internal> still private</internal> b"),
+            "a  b"
+        );
+        assert_eq!(strip_internal_tags("<internal><internal>z</internal>"), "");
     }
 
     #[test]

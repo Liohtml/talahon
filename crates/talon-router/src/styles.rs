@@ -522,6 +522,15 @@ pub fn parse_signal_styles(raw: &str) -> SignalText {
             }
         }
 
+        // Horizontal rule --- / *** / ___ (before emphasis: a `***` line
+        // would otherwise open bold that closes in the next line).
+        if i == 0 || s[i - 1] == '\n' {
+            if let Some(len) = horizontal_rule_len(&s, i) {
+                i += len;
+                continue;
+            }
+        }
+
         // Bold **text**
         if c == '*' && at(i + 1) == Some('*') && at(i + 2).is_some_and(|x| x != ' ') {
             if let Some(end) = find_seq(&s, &['*', '*'], i + 2) {
@@ -598,14 +607,6 @@ pub fn parse_signal_styles(raw: &str) -> SignalText {
                         continue;
                     }
                 }
-            }
-        }
-
-        // Horizontal rule --- / *** / ___
-        if i == 0 || s[i - 1] == '\n' {
-            if let Some(len) = horizontal_rule_len(&s, i) {
-                i += len;
-                continue;
             }
         }
 
@@ -718,6 +719,18 @@ mod tests {
             parse_text_styles("(**bold**) and *it*.", Telegram),
             "(*bold*) and _it_."
         );
+    }
+
+    #[test]
+    fn a_star_rule_before_bold_is_removed_in_plain_text() {
+        assert_eq!(markdown_to_plain("***\n**bold** text"), "bold text");
+        assert_eq!(
+            markdown_to_plain("text\n***\n**Summary**: ok"),
+            "text\nSummary: ok"
+        );
+        let signal = parse_signal_styles("***\n**bold**");
+        assert_eq!(signal.text, "bold");
+        assert_eq!(signal.text_style, vec![style(SignalStyle::Bold, 0, 4)]);
     }
 
     #[test]
