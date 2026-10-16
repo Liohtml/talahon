@@ -2,6 +2,10 @@
 
 All notable changes to Talon are documented in this file.
 
+## [2.0.4] - 2026-10-16
+
+- fix: message flow, Telegram and scheduling bugs carried over from the old version (#11)
+
 ## [2.0.3] - 2026-10-16
 
 - fix(http): CoPilot workflow and HTTP API bugs carried over from the old version (#10)

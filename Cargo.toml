@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2.0.3"
+version = "2.0.4"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -18,22 +18,22 @@ keywords = ["soc", "security", "siem", "llm", "agent"]
 # Published on crates.io as `talahon-*` (the `talon-*` names are taken); the
 # dependency keys keep the Rust crate names `talon_*`. Release automation
 # (scripts/release.py) keeps `version` equal to `workspace.package.version`.
-talon-core = { package = "talahon-core", path = "crates/talon-core", version = "2.0.3" }
-talon-db = { package = "talahon-db", path = "crates/talon-db", version = "2.0.3" }
-talon-llm = { package = "talahon-llm", path = "crates/talon-llm", version = "2.0.3" }
-talon-mcp = { package = "talahon-mcp", path = "crates/talon-mcp", version = "2.0.3" }
-talon-tools = { package = "talahon-tools", path = "crates/talon-tools", version = "2.0.3" }
-talon-intel = { package = "talahon-intel", path = "crates/talon-intel", version = "2.0.3" }
-talon-anon = { package = "talahon-anon", path = "crates/talon-anon", version = "2.0.3" }
-talon-security = { package = "talahon-security", path = "crates/talon-security", version = "2.0.3" }
-talon-container = { package = "talahon-container", path = "crates/talon-container", version = "2.0.3" }
-talon-scheduler = { package = "talahon-scheduler", path = "crates/talon-scheduler", version = "2.0.3" }
-talon-ipc = { package = "talahon-ipc", path = "crates/talon-ipc", version = "2.0.3" }
-talon-router = { package = "talahon-router", path = "crates/talon-router", version = "2.0.3" }
-talon-channels = { package = "talahon-channels", path = "crates/talon-channels", version = "2.0.3" }
-talon-http = { package = "talahon-http", path = "crates/talon-http", version = "2.0.3" }
-talon-setup = { package = "talahon-setup", path = "crates/talon-setup", version = "2.0.3" }
-talon-net = { package = "talahon-net", path = "crates/talon-net", version = "2.0.3" }
+talon-core = { package = "talahon-core", path = "crates/talon-core", version = "2.0.4" }
+talon-db = { package = "talahon-db", path = "crates/talon-db", version = "2.0.4" }
+talon-llm = { package = "talahon-llm", path = "crates/talon-llm", version = "2.0.4" }
+talon-mcp = { package = "talahon-mcp", path = "crates/talon-mcp", version = "2.0.4" }
+talon-tools = { package = "talahon-tools", path = "crates/talon-tools", version = "2.0.4" }
+talon-intel = { package = "talahon-intel", path = "crates/talon-intel", version = "2.0.4" }
+talon-anon = { package = "talahon-anon", path = "crates/talon-anon", version = "2.0.4" }
+talon-security = { package = "talahon-security", path = "crates/talon-security", version = "2.0.4" }
+talon-container = { package = "talahon-container", path = "crates/talon-container", version = "2.0.4" }
+talon-scheduler = { package = "talahon-scheduler", path = "crates/talon-scheduler", version = "2.0.4" }
+talon-ipc = { package = "talahon-ipc", path = "crates/talon-ipc", version = "2.0.4" }
+talon-router = { package = "talahon-router", path = "crates/talon-router", version = "2.0.4" }
+talon-channels = { package = "talahon-channels", path = "crates/talon-channels", version = "2.0.4" }
+talon-http = { package = "talahon-http", path = "crates/talon-http", version = "2.0.4" }
+talon-setup = { package = "talahon-setup", path = "crates/talon-setup", version = "2.0.4" }
+talon-net = { package = "talahon-net", path = "crates/talon-net", version = "2.0.4" }
 
 # --- async runtime ---
 tokio = { version = "1.47", features = ["full"] }
