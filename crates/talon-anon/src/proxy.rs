@@ -389,7 +389,19 @@ impl Router {
     fn track(&self, id: Value, method: String, hints: FieldHints) -> Result<(), Value> {
         let mut p = self.pending();
         let key = id_key(&id);
-        if !p.contains_key(&key) && p.len() >= self.opts.max_pending {
+        if p.contains_key(&key) {
+            // JSON-RPC ids must be unique among requests in flight. Reusing
+            // one would pair the earlier request's response with the later
+            // request's method, so a `tools/call` result could pass through
+            // un-anonymized as a passthrough method's.
+            tracing::warn!("request id already in flight; rejecting");
+            return Err(error_response(
+                id,
+                INVALID_REQUEST,
+                "request id already in flight",
+            ));
+        }
+        if p.len() >= self.opts.max_pending {
             tracing::warn!(pending = p.len(), "too many requests in flight; rejecting");
             return Err(error_response(
                 id,

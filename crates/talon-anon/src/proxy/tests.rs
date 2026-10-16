@@ -304,6 +304,30 @@ fn cancellation_pending_limits_and_draining() {
 }
 
 #[test]
+fn a_reused_request_id_cannot_unmask_a_tool_result() {
+    let r = router();
+    let first = r.handle_client_line(&call(1, "search", json!({})));
+    assert!(first.upstream.is_some());
+    // Same id again, as a passthrough method: rejected, not forwarded.
+    let reused = r.handle_client_line(&line(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})));
+    assert!(reused.upstream.is_none());
+    let e = parse(&reused.client.unwrap());
+    assert_eq!(
+        (e["id"].clone(), e["error"]["code"].clone()),
+        (json!(1), json!(INVALID_REQUEST))
+    );
+    assert_eq!(r.pending_count(), 1);
+    // The tool result is still anonymized as a `tools/call` response.
+    let doc = json!({"agent_name": "WS-FIN-01", "data_srcip": "10.0.0.1"}).to_string();
+    let resp = parse(&r.handle_upstream_line(&text_result(1, &doc)).unwrap());
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        !text.contains("WS-FIN-01") && !text.contains("10.0.0.1"),
+        "{text}"
+    );
+}
+
+#[test]
 fn aggregation_hints_flow_from_request_to_response() {
     let r = router();
     let args = json!({"index": "wazuh-*", "body": {"aggs": {"by_host": {"terms": {"field": "agent.name"}}}}});
