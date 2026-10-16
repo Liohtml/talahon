@@ -5,6 +5,7 @@
 //! All methods are blocking (SQLite); the server calls them through
 //! [`run_blocking`] so they never stall the async runtime.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use talon_core::types::{ScheduledTask, SessionRow};
@@ -31,6 +32,14 @@ pub trait HttpStore: Send + Sync {
     fn list_investigations(&self, limit: usize) -> Result<Vec<Investigation>>;
     /// Latest investigation for an alert id.
     fn latest_investigation_for_alert(&self, alert_id: &str) -> Result<Option<Investigation>>;
+    /// Number of investigations per status (`queued`, `running`, ...).
+    fn investigation_status_counts(&self) -> Result<BTreeMap<String, u64>> {
+        let mut counts = BTreeMap::new();
+        for inv in self.list_investigations(usize::MAX)? {
+            *counts.entry(inv.status).or_insert(0) += 1;
+        }
+        Ok(counts)
+    }
 }
 
 impl HttpStore for Db {
@@ -60,6 +69,9 @@ impl HttpStore for Db {
     }
     fn latest_investigation_for_alert(&self, alert_id: &str) -> Result<Option<Investigation>> {
         Db::latest_investigation_for_alert(self, alert_id)
+    }
+    fn investigation_status_counts(&self) -> Result<BTreeMap<String, u64>> {
+        Db::investigation_status_counts(self)
     }
 }
 

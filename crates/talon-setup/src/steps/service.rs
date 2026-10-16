@@ -405,11 +405,13 @@ pub fn nohup_wrapper(spec: &ServiceSpec) -> anyhow::Result<String> {
         String::new(),
         format!("cd {root}"),
         format!("PID_FILE={pid}"),
+        format!("BIN={bin}"),
         String::new(),
-        "# Stop an existing instance".into(),
+        "# Stop an existing instance — only if the recorded PID still is Talon:".into(),
+        "# after a reboot or crash the number may belong to another process.".into(),
         "if [ -f \"$PID_FILE\" ]; then".into(),
         "  OLD_PID=$(cat \"$PID_FILE\" 2>/dev/null || echo \"\")".into(),
-        "  if [ -n \"$OLD_PID\" ] && kill -0 \"$OLD_PID\" 2>/dev/null; then".into(),
+        "  if [ -n \"$OLD_PID\" ] && ps -p \"$OLD_PID\" -o args= 2>/dev/null | grep -qF -- \"$BIN run\"; then".into(),
         "    echo \"Stopping existing Talon (PID $OLD_PID)...\"".into(),
         "    kill \"$OLD_PID\" 2>/dev/null || true".into(),
         "    sleep 2".into(),
@@ -422,10 +424,17 @@ pub fn nohup_wrapper(spec: &ServiceSpec) -> anyhow::Result<String> {
         format!(
             "ulimit -n {MAX_OPEN_FILES} 2>/dev/null || ulimit -n \"$(ulimit -Hn)\" 2>/dev/null || true"
         ),
-        format!("nohup {bin} run >> {out_log} 2>> {err_log} &"),
+        format!("nohup \"$BIN\" run >> {out_log} 2>> {err_log} &"),
         String::new(),
-        "echo $! > \"$PID_FILE\"".into(),
-        "echo \"Talon started (PID $!)\"".into(),
+        "NEW_PID=$!".into(),
+        "echo \"$NEW_PID\" > \"$PID_FILE\"".into(),
+        "sleep 2".into(),
+        "if ! kill -0 \"$NEW_PID\" 2>/dev/null; then".into(),
+        format!("  echo \"Talon exited right after starting; see \"{err_log} >&2"),
+        "  rm -f \"$PID_FILE\"".into(),
+        "  exit 1".into(),
+        "fi".into(),
+        "echo \"Talon started (PID $NEW_PID)\"".into(),
         format!("echo \"Logs: tail -f \"{out_log}"),
     ];
     let mut script = lines.join("\n");
@@ -547,13 +556,27 @@ async fn setup_launchd(ctx: &SetupContext) -> anyhow::Result<StepOutcome> {
             .lines()
             .any(|l| l.split_whitespace().nth(2) == Some(LAUNCHD_LABEL));
 
-    Ok(StepOutcome::ok(
+    Ok(started(
         base_block(ctx, "launchd")
             .field("PLIST_PATH", plist_path.display())
-            .field("SERVICE_LOADED", loaded)
-            .field("STATUS", "success")
-            .field("LOG", SETUP_LOG),
+            .field("SERVICE_LOADED", loaded),
+        loaded,
     ))
+}
+
+/// The step's result once the service definition is written: success only
+/// when the service actually runs.
+fn started(mut block: StatusBlock, running: bool) -> StepOutcome {
+    if running {
+        block.set("STATUS", "success");
+        block.set("LOG", SETUP_LOG);
+        StepOutcome::ok(block)
+    } else {
+        block.set("STATUS", "failed");
+        block.set("ERROR", "service_not_running");
+        block.set("LOG", SETUP_LOG);
+        StepOutcome::with_code(block, 1)
+    }
 }
 
 /// systemd's own exec-setup failure codes (`EXIT_CHDIR` = 200 …
@@ -687,9 +710,7 @@ async fn setup_systemd(
         block.set("DOCKER_GROUP_STALE", true);
     }
     block.set("LINGER_ENABLED", linger);
-    block.set("STATUS", "success");
-    block.set("LOG", SETUP_LOG);
-    Ok(StepOutcome::ok(block))
+    Ok(started(block, active))
 }
 
 fn setup_nohup(ctx: &SetupContext, fallback: &str) -> anyhow::Result<StepOutcome> {
@@ -893,11 +914,16 @@ mod tests {
     fn wrapper_script() {
         let script = nohup_wrapper(&spec(Hardening::None, false)).unwrap();
         assert!(script.starts_with("#!/bin/bash\n"));
-        assert!(
-            script
-                .contains("nohup '/opt/talon/bin/talon' run >> '/home/user/talon/logs/talon.log'")
-        );
+        assert!(script.contains("BIN='/opt/talon/bin/talon'"));
+        assert!(script.contains("nohup \"$BIN\" run >> '/home/user/talon/logs/talon.log'"));
         assert!(script.contains("talon.pid"));
+        // A recorded PID is only stopped while it still is Talon.
+        assert!(
+            script.contains("ps -p \"$OLD_PID\" -o args= 2>/dev/null | grep -qF -- \"$BIN run\"")
+        );
+        assert!(!script.contains("kill -0 \"$OLD_PID\""));
+        // An instance that dies at once is reported, not announced as started.
+        assert!(script.contains("if ! kill -0 \"$NEW_PID\""));
         assert!(script.contains("set -euo pipefail"));
         // Raised before the service starts, failure-tolerant under `set -e`.
         let ulimit = script
@@ -1039,6 +1065,10 @@ mod tests {
         assert_eq!(b.get("HARDENING"), Some("basic"));
         assert_eq!(b.get("SERVICE_LOADED"), Some("false"));
         assert_eq!(b.get("DOCKER_GROUP_STALE"), Some("true"));
+        // A service that does not run is no success.
+        assert_eq!(b.get("STATUS"), Some("failed"));
+        assert_eq!(b.get("ERROR"), Some("service_not_running"));
+        assert_eq!(out.exit_code, 1);
         let unit = std::fs::read_to_string(ctx.home_dir.join(".config/systemd/user/talon.service"))
             .unwrap();
         assert!(!unit.contains("ProtectSystem"));

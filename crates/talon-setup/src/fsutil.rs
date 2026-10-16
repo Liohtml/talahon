@@ -132,10 +132,14 @@ pub fn upsert_env_line(path: &Path, key: &str, raw_value: &str) -> io::Result<()
             let mut replaced = false;
             let mut lines: Vec<String> = Vec::new();
             for line in text.lines() {
-                let t = line.trim_start();
-                if !replaced && (t.starts_with(&prefix) || t.starts_with(&export_prefix)) {
-                    lines.push(new_line.clone());
-                    replaced = true;
+                // A byte-order mark may precede the first key.
+                let t = line.trim_start_matches('\u{feff}').trim_start();
+                if t.starts_with(&prefix) || t.starts_with(&export_prefix) {
+                    // Every earlier definition goes: the last one would win.
+                    if !replaced {
+                        lines.push(new_line.clone());
+                        replaced = true;
+                    }
                 } else {
                     lines.push(line.to_string());
                 }
@@ -222,6 +226,19 @@ mod tests {
             std::fs::read_to_string(&p).unwrap(),
             "SOME_KEY=value\nASSISTANT_NAME=\"Nova\"\nOTHER=test\n"
         );
+    }
+
+    #[test]
+    fn upsert_replaces_every_definition_even_after_a_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(".env");
+        std::fs::write(&p, "\u{feff}TZ=UTC\nA=1\nTZ=Asia/Tokyo\n").unwrap();
+        upsert_env_line(&p, "TZ", "Europe/Berlin").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "TZ=Europe/Berlin\nA=1\n"
+        );
+        assert_eq!(read_env_value(&p, "TZ").as_deref(), Some("Europe/Berlin"));
     }
 
     #[test]

@@ -78,11 +78,8 @@ impl TalonConfig {
             .unwrap_or_else(|_| "/root".into());
         let config_dir = home.join(".config").join("talon");
 
-        let tz_name = [env.get("TZ"), Some("UTC".to_string())]
-            .into_iter()
-            .flatten()
-            .find(|tz| is_valid_timezone(tz))
-            .unwrap_or_else(|| "UTC".into());
+        let process_tz = std::env::var("TZ").ok();
+        let tz_name = resolve_timezone(env.file_value("TZ"), process_tz.as_deref());
 
         let ms = |key: &str, default: u64, min: u64| {
             Duration::from_millis(env.get_u64(key, default, min))
@@ -132,9 +129,42 @@ impl TalonConfig {
     }
 }
 
+/// The timezone Talon runs in: `TZ` from `.env` (what `talon setup
+/// timezone` writes), else the process's `TZ`, else UTC — the first one
+/// that is a valid IANA name, so an invalid value never hides a valid one.
+/// Same precedence as the setup step.
+pub fn resolve_timezone(env_file: Option<&str>, process: Option<&str>) -> String {
+    [env_file, process]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|tz| is_valid_timezone(tz))
+        .unwrap_or("UTC")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timezone_precedence_matches_setup() {
+        assert_eq!(
+            resolve_timezone(Some("Europe/Berlin"), Some("UTC")),
+            "Europe/Berlin"
+        );
+        // An invalid value never hides a valid one.
+        assert_eq!(
+            resolve_timezone(Some("Europe/Berlin"), Some("IST-2")),
+            "Europe/Berlin"
+        );
+        assert_eq!(
+            resolve_timezone(Some("Mars/Base"), Some("Asia/Tokyo")),
+            "Asia/Tokyo"
+        );
+        assert_eq!(resolve_timezone(None, Some("bogus")), "UTC");
+        assert_eq!(resolve_timezone(None, None), "UTC");
+    }
 
     #[test]
     fn defaults_are_sane() {

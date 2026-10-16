@@ -1159,6 +1159,7 @@ async fn status_reports_lanes_sessions_and_tasks() {
     assert!(v["uptime_seconds"].is_u64());
     assert_eq!(v["pending_queue_depth"], 1);
     assert_eq!(v["active_investigations"], 0);
+    assert_eq!(v["queued_investigations"], 0);
     let sessions = v["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 3);
     assert_eq!(sessions[0]["lane"], "copilot");
@@ -1176,6 +1177,76 @@ async fn status_reports_lanes_sessions_and_tasks() {
     assert_eq!(tasks[0]["status"], "paused");
     assert_eq!(tasks[0]["schedule_type"], "cron");
     assert_eq!(v["queue"]["max_containers"], 5);
+}
+
+#[tokio::test]
+async fn status_counts_investigations_and_waiting_requests_on_every_lane() {
+    let h = connected_harness().await;
+    {
+        let mut invs = h.store.investigations.lock().unwrap();
+        for (id, status) in [
+            ("a", "running"),
+            ("b", "queued"),
+            ("c", "queued"),
+            ("d", "completed"),
+        ] {
+            invs.push(talon_db::Investigation {
+                id: format!("copilot-inv-{id}"),
+                alert_id: id.into(),
+                customer_code: "acme".into(),
+                triggered_by: "webhook".into(),
+                status: status.into(),
+                template: None,
+                created_at: "2026-10-14T00:00:00.000Z".into(),
+                updated_at: "2026-10-14T00:00:00.000Z".into(),
+                verdict: None,
+                error: None,
+            });
+        }
+    }
+    // A chat turn on a user lane is no investigation.
+    let lane = lane_for(&h, json!("7"), None).await;
+    let _first = h
+        .send(authed(
+            "POST",
+            "/message",
+            Some(r#"{"message":"one","user_id":"7"}"#),
+        ))
+        .await;
+    let _second = h
+        .send(authed(
+            "POST",
+            "/message",
+            Some(r#"{"message":"two","user_id":"7"}"#),
+        ))
+        .await;
+    h.state.0.streams.turn_started(&lane);
+    let v = body_json(h.send(authed("GET", "/status", None)).await).await;
+    assert_eq!(v["active_investigations"], 1);
+    assert_eq!(v["queued_investigations"], 2);
+    // The second request waits on the user's lane.
+    assert_eq!(v["pending_queue_depth"], 1);
+}
+
+#[tokio::test]
+async fn status_lists_only_tasks_that_still_run() {
+    let h = connected_harness().await;
+    h.state.seed_digest_task().await.unwrap();
+    {
+        let mut tasks = h.store.tasks.lock().unwrap();
+        let mut done = tasks[0].clone();
+        done.id = "copilot-inv-old".into();
+        done.status = TaskStatus::Completed;
+        tasks.push(done);
+    }
+    let v = body_json(h.send(authed("GET", "/status", None)).await).await;
+    let ids: Vec<&str> = v["scheduled_tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![DIGEST_TASK_ID]);
 }
 
 #[tokio::test]
