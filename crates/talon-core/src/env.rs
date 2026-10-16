@@ -68,10 +68,12 @@ impl EnvFile {
     }
 }
 
-/// Parse `KEY=VALUE` lines. Supports comments, blank lines, `export KEY=...`
-/// and single/double quoted values. Empty values are dropped.
+/// Parse `KEY=VALUE` lines. Supports comments, blank lines, `export KEY=...`,
+/// single/double quoted values and inline comments (` # …` after an unquoted
+/// value, anything after a quoted one). Empty values are dropped.
 pub fn parse_env(content: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -85,18 +87,35 @@ pub fn parse_env(content: &str) -> HashMap<String, String> {
         if key.is_empty() {
             continue;
         }
-        let mut value = trimmed[eq + 1..].trim();
-        if value.len() >= 2
-            && ((value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\'')))
-        {
-            value = &value[1..value.len() - 1];
-        }
+        let value = value_of(&trimmed[eq + 1..]);
         if !value.is_empty() {
             out.insert(key.to_string(), value.to_string());
         }
     }
     out
+}
+
+/// The value of a `KEY=VALUE` line from the text after `=`: a quoted value
+/// without its quotes (text after the closing quote, e.g. a comment, is
+/// ignored); an unquoted value up to a `#` that follows whitespace, as in
+/// `MAX_CONTEXT=131072  # tokens` (`a#b` keeps its `#`).
+fn value_of(raw: &str) -> &str {
+    let value = raw.trim();
+    if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+        if value.len() >= 2 && value.ends_with(quote) {
+            return &value[1..value.len() - 1];
+        }
+        return match value[1..].find(quote) {
+            Some(end) => &value[1..=end],
+            // Unterminated quote: keep the text as written.
+            None => value,
+        };
+    }
+    let comment = raw
+        .char_indices()
+        .find(|&(i, c)| c == '#' && raw[..i].ends_with(char::is_whitespace))
+        .map_or(raw.len(), |(i, _)| i);
+    raw[..comment].trim()
 }
 
 #[cfg(test)]
@@ -113,5 +132,37 @@ mod tests {
         assert_eq!(env.file_value("C"), Some("x"));
         assert_eq!(env.file_value("EMPTY"), None);
         assert_eq!(env.file_value("D"), Some("spaced"));
+    }
+
+    #[test]
+    fn inline_comments_are_not_part_of_the_value() {
+        // The provider guide's example uses inline comments.
+        let env = EnvFile::from_str_content(concat!(
+            "TALON_VLLM_FAST_MODEL=Qwen/Qwen3-8B        # optional: compaction\n",
+            "TALON_VLLM_MAX_CONTEXT=131072\t# tokens\n",
+            "REQUIRED=true # strict\n",
+            "QUOTED=\"a # b\"   # comment\n",
+            "SINGLE='x y' # c\n",
+            "HASH=abc#123\n",
+            "URL=http://h/#frag\n",
+            "ONLY= # nothing here\n",
+        ));
+        assert_eq!(
+            env.file_value("TALON_VLLM_FAST_MODEL"),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(env.file_value("TALON_VLLM_MAX_CONTEXT"), Some("131072"));
+        assert_eq!(env.file_value("REQUIRED"), Some("true"));
+        assert_eq!(env.file_value("QUOTED"), Some("a # b"));
+        assert_eq!(env.file_value("SINGLE"), Some("x y"));
+        assert_eq!(env.file_value("HASH"), Some("abc#123"));
+        assert_eq!(env.file_value("URL"), Some("http://h/#frag"));
+        assert_eq!(env.file_value("ONLY"), None);
+    }
+
+    #[test]
+    fn byte_order_mark_does_not_hide_the_first_key() {
+        let env = EnvFile::from_str_content("\u{feff}TZ=Europe/Berlin\nA=1\n");
+        assert_eq!(env.file_value("TZ"), Some("Europe/Berlin"));
     }
 }
