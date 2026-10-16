@@ -293,6 +293,14 @@ impl Orchestrator {
         let session_epoch = self.session_epoch(group.session_key());
 
         self.write_snapshots(group, chat_jid);
+        // Follow-ups an earlier container left unread are sent again from
+        // the message store (the lane cursor never moved past them), and a
+        // stale `_close` would end this container after its first turn.
+        match talon_scheduler::ipc_input::clear_inbox(&self.config.data_dir, group.ipc_key()) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(group = %group.name, removed = n, "cleared leftover IPC input"),
+            Err(e) => tracing::warn!(group = %group.name, error = %e, "cannot clear the IPC inbox"),
+        }
 
         let ttl = self
             .launcher

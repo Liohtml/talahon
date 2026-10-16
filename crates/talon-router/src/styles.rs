@@ -139,7 +139,29 @@ fn transform_segment(text: &str, slack: bool) -> String {
     map_lines(&t, strip_rule_line)
 }
 
-/// `(?<!\*)\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?!\*)` -> `_$1_`
+/// Characters after which an emphasis marker may open (besides the start
+/// and whitespace).
+const EMPHASIS_OPENERS: &[char] = &['(', '[', '{', '"', '\'', '«', '“', '‘'];
+/// Characters before which an emphasis marker may close (besides the end
+/// and whitespace).
+const EMPHASIS_CLOSERS: &[char] = &[
+    '.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'', '»', '”', '’',
+];
+
+/// A marker at `i` may open emphasis: it starts a word. `2*3*4` and
+/// `C:\Users\*\…` keep their stars.
+fn opens_at(c: &[char], i: usize) -> bool {
+    i == 0 || c[i - 1].is_whitespace() || EMPHASIS_OPENERS.contains(&c[i - 1])
+}
+
+/// A marker ending just before `k` may close emphasis: it ends a word.
+fn closes_before(c: &[char], k: usize) -> bool {
+    c.get(k)
+        .is_none_or(|&a| a.is_whitespace() || EMPHASIS_CLOSERS.contains(&a))
+}
+
+/// `*italic*` -> `_italic_` when the stars start and end a word (single
+/// line, no space inside the markers).
 fn convert_italic(s: &str) -> String {
     let c: Vec<char> = s.chars().collect();
     let n = c.len();
@@ -147,7 +169,7 @@ fn convert_italic(s: &str) -> String {
     let mut i = 0;
     while i < n {
         if c[i] == '*'
-            && (i == 0 || c[i - 1] != '*')
+            && opens_at(&c, i)
             && i + 1 < n
             && !c[i + 1].is_whitespace()
             && c[i + 1] != '*'
@@ -156,8 +178,7 @@ fn convert_italic(s: &str) -> String {
             while j < n && c[j] != '*' && c[j] != '\n' {
                 j += 1;
             }
-            if j < n && c[j] == '*' && !c[j - 1].is_whitespace() && (j + 1 >= n || c[j + 1] != '*')
-            {
+            if j < n && c[j] == '*' && !c[j - 1].is_whitespace() && closes_before(&c, j + 1) {
                 out.push('_');
                 out.extend(&c[i + 1..j]);
                 out.push('_');
@@ -171,7 +192,7 @@ fn convert_italic(s: &str) -> String {
     out
 }
 
-/// `\*\*(?=[^\s*])([^*]+?)(?<=[^\s*])\*\*` -> `*$1*`
+/// `**bold**` -> `*bold*` when the markers start and end a word.
 fn convert_bold(s: &str) -> String {
     let c: Vec<char> = s.chars().collect();
     let n = c.len();
@@ -179,6 +200,7 @@ fn convert_bold(s: &str) -> String {
     let mut i = 0;
     while i < n {
         if c[i] == '*'
+            && opens_at(&c, i)
             && i + 2 < n
             && c[i + 1] == '*'
             && !c[i + 2].is_whitespace()
@@ -188,7 +210,8 @@ fn convert_bold(s: &str) -> String {
             while j < n && c[j] != '*' {
                 j += 1;
             }
-            if j + 1 < n && c[j + 1] == '*' && !c[j - 1].is_whitespace() {
+            if j + 1 < n && c[j + 1] == '*' && !c[j - 1].is_whitespace() && closes_before(&c, j + 2)
+            {
                 out.push('*');
                 out.extend(&c[i + 2..j]);
                 out.push('*');
@@ -678,6 +701,22 @@ mod tests {
         assert_eq!(
             parse_text_styles("**bold** *italic*", WhatsApp),
             "*bold* _italic_"
+        );
+    }
+
+    #[test]
+    fn stars_inside_words_are_kept() {
+        for text in [
+            "2*3*4",
+            r"C:\Users\*\AppData\Local\*.tmp",
+            "glob a*b*c and x**y**z",
+        ] {
+            assert_eq!(parse_text_styles(text, Telegram), text);
+            assert_eq!(parse_text_styles(text, WhatsApp), text);
+        }
+        assert_eq!(
+            parse_text_styles("(**bold**) and *it*.", Telegram),
+            "(*bold*) and _it_."
         );
     }
 

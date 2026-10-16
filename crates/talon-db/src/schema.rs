@@ -226,11 +226,14 @@ fn ts_migrations(tx: &Transaction<'_>, opts: &DbOptions) -> Result<()> {
     )?;
     add_column_if_missing(tx, &col("scheduled_tasks", "script", "TEXT"))?;
 
-    // Messages: bot flag, backfilled from the content-prefix convention.
+    // Messages: bot flag, backfilled from the content-prefix convention
+    // (the assistant wrote from the user's own account, prefixed with its
+    // name; other users' messages are never bot messages).
     if add_column_if_missing(tx, &col("messages", "is_bot_message", "INTEGER DEFAULT 0"))? {
         let n = tx
             .execute(
-                r"UPDATE messages SET is_bot_message = 1 WHERE content LIKE ?1 ESCAPE '\'",
+                r"UPDATE messages SET is_bot_message = 1
+                  WHERE is_from_me = 1 AND content LIKE ?1 ESCAPE '\'",
                 [bot_prefix_pattern(&opts.assistant_name)],
             )
             .db()?;

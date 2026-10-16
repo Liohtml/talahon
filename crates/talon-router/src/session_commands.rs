@@ -242,7 +242,7 @@ pub async fn handle_session_command(
         // consume the command (the cursor is a high-water mark, so other
         // messages in the batch are consumed too — acceptable edge case).
         if deps.can_sender_interact(cmd_msg) {
-            deps.send_message(DENIED_MESSAGE).await?;
+            reply(deps, DENIED_MESSAGE).await?;
         }
         deps.advance_cursor(&cmd_msg.timestamp);
         return Ok(SessionCommandOutcome::Handled { success: true });
@@ -256,7 +256,7 @@ pub async fn handle_session_command(
     if command == SessionCommand::New {
         deps.clear_session();
         deps.advance_cursor(&cmd_msg.timestamp);
-        deps.send_message(NEW_SESSION_MESSAGE).await?;
+        reply(deps, NEW_SESSION_MESSAGE).await?;
         return Ok(SessionCommandOutcome::Handled { success: true });
     }
 
@@ -296,14 +296,28 @@ pub async fn handle_session_command(
 
     // Messages after the command remain pending for the next poll.
     deps.advance_cursor(&cmd_msg.timestamp);
-    deps.set_typing(false).await;
-
-    if status == OutputStatus::Error || handler.had_error {
+    // The failure notice belongs to the command's turn (on the HTTP channel
+    // the turn's end closes the caller's stream).
+    let notice = if status == OutputStatus::Error || handler.had_error {
         deps.send_message(&format!("{command} failed. The session is unchanged."))
-            .await?;
-    }
+            .await
+    } else {
+        Ok(())
+    };
+    deps.set_typing(false).await;
+    notice?;
 
     Ok(SessionCommandOutcome::Handled { success: true })
+}
+
+/// A reply that is a turn of its own (typing on, the text, typing off), so
+/// channels that route replies per turn (HTTP streams) deliver it to the
+/// sender.
+async fn reply(deps: &dyn SessionCommandDeps, text: &str) -> Result<()> {
+    deps.set_typing(true).await;
+    let sent = deps.send_message(text).await;
+    deps.set_typing(false).await;
+    sent
 }
 
 #[cfg(test)]
@@ -602,6 +616,8 @@ mod tests {
         assert!(deps.prompts().is_empty());
         assert_eq!(deps.cursor(), vec!["100"]);
         assert_eq!(deps.sent(), vec![NEW_SESSION_MESSAGE]);
+        // The reply is a turn of its own (an HTTP stream receives it).
+        assert_eq!(*deps.typing.lock().unwrap(), vec![true, false]);
     }
 
     #[tokio::test]
@@ -667,6 +683,7 @@ mod tests {
         assert_eq!(deps.sent(), vec![DENIED_MESSAGE]);
         assert!(deps.prompts().is_empty());
         assert_eq!(deps.cursor(), vec!["100"]);
+        assert_eq!(*deps.typing.lock().unwrap(), vec![true, false]);
     }
 
     #[tokio::test]
@@ -683,6 +700,7 @@ mod tests {
         assert_eq!(out, SessionCommandOutcome::Handled { success: true });
         assert!(deps.sent().is_empty());
         assert_eq!(deps.cursor(), vec!["100"]);
+        assert!(deps.typing.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -262,7 +262,10 @@ impl Db {
     }
 
     /// Messages newer than `since` across `jids`, excluding the assistant's
-    /// own messages (`is_bot_message` or content prefixed `"{bot_prefix}:"`).
+    /// own messages: `is_bot_message`, or (stored by releases that had no
+    /// such flag) sent from the assistant's own account and prefixed
+    /// `"{bot_prefix}:"`. A user's message that starts with the prefix
+    /// ("Talon: show open alerts") is kept.
     /// Returns the messages (oldest first) and the new high-water timestamp.
     ///
     /// At most [`DEFAULT_MESSAGE_LIMIT`] (the most recent) are returned; see
@@ -300,7 +303,8 @@ impl Db {
                                reply_to_message_content, reply_to_sender_name
                         FROM messages
                         WHERE timestamp > ?1 AND chat_jid IN (SELECT value FROM json_each(?2))
-                          AND COALESCE(is_bot_message, 0) = 0 AND content NOT LIKE ?3 ESCAPE '\'
+                          AND COALESCE(is_bot_message, 0) = 0
+                          AND NOT (COALESCE(is_from_me, 0) = 1 AND content LIKE ?3 ESCAPE '\')
                           AND content != '' AND content IS NOT NULL
                         ORDER BY timestamp DESC, rid DESC
                         LIMIT ?4
@@ -331,7 +335,7 @@ impl Db {
     }
 
     /// Up to `limit` most recent non-bot messages in `chat_jid` newer than
-    /// `since`, returned oldest first.
+    /// `since` (see [`Db::get_new_messages`]), returned oldest first.
     pub fn get_messages_since(
         &self,
         chat_jid: &str,
@@ -348,7 +352,8 @@ impl Db {
                                reply_to_message_content, reply_to_sender_name
                         FROM messages
                         WHERE chat_jid = ?1 AND timestamp > ?2
-                          AND COALESCE(is_bot_message, 0) = 0 AND content NOT LIKE ?3 ESCAPE '\'
+                          AND COALESCE(is_bot_message, 0) = 0
+                          AND NOT (COALESCE(is_from_me, 0) = 1 AND content LIKE ?3 ESCAPE '\')
                           AND content != '' AND content IS NOT NULL
                         ORDER BY timestamp DESC, rid DESC
                         LIMIT ?4
@@ -373,8 +378,8 @@ impl Db {
     }
 
     /// Timestamp of the assistant's most recent message in `chat_jid`
-    /// (`is_bot_message` or content prefixed `"{bot_prefix}:"`). Used to
-    /// recover the agent cursor when it was lost.
+    /// (`is_bot_message`, or sent from its own account and prefixed
+    /// `"{bot_prefix}:"`). Used to recover the agent cursor when it was lost.
     pub fn get_last_bot_message_timestamp(
         &self,
         chat_jid: &str,
@@ -384,7 +389,8 @@ impl Db {
             let mut stmt = conn
                 .prepare_cached(
                     r"SELECT MAX(timestamp) AS ts FROM messages
-                      WHERE chat_jid = ?1 AND (is_bot_message = 1 OR content LIKE ?2 ESCAPE '\')",
+                      WHERE chat_jid = ?1
+                        AND (is_bot_message = 1 OR (is_from_me = 1 AND content LIKE ?2 ESCAPE '\'))",
                 )
                 .db()?;
             stmt.query_row(params![chat_jid, bot_prefix_pattern(bot_prefix)], |r| {
@@ -913,15 +919,17 @@ mod tests {
     #[test]
     fn filters_pre_migration_bot_messages_via_content_prefix() {
         let db = since_fixture();
-        store(
-            &db,
-            "m5",
-            "group@g.us",
-            "Bot@s.whatsapp.net",
-            "Bot",
-            "Talon: old bot reply",
-            "2024-01-01T00:00:05.000Z",
-        );
+        db.store_message(&NewMessage {
+            id: "m5".into(),
+            chat_jid: "group@g.us".into(),
+            sender: "Bot@s.whatsapp.net".into(),
+            sender_name: "Bot".into(),
+            content: "Talon: old bot reply".into(),
+            timestamp: "2024-01-01T00:00:05.000Z".into(),
+            is_from_me: true,
+            ..Default::default()
+        })
+        .unwrap();
         let m = db
             .get_messages_since("group@g.us", "2024-01-01T00:00:04.000Z", "Talon", 200)
             .unwrap();
@@ -939,13 +947,42 @@ mod tests {
     fn bot_prefix_wildcards_are_literal() {
         let db = db();
         db.store_chat_metadata(&meta("c", T0)).unwrap();
+        let own = |id: &str, content: &str, ts: &str| NewMessage {
+            id: id.into(),
+            chat_jid: "c".into(),
+            sender: "me".into(),
+            sender_name: "Me".into(),
+            content: content.into(),
+            timestamp: ts.into(),
+            is_from_me: true,
+            ..Default::default()
+        };
+        db.store_message(&own(
+            "1",
+            "Talon: not from T_lon",
+            "2024-01-01T00:00:01.000Z",
+        ))
+        .unwrap();
+        db.store_message(&own("2", "T_lon: from bot", "2024-01-01T00:00:02.000Z"))
+            .unwrap();
+        let m = db.get_messages_since("c", "", "T_lon", 10).unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].id, "1");
+        let m = db.get_messages_since("c", "", "%", 10).unwrap();
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn user_messages_starting_with_the_assistant_name_are_kept() {
+        let db = db();
+        db.store_chat_metadata(&meta("c", T0)).unwrap();
         store(
             &db,
             "1",
             "c",
             "u",
             "U",
-            "Talon: not from T_lon",
+            "Talon: show open alerts",
             "2024-01-01T00:00:01.000Z",
         );
         store(
@@ -954,14 +991,18 @@ mod tests {
             "c",
             "u",
             "U",
-            "T_lon: from bot",
+            "talon: and the closed ones",
             "2024-01-01T00:00:02.000Z",
         );
-        let m = db.get_messages_since("c", "", "T_lon", 10).unwrap();
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].id, "1");
-        let m = db.get_messages_since("c", "", "%", 10).unwrap();
+        let m = db.get_messages_since("c", "", "Talon", 10).unwrap();
         assert_eq!(m.len(), 2);
+        let (m, _) = db.get_new_messages(&jids(&["c"]), "", "Talon").unwrap();
+        assert_eq!(m.len(), 2);
+        // ...and none of them counts as a bot reply for cursor recovery.
+        assert_eq!(
+            db.get_last_bot_message_timestamp("c", "Talon").unwrap(),
+            None
+        );
     }
 
     // --- getNewMessages ---

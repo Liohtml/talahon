@@ -764,8 +764,23 @@ async fn sends_message_via_bot_api() {
     let reqs = requests_to(&server, "sendMessage").await;
     assert_eq!(
         reqs,
-        vec![json!({ "chat_id": "100200300", "text": "Hello", "parse_mode": "Markdown" })]
+        vec![json!({ "chat_id": "100200300", "text": "Hello", "parse_mode": "HTML" })]
     );
+}
+
+#[tokio::test]
+async fn sends_identifiers_and_paths_unaltered() {
+    let server = MockServer::start().await;
+    mount_send_ok(&server).await;
+    let channel = ready_channel(&server, default_host());
+    let text = r"*IOC*: file_a.exe and file_b.dll in C:\Users\*\AppData <tmp>";
+    channel.send_message("tg:1", text).await.unwrap();
+    let reqs = requests_to(&server, "sendMessage").await;
+    assert_eq!(
+        reqs[0]["text"],
+        r"<b>IOC</b>: file_a.exe and file_b.dll in C:\Users\*\AppData &lt;tmp&gt;"
+    );
+    assert_eq!(reqs[0]["parse_mode"], "HTML");
 }
 
 #[tokio::test]
@@ -794,9 +809,9 @@ async fn splits_messages_exceeding_4096_characters() {
     let reqs = requests_to(&server, "sendMessage").await;
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[0]["text"], "x".repeat(4096));
-    assert_eq!(reqs[0]["parse_mode"], "Markdown");
+    assert_eq!(reqs[0]["parse_mode"], "HTML");
     assert_eq!(reqs[1]["text"], "x".repeat(904));
-    assert_eq!(reqs[1]["parse_mode"], "Markdown");
+    assert_eq!(reqs[1]["parse_mode"], "HTML");
 }
 
 #[tokio::test]
@@ -816,7 +831,7 @@ async fn falls_back_to_plain_text_on_400() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(api_path("sendMessage")))
-        .and(body_partial_json(json!({ "parse_mode": "Markdown" })))
+        .and(body_partial_json(json!({ "parse_mode": "HTML" })))
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({
             "ok": false, "error_code": 400,
             "description": "Bad Request: can't parse entities"
@@ -831,7 +846,7 @@ async fn falls_back_to_plain_text_on_400() {
         .unwrap();
     let reqs = requests_to(&server, "sendMessage").await;
     assert_eq!(reqs.len(), 2);
-    assert_eq!(reqs[0]["parse_mode"], "Markdown");
+    assert_eq!(reqs[0]["parse_mode"], "HTML");
     assert_eq!(
         reqs[1],
         json!({ "chat_id": "100200300", "text": "*broken markdown" })
@@ -870,7 +885,7 @@ async fn honours_retry_after_on_429() {
     channel.send_message("tg:1", "hi").await.unwrap();
     let reqs = requests_to(&server, "sendMessage").await;
     assert_eq!(reqs.len(), 2);
-    assert_eq!(reqs[1]["parse_mode"], "Markdown");
+    assert_eq!(reqs[1]["parse_mode"], "HTML");
 }
 
 #[tokio::test]
@@ -1010,10 +1025,10 @@ async fn chatid_replies_with_chat_id_and_metadata() {
     let reqs = requests_to(&server, "sendMessage").await;
     assert_eq!(reqs.len(), 1);
     let text = reqs[0]["text"].as_str().unwrap();
-    assert!(text.contains("`tg:100200300`"), "{text}");
+    assert!(text.contains("<code>tg:100200300</code>"), "{text}");
     assert!(text.contains("Name: Unknown"), "{text}");
     assert!(text.contains("Type: group"), "{text}");
-    assert_eq!(reqs[0]["parse_mode"], "Markdown");
+    assert_eq!(reqs[0]["parse_mode"], "HTML");
     assert_eq!(reqs[0]["chat_id"], "100200300");
 }
 

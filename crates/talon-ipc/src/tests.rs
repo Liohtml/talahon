@@ -28,7 +28,7 @@ fn sched(target: &str, ty: ScheduleType, value: &str) -> IpcTask {
 }
 
 fn once(target: &str) -> IpcTask {
-    sched(target, ScheduleType::Once, "2025-06-01T00:00:00")
+    sched(target, ScheduleType::Once, "2099-06-01T00:00:00")
 }
 
 fn pause(id: &str) -> IpcTask {
@@ -868,6 +868,82 @@ async fn update_task_rules() {
         h.watcher.process_task(&main_id(), update("ghost")).await,
         IpcOutcome::Denied(_)
     ));
+}
+
+#[tokio::test]
+async fn once_times_in_the_past_are_rejected() {
+    let h = harness();
+    let o = h
+        .watcher
+        .process_task(
+            &main_id(),
+            sched("other@g.us", ScheduleType::Once, "2020-01-01T09:00:00"),
+        )
+        .await;
+    assert!(
+        matches!(o, IpcOutcome::Rejected(ref r) if r.contains("already passed")),
+        "{o:?}"
+    );
+    assert!(h.store.all().is_empty());
+
+    h.store.insert_owned(
+        task("t-once", "other-group", "other@g.us", TaskStatus::Active),
+        "other-group",
+    );
+    let mut u = update("t-once");
+    if let IpcTask::UpdateTask { schedule_value, .. } = &mut u {
+        *schedule_value = Some("2020-01-01T09:00:00".into());
+    }
+    assert!(matches!(
+        h.watcher.process_task(&other_id(), u).await,
+        IpcOutcome::Rejected(_)
+    ));
+    assert_eq!(
+        h.store.get("t-once").unwrap().schedule_value,
+        "2099-06-01T00:00:00"
+    );
+}
+
+#[tokio::test]
+async fn finished_tasks_get_a_new_run_when_resumed_or_rescheduled() {
+    let h = harness();
+    // A completed interval task resumes with a fresh next_run.
+    let mut done = task("t-int", "other-group", "other@g.us", TaskStatus::Completed);
+    done.schedule_type = ScheduleType::Interval;
+    done.schedule_value = "600000".into();
+    done.next_run = None;
+    h.store.insert_owned(done, "other-group");
+    assert!(
+        h.watcher
+            .process_task(&other_id(), resume("t-int"))
+            .await
+            .is_applied()
+    );
+    let t = h.store.get("t-int").unwrap();
+    assert_eq!(t.status, TaskStatus::Active);
+    assert!(parse_iso(t.next_run.as_deref().unwrap()).unwrap() > chrono::Utc::now());
+
+    // A completed `once` task whose time has passed cannot be resumed...
+    let mut past = task("t-past", "other-group", "other@g.us", TaskStatus::Completed);
+    past.schedule_value = "2020-01-01T09:00:00".into();
+    past.next_run = None;
+    h.store.insert_owned(past, "other-group");
+    let o = h.watcher.process_task(&other_id(), resume("t-past")).await;
+    assert!(
+        matches!(o, IpcOutcome::Rejected(ref r) if r.contains("already passed")),
+        "{o:?}"
+    );
+    assert_eq!(h.store.get("t-past").unwrap().status, TaskStatus::Completed);
+
+    // ...but a new time makes it run again.
+    let mut u = update("t-past");
+    if let IpcTask::UpdateTask { schedule_value, .. } = &mut u {
+        *schedule_value = Some("2099-01-01T09:00:00".into());
+    }
+    assert!(h.watcher.process_task(&other_id(), u).await.is_applied());
+    let t = h.store.get("t-past").unwrap();
+    assert_eq!(t.status, TaskStatus::Active);
+    assert!(t.next_run.is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -2041,7 +2117,7 @@ async fn prompt_size_is_capped_per_lane() {
             sched_with_prompt(
                 ALICE_JID,
                 ScheduleType::Once,
-                "2026-06-01T00:00:00",
+                "2099-06-01T00:00:00",
                 kib(16),
             ),
         )
@@ -2052,7 +2128,7 @@ async fn prompt_size_is_capped_per_lane() {
             .watcher
             .process_task(
                 &alice(),
-                sched_with_prompt(ALICE_JID, ScheduleType::Once, "2026-06-01T00:00:00", prompt),
+                sched_with_prompt(ALICE_JID, ScheduleType::Once, "2099-06-01T00:00:00", prompt),
             )
             .await;
         assert_quota_denied(&h, &o, "prompt_bytes");
@@ -2084,7 +2160,7 @@ async fn prompt_size_is_capped_per_lane() {
                 sched_with_prompt(
                     BOB_JID,
                     ScheduleType::Once,
-                    "2026-06-01T00:00:00",
+                    "2099-06-01T00:00:00",
                     kib(size),
                 ),
             )
@@ -2115,7 +2191,7 @@ async fn prompt_caps_are_configurable() {
             sched_with_prompt(
                 ALICE_JID,
                 ScheduleType::Once,
-                "2026-06-01T00:00:00",
+                "2099-06-01T00:00:00",
                 "x".repeat(11),
             ),
         )
@@ -2128,7 +2204,7 @@ async fn prompt_caps_are_configurable() {
             sched_with_prompt(
                 BOB_JID,
                 ScheduleType::Once,
-                "2026-06-01T00:00:00",
+                "2099-06-01T00:00:00",
                 "x".repeat(200 * 1024),
             ),
         )
@@ -2158,7 +2234,7 @@ async fn recurring_lane_schedules_respect_the_minimum_frequency() {
         (ScheduleType::Cron, "*/5 * * * *"),
         (ScheduleType::Cron, "0 9 * * 1-5"),
         (ScheduleType::Interval, "300000"),
-        (ScheduleType::Once, "2026-06-01T00:00:00"),
+        (ScheduleType::Once, "2099-06-01T00:00:00"),
     ] {
         let o = h
             .watcher
@@ -2425,7 +2501,7 @@ async fn pending_throttle_summary_is_written_on_shutdown() {
             &t,
             &format!("{i}.json"),
             &format!(
-                r#"{{"type":"schedule_task","taskId":"alice-{i}","prompt":"p","schedule_type":"once","schedule_value":"2026-06-01T00:00:00","targetJid":"{ALICE_JID}"}}"#
+                r#"{{"type":"schedule_task","taskId":"alice-{i}","prompt":"p","schedule_type":"once","schedule_value":"2099-06-01T00:00:00","targetJid":"{ALICE_JID}"}}"#
             ),
         );
     }

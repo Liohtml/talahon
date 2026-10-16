@@ -79,6 +79,34 @@ pub fn first_run(
     }
 }
 
+/// How far in the past a requested `once` time may lie and still be
+/// accepted (it then runs right away): a request for "now", and the time
+/// between the agent checking a schedule and the host applying it.
+pub const ONCE_PAST_SLACK_SECS: i64 = 60;
+
+/// Reject a `once` schedule whose time is more than
+/// [`ONCE_PAST_SLACK_SECS`] in the past: it would never run at the time the
+/// requester meant, but immediately. Other schedule types always pass.
+pub fn ensure_not_past(
+    schedule_type: ScheduleType,
+    value: &str,
+    tz: Tz,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if schedule_type != ScheduleType::Once {
+        return Ok(());
+    }
+    let at = parse_once(value, tz)?;
+    if at < now - chrono::Duration::seconds(ONCE_PAST_SLACK_SECS) {
+        return Err(Error::invalid(format!(
+            "time {:?} has already passed (it is now {} in {tz})",
+            value.trim(),
+            now.with_timezone(&tz).format("%Y-%m-%dT%H:%M:%S")
+        )));
+    }
+    Ok(())
+}
+
 /// Validate without computing anything else.
 pub fn validate(schedule_type: ScheduleType, value: &str, tz: Tz) -> Result<()> {
     match schedule_type {
@@ -215,6 +243,20 @@ mod tests {
     fn interval_minimum_enforced() {
         assert!(validate(ScheduleType::Interval, "5", chrono_tz::UTC).is_err());
         assert!(validate(ScheduleType::Interval, "-1", chrono_tz::UTC).is_err());
+    }
+
+    #[test]
+    fn once_in_the_past_is_rejected() {
+        let tz = chrono_tz::Europe::Berlin;
+        let now = t("2026-06-01T10:00:00.000Z"); // 12:00 in Berlin
+        let check = |st, v| ensure_not_past(st, v, tz, now);
+        assert!(check(ScheduleType::Once, "2026-06-01T12:30:00").is_ok());
+        assert!(check(ScheduleType::Once, "2026-06-01T11:59:30").is_ok());
+        let err = check(ScheduleType::Once, "2026-06-01T11:00:00").unwrap_err();
+        assert!(err.to_string().contains("already passed"), "{err}");
+        assert!(check(ScheduleType::Once, "garbage").is_err());
+        assert!(check(ScheduleType::Cron, "0 9 * * *").is_ok());
+        assert!(check(ScheduleType::Interval, "60000").is_ok());
     }
 
     #[test]

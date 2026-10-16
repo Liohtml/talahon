@@ -583,7 +583,7 @@ impl TaskScheduler {
 
         if let Err(e) = self
             .store
-            .update_task_after_run(&task.id, next_run.as_deref(), &summary)
+            .finish_task_run(&task, next_run.as_deref(), &summary)
             .await
         {
             error!(task_id, error = %e, "failed to update task after run");

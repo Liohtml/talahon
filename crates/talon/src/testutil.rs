@@ -115,6 +115,12 @@ pub struct Script {
     pub new_session_id: Option<String>,
     /// Block after `on_start` until notified.
     pub gate: Option<Arc<Notify>>,
+    /// Act like an agent that reports the IPC input it consumed: the
+    /// output at this index takes every input file present when it is
+    /// emitted (named in it if it is a success frame; an error frame takes
+    /// them unanswered), every other success frame reports none. `None`:
+    /// frames as given (an agent that reports nothing).
+    pub consume_at: Option<usize>,
 }
 
 impl Script {
@@ -164,6 +170,8 @@ pub struct FakeLauncher {
     pub hard_timeout: Mutex<Duration>,
     probe: Mutex<Option<Probe>>,
     pub probes: Mutex<Vec<String>>,
+    /// Host data directory (for `Script::consume_at`).
+    pub data_dir: Mutex<Option<PathBuf>>,
 }
 
 impl Default for FakeLauncher {
@@ -177,8 +185,26 @@ impl Default for FakeLauncher {
             hard_timeout: Mutex::new(Duration::from_secs(30 * 60)),
             probe: Mutex::new(None),
             probes: Mutex::new(Vec::new()),
+            data_dir: Mutex::new(None),
         }
     }
+}
+
+/// Take every `*.json` input file in `dir` (sorted names).
+fn consume_inputs(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".json"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    for name in &names {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    names
 }
 
 impl FakeLauncher {
@@ -237,7 +263,23 @@ impl ContainerLauncher for FakeLauncher {
             .rev()
             .find_map(|o| o.new_session_id.clone())
             .or(script.new_session_id.clone());
-        for o in script.outputs {
+        let inbox = self
+            .data_dir
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|d| d.join("ipc").join(spec.group.ipc_key()).join("input"));
+        for (i, mut o) in script.outputs.into_iter().enumerate() {
+            if let (Some(at), Some(inbox)) = (script.consume_at, inbox.as_ref()) {
+                let taken = if i == at {
+                    consume_inputs(inbox)
+                } else {
+                    Vec::new()
+                };
+                if o.status == OutputStatus::Success {
+                    o.consumed_inputs = Some(taken);
+                }
+            }
             if outputs.send(o).await.is_ok() {
                 self.delivered.fetch_add(1, Ordering::SeqCst);
             }
@@ -375,6 +417,7 @@ pub fn harness_with(opts: HarnessOptions) -> Harness {
     let db = Db::open_in_memory().unwrap();
     let queue = GroupQueue::new(QueueConfig::new(config.data_dir.clone(), 4));
     let launcher = Arc::new(FakeLauncher::default());
+    *launcher.data_dir.lock().unwrap() = Some(config.data_dir.clone());
     let llm = Arc::new(FakeLlm::default());
     let audit = MemoryAuditSink::default();
     let channel = Arc::new(FakeChannel::default());

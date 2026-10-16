@@ -11,8 +11,9 @@
 //!   (`@<ASSISTANT_NAME> ...`) unless the text already matches it.
 //! - Non-text messages become placeholders (`[Photo]`, `[Document: x]`, ...)
 //!   plus caption, for registered chats only.
-//! - Outbound text is split at 4096 UTF-16 units, sent with Markdown parse
-//!   mode and re-sent as plain text when Telegram rejects the markup (400).
+//! - Outbound text is split at 4096 UTF-16 units, rendered as escaped HTML
+//!   (`parse_mode: HTML`, see [`text::markdown_to_html`]) and re-sent as
+//!   written when Telegram rejects the markup (400).
 //! - Delivery failures are logged, never returned as errors (the host's turn
 //!   bookkeeping must not roll back because a chat send failed).
 //!
@@ -44,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use self::api::{ApiError, BotApi, Message, Update, User};
-use self::text::{TELEGRAM_MAX_MESSAGE_LEN, chunk_text, utf16_slice};
+use self::text::{TELEGRAM_MAX_MESSAGE_LEN, chunk_text, markdown_to_html, utf16_slice};
 use crate::util::{backoff_delay, project_root, secret_value, setting, write_atomic};
 
 /// Env var holding the bot token.
@@ -760,20 +761,21 @@ impl Inner {
 
     // ---- outbound ----------------------------------------------------------
 
-    /// Send with Markdown, falling back to plain text when Telegram rejects
-    /// the markup (HTTP 400).
+    /// Send as HTML (see [`markdown_to_html`]), falling back to the text as
+    /// written when Telegram rejects the markup (HTTP 400).
     async fn send_text(
         &self,
         chat_id: &str,
         text: &str,
         thread: Option<i64>,
     ) -> std::result::Result<(), ApiError> {
+        let html = markdown_to_html(text);
         match self
-            .send_with_retry(chat_id, text, Some("Markdown"), thread)
+            .send_with_retry(chat_id, &html, Some("HTML"), thread)
             .await
         {
             Err(e) if e.status() == Some(400) => {
-                debug!(err = %e, "Markdown send failed, falling back to plain text");
+                debug!(err = %e, "HTML send failed, falling back to plain text");
                 self.send_with_retry(chat_id, text, None, thread).await
             }
             other => other,

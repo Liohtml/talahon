@@ -7,7 +7,7 @@
 //! 3. build the first prompt (scheduled-task prefix, pending IPC input);
 //! 4. `/compact` as the whole prompt -> compact the session and report;
 //! 5. scheduled task with a script -> pre-flight; `wakeAgent=false` ->
-//!    `success(null)` and exit;
+//!    `success(null)` and exit; a failed script -> error frame;
 //! 6. tools: built-in (+ `register_group` for main), fenced intel tools,
 //!    MCP tools (sockets from the supervisor, or spawned in dev mode);
 //! 7. system prompt (trusted, read-only `CLAUDE.md`), the first user
@@ -176,13 +176,17 @@ async fn execute_inner(
         input.prompt.clone()
     };
     let pending = inbox.drain();
+    let mut pending_files = Vec::with_capacity(pending.len());
     if !pending.is_empty() {
         tracing::info!(
             count = pending.len(),
             "draining pending IPC messages into the initial prompt"
         );
-        first_prompt.push('\n');
-        first_prompt.push_str(&pending.join("\n"));
+        for message in pending {
+            first_prompt.push('\n');
+            first_prompt.push_str(&message.text);
+            pending_files.push(message.file);
+        }
     }
 
     let archive = ArchiveOptions {
@@ -216,22 +220,16 @@ async fn execute_inner(
         if let Some(script) = input.script.as_deref().filter(|s| !s.trim().is_empty()) {
             tracing::info!("running the task pre-flight script");
             match script::run_task_script(script, &paths.group, &cancel).await {
-                Some(r) if r.wake_agent => {
+                Ok(r) if r.wake_agent => {
                     tracing::info!("task script asked to wake the agent");
                     first_prompt = prompt::script_prompt(r.data.as_ref(), &input.prompt);
                 }
-                other => {
-                    tracing::info!(
-                        reason = if other.is_some() {
-                            "wakeAgent=false"
-                        } else {
-                            "script error or no output"
-                        },
-                        "task script decided not to wake the agent"
-                    );
+                Ok(_) => {
+                    tracing::info!("task script decided not to wake the agent");
                     output.emit(&ContainerOutput::success(None, None));
                     return Ok(());
                 }
+                Err(reason) => return Err(AgentError::TaskScript(reason)),
             }
         }
     }
@@ -301,6 +299,7 @@ async fn execute_inner(
         archive,
         investigation,
     });
+    agent.note_consumed(pending_files);
     let first = agent.with_turn_header(&first_prompt);
     let result = agent.run_session(first).await;
     if let Some(m) = &mcp.manager {
@@ -465,10 +464,10 @@ async fn compact_command(cmd: CompactCommand<'_>) -> Result<(), AgentError> {
     } else {
         NOTHING_TO_COMPACT_MESSAGE
     };
-    output.emit(&ContainerOutput::success(
-        Some(message.to_string()),
-        agent.reported_session_id(),
-    ));
+    let mut frame =
+        ContainerOutput::success(Some(message.to_string()), agent.reported_session_id());
+    frame.consumed_inputs = Some(agent.take_consumed());
+    output.emit(&frame);
     Ok(())
 }
 
@@ -679,6 +678,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failing_script_fails_the_run() {
+        let env = env();
+        let backend = Arc::new(ScriptedBackend::new([]));
+        let mut i = input("check things");
+        i.is_scheduled_task = true;
+        i.script = Some("echo boom >&2; exit 2".into());
+        let err = run(&env, i, backend.clone()).await.unwrap_err();
+        assert!(matches!(err, AgentError::TaskScript(_)), "{err:?}");
+        let frames = env.sink.frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].status, OutputStatus::Error);
+        assert_eq!(
+            frames[0].error.as_deref(),
+            Some("task script failed: exited with status 2")
+        );
+        assert!(backend.requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn script_wake_true_enriches_the_prompt() {
         let env = env();
         let backend = Arc::new(ScriptedBackend::new([text("sweep done")]));
@@ -701,15 +719,27 @@ mod tests {
             r#"{"type":"message","text":"pending note"}"#,
         )
         .unwrap();
-        // Stale _close from a previous run must be ignored.
+        // A _close sent while the container started (the host clears stale
+        // ones before it starts a container) ends the session after the
+        // first turn.
         std::fs::write(env.config.paths.ipc_input().join("_close"), "").unwrap();
         let backend = Arc::new(ScriptedBackend::new([text("ok")]));
         let mut i = input("sweep");
         i.group_folder = "copilot".into();
         i.is_scheduled_task = true;
         i.ephemeral = true;
-        close_soon(&env);
-        run(&env, i, backend.clone()).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(&env, i, backend.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The drained message is reported as part of the first turn.
+        assert_eq!(
+            env.sink.frames()[0].consumed_inputs,
+            Some(vec!["1.json".to_string()])
+        );
         let user = backend.requests()[0].messages[1].text().to_string();
         assert!(user.contains(prompt::SCHEDULED_TASK_PREFIX));
         assert!(user.contains("sweep\npending note"));

@@ -69,6 +69,38 @@ async fn trigger_gating_accumulates_context_until_trigger() {
 }
 
 #[tokio::test]
+async fn a_trigger_followed_by_a_busy_chat_is_still_answered() {
+    let h = harness();
+    h.orch
+        .register_group_inner(TEAM, group("Team", "team", false), true, false)
+        .unwrap();
+    h.orch.accept_message(
+        TEAM,
+        msg(TEAM, "1", "alice", "@Talon check host web-01", &ts(1)),
+    );
+    // More chatter than fits in one prompt (MAX_MESSAGES_PER_PROMPT = 10).
+    for i in 2..=13u32 {
+        h.orch.accept_message(
+            TEAM,
+            msg(TEAM, &i.to_string(), "bob", &format!("chatter {i}"), &ts(i)),
+        );
+    }
+    h.launcher.push(Script::reply("web-01 looks fine"));
+    assert!(h.orch.process_group_messages(TEAM).await);
+
+    let prompts = h.launcher.prompts();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("check host web-01"), "{}", prompts[0]);
+    assert!(prompts[0].contains("chatter 10"));
+    assert!(!prompts[0].contains("chatter 11"));
+    assert_eq!(h.orch.cursor(TEAM), ts(10));
+    // The rest is checked again; without a trigger it only waits as context.
+    assert!(h.orch.process_group_messages(TEAM).await);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(h.launcher.calls().len(), 1);
+}
+
+#[tokio::test]
 async fn trigger_from_disallowed_sender_is_ignored() {
     let allowlist = SenderAllowlist::from_json(serde_json::json!({
         "default": { "allow": "*", "mode": "trigger" },
@@ -828,6 +860,159 @@ async fn follow_up_is_piped_into_the_active_container() {
     .unwrap();
 }
 
+async fn wait_idle(h: &crate::testutil::Harness, jid: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.queue.is_active(jid) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Pipe a follow-up into a running (gated) container on MAIN.
+async fn start_and_pipe(h: &crate::testutil::Harness, script: Script) {
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    h.orch.set_cursor(MAIN, &ts(0));
+    h.launcher.push(script);
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "1", "me", "first question", &ts(1)));
+    h.orch.poll_once().await;
+    h.launcher.wait_started(1).await;
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "2", "me", "follow up", &ts(2)));
+    assert_eq!(h.orch.poll_once().await.piped, vec![MAIN.to_string()]);
+    assert_eq!(h.orch.cursor(MAIN), ts(2));
+}
+
+fn persisted_cursor(h: &crate::testutil::Harness, jid: &str) -> String {
+    let raw =
+        h.db.get_router_state("last_agent_timestamp")
+            .unwrap()
+            .unwrap();
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&raw).unwrap();
+    map.get(jid).cloned().unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_follow_up_whose_turn_died_runs_again() {
+    let h = harness();
+    let gate = Arc::new(Notify::new());
+    start_and_pipe(
+        &h,
+        Script {
+            outputs: vec![
+                ContainerOutput::success(Some("first answer".into()), None),
+                // The turn that took the follow-up in dies (timeout, OOM).
+                ContainerOutput::error("container timed out"),
+            ],
+            error: Some("container timed out".into()),
+            gate: Some(gate.clone()),
+            consume_at: Some(1),
+            ..Script::default()
+        },
+    )
+    .await;
+    // In flight, only answered messages count as done.
+    assert_eq!(persisted_cursor(&h, MAIN), ts(0));
+    gate.notify_one();
+    wait_idle(&h, MAIN).await;
+
+    assert_eq!(h.channel.sent_texts(), vec!["first answer".to_string()]);
+    // Back to the answered first question: the follow-up runs again.
+    assert_eq!(h.orch.cursor(MAIN), ts(1));
+    assert_eq!(persisted_cursor(&h, MAIN), ts(1));
+    h.launcher.push(Script::reply("second answer"));
+    assert!(h.orch.process_group_messages(MAIN).await);
+    let prompts = h.launcher.prompts();
+    assert!(prompts[1].contains("follow up"), "{}", prompts[1]);
+    assert!(!prompts[1].contains("first question"), "{}", prompts[1]);
+    assert_eq!(h.orch.cursor(MAIN), ts(2));
+}
+
+#[tokio::test]
+async fn a_follow_up_the_container_never_read_runs_again() {
+    let h = harness();
+    let gate = Arc::new(Notify::new());
+    start_and_pipe(
+        &h,
+        Script {
+            outputs: vec![ContainerOutput::success(Some("first answer".into()), None)],
+            gate: Some(gate.clone()),
+            // The container closes without taking the follow-up in.
+            consume_at: Some(usize::MAX),
+            ..Script::default()
+        },
+    )
+    .await;
+    h.launcher.push(Script::reply("second answer"));
+    gate.notify_one();
+    h.launcher.wait_started(2).await;
+    wait_idle(&h, MAIN).await;
+
+    let prompts = h.launcher.prompts();
+    assert!(prompts[1].contains("follow up"), "{}", prompts[1]);
+    assert!(!prompts[1].contains("first question"));
+    assert_eq!(
+        h.channel.sent_texts(),
+        vec!["first answer".to_string(), "second answer".to_string()]
+    );
+    assert_eq!(h.orch.cursor(MAIN), ts(2));
+    // The leftover input file was cleared before the second container.
+    assert!(input_files(&h.root(), "main").is_empty());
+}
+
+#[tokio::test]
+async fn a_follow_up_taken_into_the_running_turn_completes_with_it() {
+    let h = harness();
+    let gate = Arc::new(Notify::new());
+    start_and_pipe(
+        &h,
+        Script {
+            outputs: vec![ContainerOutput::success(
+                Some("answer to both".into()),
+                None,
+            )],
+            gate: Some(gate.clone()),
+            consume_at: Some(0),
+            ..Script::default()
+        },
+    )
+    .await;
+    // The follow-up's turn start reached the channel.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.channel.typing.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    gate.notify_one();
+    wait_idle(&h, MAIN).await;
+
+    // Both requests are complete (the HTTP channel closes both streams).
+    assert_eq!(h.channel.turns.lock().unwrap().len(), 2);
+    assert_eq!(h.orch.cursor(MAIN), ts(2));
+    assert_eq!(persisted_cursor(&h, MAIN), ts(2));
+    assert_eq!(h.launcher.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn the_user_hears_when_retries_are_exhausted() {
+    let h = harness();
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    talon_scheduler::LaneProcessor::retries_exhausted(h.orch.as_ref(), MAIN).await;
+    assert_eq!(
+        h.channel.sent_texts(),
+        vec![super::messages::RETRIES_EXHAUSTED_NOTICE.to_string()]
+    );
+    assert_eq!(h.channel.turns.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn follow_up_is_not_piped_when_the_token_would_expire() {
     let h = harness_with(HarnessOptions {
@@ -1090,6 +1275,45 @@ async fn lanes_sharing_a_folder_stay_in_memory() {
             .is_err()
     );
     assert!(h.orch.group("fake:bad").is_none());
+}
+
+#[tokio::test]
+async fn a_swept_lane_keeps_its_cursor_when_it_comes_back() {
+    const USER: &str = "fake:copilot:u:bob";
+    let h = harness();
+    ChannelHost::register_group(
+        h.orch.as_ref(),
+        "fake:copilot",
+        group("CoPilot", "copilot", false),
+        true,
+    )
+    .await;
+    let mut lane = group("CoPilot - bob", "copilot", false);
+    lane.session_key = Some("copilot-u-bob".into());
+    lane.ipc_key = Some("copilot-u-bob".into());
+    lane.requires_trigger = Some(false);
+    ChannelHost::register_group(h.orch.as_ref(), USER, lane.clone(), true).await;
+    h.launcher.push(Script::reply("first answer"));
+    h.orch
+        .accept_message(USER, msg(USER, "1", "bob", "yesterday's question", &ts(1)));
+    assert!(h.orch.process_group_messages(USER).await);
+
+    // The idle sweep drops the lane; its next message registers it again.
+    assert!(ChannelHost::unregister_group(h.orch.as_ref(), USER).await);
+    ChannelHost::register_group(h.orch.as_ref(), USER, lane, true).await;
+    h.launcher.push(Script::reply("second answer"));
+    h.orch
+        .accept_message(USER, msg(USER, "2", "bob", "today's question", &ts(2)));
+    assert!(h.orch.process_group_messages(USER).await);
+
+    let prompts = h.launcher.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("today's question"), "{}", prompts[1]);
+    assert!(
+        !prompts[1].contains("yesterday's question"),
+        "{}",
+        prompts[1]
+    );
 }
 
 #[tokio::test]

@@ -310,6 +310,38 @@ async fn once_tasks_complete_after_running() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_task_that_reschedules_itself_while_running_keeps_its_new_time() {
+    // The agent's update_task reaches the store while the task still runs.
+    let store_slot: Arc<OnceLock<MemoryTaskStore>> = Arc::new(OnceLock::new());
+    let slot = store_slot.clone();
+    let h = harness(move |call| {
+        let slot = slot.clone();
+        async move {
+            let store = slot.get().unwrap();
+            let mut t = store.task(&call.task.id).unwrap();
+            t.schedule_value = "2026-06-02T09:00:00".into();
+            t.next_run = Some("2026-06-02T07:00:00.000Z".into());
+            store.insert(t);
+            TaskExecution::success(Some("moved myself".into()))
+        }
+    });
+    store_slot.set(h.store.clone()).ok().unwrap();
+    h.store.insert(new_task(
+        "self-moving",
+        ScheduleType::Once,
+        "2026-06-01T07:59:59",
+        &at(-1),
+    ));
+
+    h.scheduler.run_task(MAIN_JID, "self-moving").await;
+    let task = h.task("self-moving");
+    assert_eq!(task.status, TaskStatus::Active);
+    assert_eq!(task.schedule_value, "2026-06-02T09:00:00");
+    assert_eq!(task.next_run.as_deref(), Some("2026-06-02T07:00:00.000Z"));
+    assert_eq!(task.last_result.as_deref(), Some("moved myself"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn interval_skips_missed_runs_without_bursting() {
     let h = ok_harness();
     let ms = 60_000;

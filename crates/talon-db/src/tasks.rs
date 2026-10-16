@@ -388,6 +388,46 @@ impl Db {
         })
     }
 
+    /// Record a finished run of `ran`, the task as it was when the run
+    /// started: `last_run = now` and `last_result` always, `next_run` (and
+    /// `status = 'completed'` when it is `None`) only while the task still
+    /// has the schedule that ran. A task that was rescheduled during its run
+    /// (by its own agent through `update_task`, say) keeps its new schedule
+    /// and next run. Returns whether `next_run` was written.
+    pub fn finish_task_run(
+        &self,
+        ran: &ScheduledTask,
+        next_run: Option<&str>,
+        last_result: &str,
+    ) -> Result<bool> {
+        self.with_tx(true, |conn| {
+            conn.prepare_cached(
+                "UPDATE scheduled_tasks SET last_run = ?1, last_result = ?2 WHERE id = ?3",
+            )
+            .db()?
+            .execute(params![now_iso(), last_result, ran.id])
+            .db()?;
+            let changed = conn
+                .prepare_cached(
+                    "UPDATE scheduled_tasks
+                     SET next_run = ?1,
+                         status = CASE WHEN ?1 IS NULL THEN 'completed' ELSE status END
+                     WHERE id = ?2 AND schedule_type = ?3 AND schedule_value = ?4
+                       AND next_run IS ?5",
+                )
+                .db()?
+                .execute(params![
+                    next_run,
+                    ran.id,
+                    ran.schedule_type.as_str(),
+                    ran.schedule_value,
+                    ran.next_run,
+                ])
+                .db()?;
+            Ok(changed > 0)
+        })
+    }
+
     /// Append a run log. The task must exist (foreign key).
     pub fn log_task_run(&self, log: &TaskRunLog) -> Result<()> {
         self.with_conn(|conn| {
@@ -674,6 +714,41 @@ mod tests {
         // Boundary is inclusive.
         let due = db.get_due_tasks("2024-01-02T00:00:00.000Z").unwrap();
         assert_eq!(due.len(), 1);
+    }
+
+    #[test]
+    fn finishing_a_run_keeps_a_schedule_changed_during_it() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_task(&task("plain")).unwrap();
+        db.create_task(&task("moved")).unwrap();
+        let ran_plain = db.get_task_by_id("plain").unwrap().unwrap();
+        let ran_moved = db.get_task_by_id("moved").unwrap().unwrap();
+
+        assert!(
+            db.finish_task_run(&ran_plain, Some("2024-07-01T00:00:00.000Z"), "ok")
+                .unwrap()
+        );
+        let t = db.get_task_by_id("plain").unwrap().unwrap();
+        assert_eq!(t.next_run.as_deref(), Some("2024-07-01T00:00:00.000Z"));
+        assert_eq!(t.last_result.as_deref(), Some("ok"));
+
+        // The task moved itself to a new time while it ran.
+        db.update_task(
+            "moved",
+            &TaskUpdate {
+                schedule_value: Some("2030-01-01T09:00:00".into()),
+                next_run: Some(Some("2030-01-01T08:00:00.000Z".into())),
+                ..TaskUpdate::default()
+            },
+        )
+        .unwrap();
+        assert!(!db.finish_task_run(&ran_moved, None, "done").unwrap());
+        let t = db.get_task_by_id("moved").unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Active);
+        assert_eq!(t.next_run.as_deref(), Some("2030-01-01T08:00:00.000Z"));
+        assert_eq!(t.schedule_value, "2030-01-01T09:00:00");
+        assert_eq!(t.last_result.as_deref(), Some("done"));
+        assert!(t.last_run.is_some());
     }
 
     #[test]

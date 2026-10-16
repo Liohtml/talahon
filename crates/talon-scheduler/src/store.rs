@@ -29,6 +29,21 @@ pub trait TaskStore: Send + Sync {
         last_result: &str,
     ) -> Result<()>;
 
+    /// Record a finished run of `ran`, the task as it was when the run
+    /// started, like [`update_task_after_run`](Self::update_task_after_run)
+    /// — except that `next_run` and `status` are left alone when the task's
+    /// schedule changed while it ran (a task that rescheduled itself keeps
+    /// its new time). The default cannot tell and always writes them.
+    async fn finish_task_run(
+        &self,
+        ran: &ScheduledTask,
+        next_run: Option<&str>,
+        last_result: &str,
+    ) -> Result<()> {
+        self.update_task_after_run(&ran.id, next_run, last_result)
+            .await
+    }
+
     /// Append a run log entry.
     async fn log_task_run(&self, log: &TaskRunLog) -> Result<()>;
 
@@ -71,6 +86,22 @@ impl TaskStore for talon_db::Db {
         let next_run = next_run.map(str::to_string);
         let last_result = last_result.to_string();
         blocking(move || db.update_task_after_run(&id, next_run.as_deref(), &last_result)).await
+    }
+
+    async fn finish_task_run(
+        &self,
+        ran: &ScheduledTask,
+        next_run: Option<&str>,
+        last_result: &str,
+    ) -> Result<()> {
+        let (db, ran) = (self.clone(), ran.clone());
+        let next_run = next_run.map(str::to_string);
+        let last_result = last_result.to_string();
+        blocking(move || {
+            db.finish_task_run(&ran, next_run.as_deref(), &last_result)
+                .map(|_| ())
+        })
+        .await
     }
 
     async fn log_task_run(&self, log: &TaskRunLog) -> Result<()> {
@@ -206,6 +237,28 @@ impl TaskStore for MemoryTaskStore {
             t.next_run = next_run.map(str::to_string);
             if next_run.is_none() {
                 t.status = TaskStatus::Completed;
+            }
+        });
+        Ok(())
+    }
+
+    async fn finish_task_run(
+        &self,
+        ran: &ScheduledTask,
+        next_run: Option<&str>,
+        last_result: &str,
+    ) -> Result<()> {
+        self.update(&ran.id, |t| {
+            t.last_run = Some(now_iso());
+            t.last_result = Some(last_result.to_string());
+            let unchanged = t.schedule_type == ran.schedule_type
+                && t.schedule_value == ran.schedule_value
+                && t.next_run == ran.next_run;
+            if unchanged {
+                t.next_run = next_run.map(str::to_string);
+                if next_run.is_none() {
+                    t.status = TaskStatus::Completed;
+                }
             }
         });
         Ok(())

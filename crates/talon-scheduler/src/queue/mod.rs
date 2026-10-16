@@ -54,6 +54,11 @@ pub trait LaneProcessor: Send + Sync {
     /// Run the scheduled task `task_id` in the lane `chat_jid`. Hosts
     /// normally delegate to [`TaskScheduler::run_task`](crate::TaskScheduler::run_task).
     async fn run_task(&self, chat_jid: &str, task_id: &str);
+
+    /// The lane's message run failed [`RetryPolicy::max_retries`] times in a
+    /// row and the queue gave up until the next incoming message. Hosts can
+    /// tell the user here; the default does nothing.
+    async fn retries_exhausted(&self, _chat_jid: &str) {}
 }
 
 /// Handle to a lane's running agent container, registered by the host via
@@ -481,29 +486,44 @@ impl GroupQueue {
     /// should then
     /// [`enqueue_message_check`](Self::enqueue_message_check).
     pub fn send_message(&self, chat_jid: &str, text: &str) -> bool {
+        self.pipe_message(chat_jid, text).is_some()
+    }
+
+    /// [`send_message`](Self::send_message), returning the name of the input
+    /// file written. The agent reports the files each turn consumed with the
+    /// turn's output, so the caller can tell when this message was answered.
+    pub fn pipe_message(&self, chat_jid: &str, text: &str) -> Option<String> {
         let (run_id, ipc_key, was_idle) = {
             let mut st = self.inner.lock();
-            let Some(active) = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut()) else {
-                return false;
-            };
-            // A closing container takes `_close` before any input file and
-            // exits: a message piped now would sit unread in its input
+            let active = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut())?;
+            // A closing container stops reading input once it has seen
+            // `_close`: a message piped now could sit unread in its input
             // directory while the cursor already moved past it.
             if active.is_task() || active.closing {
-                return false;
+                return None;
             }
-            let Some(key) = active.ipc_key.clone() else {
-                return false;
-            };
+            let key = active.ipc_key.clone()?;
             // The agent is about to receive work: no longer idle, so a task
             // enqueued meanwhile must not preempt it.
             let was_idle = std::mem::replace(&mut active.idle_waiting, false);
             (active.id, key, was_idle)
         };
-        match ipc_input::write_message(&self.inner.config.data_dir, &ipc_key, text) {
-            Ok(path) => {
-                debug!(jid = chat_jid, file = %path.display(), chars = text.len(), "follow-up piped to container");
-                true
+        let written = ipc_input::write_message(&self.inner.config.data_dir, &ipc_key, text)
+            .and_then(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| talon_core::Error::invalid("IPC input file has no name"))
+            });
+        match written {
+            Ok(file) => {
+                debug!(
+                    jid = chat_jid,
+                    file,
+                    chars = text.len(),
+                    "follow-up piped to container"
+                );
+                Some(file)
             }
             Err(e) => {
                 warn!(jid = chat_jid, error = %e, "failed to write IPC input message");
@@ -513,7 +533,7 @@ impl GroupQueue {
                         active.idle_waiting = was_idle;
                     }
                 }
-                false
+                None
             }
         }
     }
@@ -862,6 +882,11 @@ impl Inner {
                 "max retries exceeded, dropping messages (will retry on next incoming message)"
             );
             lane.retry_count = 0;
+            if let Some(processor) = self.processor() {
+                let jid = jid.to_string();
+                self.tracker
+                    .spawn(async move { processor.retries_exhausted(&jid).await });
+            }
             return;
         }
         if lane.retry_scheduled {
