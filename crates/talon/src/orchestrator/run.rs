@@ -290,6 +290,7 @@ impl Orchestrator {
         };
         let fingerprint = provider_fingerprint(&merged);
         let session_id = self.resolve_session(group, &fingerprint, &opts);
+        let session_epoch = self.session_epoch(group.session_key());
 
         self.write_snapshots(group, chat_jid);
 
@@ -354,7 +355,13 @@ impl Orchestrator {
                 };
                 if opts.manage_session {
                     if let Some(id) = output.new_session_id.as_deref().filter(|s| !s.is_empty()) {
-                        self.persist_session(group, id, &fingerprint, output.usage.as_ref());
+                        self.persist_run_session(
+                            group,
+                            id,
+                            &fingerprint,
+                            output.usage.as_ref(),
+                            session_epoch,
+                        );
                     }
                 }
                 if let Some(result) = output.result.as_ref().filter(|r| !r.is_empty()) {
@@ -404,7 +411,13 @@ impl Orchestrator {
                 .as_deref()
                 .filter(|id| self.session_for_key(group.session_key()).as_deref() != Some(*id))
             {
-                self.persist_session(group, id, &fingerprint, result.usage.as_ref());
+                self.persist_run_session(
+                    group,
+                    id,
+                    &fingerprint,
+                    result.usage.as_ref(),
+                    session_epoch,
+                );
             }
         }
 

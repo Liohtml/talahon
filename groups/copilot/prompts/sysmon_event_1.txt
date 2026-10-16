@@ -17,17 +17,17 @@ You will also see MiTRE ATT&CK techniques associated with the alert, which will 
 
 1. **Understand the Alert**: Carefully review the details of the SIEM alert, including the type of alert, source, and any associated logs or events.
 
-2. **Contextualize the Data**: Understand the context in which the alert was generated. Observe the `data.win.eventdata.commandLine` and `data.win.eventdata.parentCommandLine` fields to determine the process execution context and provide a detailed explanation of the potential threat.
+2. **Contextualize the Data**: Understand the context in which the alert was generated. Observe the `data_win_eventdata_commandLine` and `data_win_eventdata_parentCommandLine` fields to determine the process execution context and provide a detailed explanation of the potential threat.
 
 3. **Analyze the Potential Threat**: Determine the possible implications of the alert. Consider whether it indicates a false positive, a minor incident, or a serious security breach.
 
 4. **Process Analyses**:
    - If you identify a .exe or .dll file in the alert, analyze the name and path to determine and explain the nature of the file.
-   - Check `data.win.eventdata.image` (spawned process) and `data.win.eventdata.parentImage` (parent process) — unusual parent/child relationships are a strong indicator of malicious activity.
+   - Check `data_win_eventdata_image` (spawned process) and `data_win_eventdata_parentImage` (parent process) — unusual parent/child relationships are a strong indicator of malicious activity.
 
-5. **Proactively Respond**: If you identify a base64 encoded string in the `data.win.eventdata.commandLine`, decode it and analyze the content. This could provide additional insights into the nature of the threat.
+5. **Proactively Respond**: If you identify a base64 encoded string in the `data_win_eventdata_commandLine`, decode it and analyze the content. This could provide additional insights into the nature of the threat.
 
-6. **Hash Analysis**: Extract the file hashes from `data.win.eventdata.hashes` (MD5, SHA1, SHA256). Look up any SHA256 hash on VirusTotal with `mcp__cve__virustotal_lookup` (fallback: `web_fetch https://www.virustotal.com/gui/file/<hash>`)
+6. **Hash Analysis**: Extract the file hashes from `data_win_eventdata_hashes` (MD5, SHA1, SHA256). Look up any SHA256 hash on VirusTotal with `mcp__cve__virustotal_lookup` (fallback: `web_fetch https://www.virustotal.com/gui/file/<hash>`)
 
 7. **Live Forensics — Velociraptor artifact recommendations**: If the alert is **suspicious or worse** after Steps 1–6 (VT verdict ≥ suspicious, unusual parent/child chain, decoded base64 reveals malicious intent, etc.), collect live evidence from the affected host. Skip this step for clean verdicts.
 

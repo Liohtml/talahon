@@ -22,7 +22,7 @@ The `mysql-query` command in your `PATH` runs SQL against the same MySQL databas
 mysql-query <<EOF
 SELECT id, alert_name, customer_code, status
 FROM incident_management_alert
-WHERE customer_code = 'lab' AND status = 'New'
+WHERE customer_code = 'lab' AND status = 'OPEN'
 ORDER BY alert_creation_time DESC
 LIMIT 20;
 EOF
@@ -102,7 +102,7 @@ LIMIT 20;
 - **`customer_code`** — the central tenant key. Present in almost every table. Join via `customers.customer_code`.
 - **`agent_id`** — Wazuh agent ID. Links `agents` → `agent_datastore`, `agent_vulnerabilities`, `incident_management_asset`.
 - **`incident_management_asset.alert_linked`** — FK to `incident_management_alert.id`. Contains `index_name` and `index_id` for OpenSearch document lookup.
-- Alert status values: `New`, `In Progress`, `CLOSED` (and possibly others — check `status` column for live values).
+- Alert status values: `OPEN`, `IN_PROGRESS`, `CLOSED`, `PENDING_CUSTOMER` (the SOC waits on the customer).
 - Alerts link to cases via `incident_management_casealertlink` (many-to-many).
 - Alerts link to IOCs via `incident_management_alert_to_ioc` (many-to-many).
 - Users link to customers via `user_customer_access` (many-to-many).
@@ -172,7 +172,7 @@ Key fields: `agent_id`, `artifact_name`, `flow_id`, `collection_time`, `status`,
 |--------|-------|
 | `id` | PK — used to join to `incident_management_asset.alert_linked` |
 | `alert_name`, `alert_description` | mediumtext — human-readable summary |
-| `status` | `New`, `In Progress`, `CLOSED` |
+| `status` | `OPEN`, `IN_PROGRESS`, `CLOSED`, `PENDING_CUSTOMER` |
 | `alert_creation_time` | When the alert was created |
 | `customer_code` | Tenant |
 | `source` | `wazuh`, `office365`, `crowdstrike`, etc. |

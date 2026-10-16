@@ -571,6 +571,10 @@ async fn send_message_writes_protocol_file_only_for_registered_message_container
     );
     assert!(q.close_stdin(G1));
     assert!(close_path(dir.path()).exists());
+    // The closing container takes `_close` first and exits: a follow-up
+    // must wait for the next run instead of being written unread.
+    assert!(!q.send_message(G1, "too late for this run"));
+    assert_eq!(input_messages(dir.path()).len(), 1);
 
     gates.release(0);
     settle().await;

@@ -324,11 +324,36 @@ fn first_non_empty_line(file: File) -> Option<String> {
     file.take(TEMPLATE_PREVIEW_BYTES)
         .read_to_end(&mut buf)
         .ok()?;
-    let text = String::from_utf8_lossy(&buf);
-    text.split('\n')
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(|l| truncate_chars(l, TEMPLATE_PREVIEW_CHARS).to_string())
+    template_preview(&String::from_utf8_lossy(&buf))
+}
+
+/// One line describing a template: the `description:` of its YAML front
+/// matter (`---` … `---`, which every shipped template starts with), else its
+/// first non-empty line after the front matter, else its first non-empty line.
+fn template_preview(text: &str) -> Option<String> {
+    let mut lines = text.split('\n').map(str::trim);
+    let mut first = lines.by_ref().find(|l| !l.is_empty())?;
+    if first == "---" {
+        let mut description = None;
+        let mut closed = false;
+        for line in lines.by_ref() {
+            if line == "---" {
+                closed = true;
+                break;
+            }
+            if let Some(d) = line.strip_prefix("description:") {
+                description = Some(d.trim().trim_matches(['"', '\'']).to_string());
+            }
+        }
+        if let Some(d) = description.filter(|d| !d.is_empty()) {
+            return Some(truncate_chars(&d, TEMPLATE_PREVIEW_CHARS).to_string());
+        }
+        if !closed {
+            return None;
+        }
+        first = lines.find(|l| !l.is_empty())?;
+    }
+    Some(truncate_chars(first, TEMPLATE_PREVIEW_CHARS).to_string())
 }
 
 /// Prompt templates usable as `template_override` (regular `.txt` files with
@@ -761,6 +786,30 @@ mod tests {
         assert_eq!(t[2].first_line.as_deref(), Some("# Process Creation"));
         assert!(t[2].modified_at.as_ref().unwrap().ends_with('Z'));
         assert_eq!(t[2].size_bytes, 29);
+    }
+
+    #[test]
+    fn template_preview_reads_past_front_matter() {
+        // Every shipped template starts with YAML front matter; its first
+        // line `---` used to be the preview of all of them.
+        let with_description =
+            "---\ndescription: \"Sysmon Event 1 (Process Creation)\"\nauthor: x\n---\n\n# Body";
+        assert_eq!(
+            template_preview(with_description).as_deref(),
+            Some("Sysmon Event 1 (Process Creation)")
+        );
+        assert_eq!(
+            template_preview("---\nauthor: x\n---\n\n  # Body title\nmore").as_deref(),
+            Some("# Body title")
+        );
+        assert_eq!(template_preview("---\nauthor: x\n"), None);
+        assert_eq!(template_preview("\n# Plain\n").as_deref(), Some("# Plain"));
+        let shipped = "---\ndescription: Investigation template for Sysmon Event 1 (Process Creation) alerts from {{ pipeline | default('wazuh') }}.\nauthor: Taylor Walton\n---\n\nAs a Security Operations Analyst, ...";
+        assert!(
+            template_preview(shipped)
+                .unwrap()
+                .starts_with("Investigation template")
+        );
     }
 
     #[test]

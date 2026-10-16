@@ -1416,6 +1416,27 @@ async fn palace_lesson_validates_and_forwards() {
 }
 
 #[tokio::test]
+async fn palace_failure_reported_in_the_answer_is_a_bad_gateway() {
+    // palace_call.py exits 0 and prints {"error": ...}; CoPilot's drainer
+    // marks a lesson ingested on any 2xx, so this must not be a 200.
+    let h = connected_harness().await;
+    let lesson = r#"{"customer_code":"acme","lesson_type":"environment","lesson_text":"DC01 patches at 02:00"}"#;
+    for answer in [
+        json!({"error": "chromadb unavailable"}),
+        json!({"success": false, "reason": "duplicate"}),
+    ] {
+        *h.palace.response.lock().unwrap() = Some(Ok(answer));
+        let res = h.send(authed("POST", "/palace/lesson", Some(lesson))).await;
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        let body = body_json(res).await;
+        assert!(!body.to_string().contains("chromadb"), "{body}");
+    }
+    *h.palace.response.lock().unwrap() = Some(Ok(json!({"success": true, "drawer_id": "d1"})));
+    let res = h.send(authed("POST", "/palace/lesson", Some(lesson))).await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn palace_search_validates_and_clamps() {
     let h = connected_harness().await;
     let res = h
