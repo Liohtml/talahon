@@ -604,6 +604,23 @@ async fn does_not_translate_if_message_already_matches_trigger() {
 }
 
 #[tokio::test]
+async fn a_mention_becomes_the_groups_own_trigger_word() {
+    let server = MockServer::start().await;
+    let host = Arc::new(RecordingHost::with_groups(&[(
+        "tg:100200300",
+        group("SOC Team", "soc-team", "@soc"),
+    )]));
+    let channel = ready_channel(&server, host.clone());
+    let mut v = text_json("@talonai_bot check host web-01");
+    v["entities"] = json!([{ "type": "mention", "offset": 0, "length": 12 }]);
+    deliver(&channel, v).await;
+    assert_eq!(
+        only_message(&host).content,
+        "@soc @talonai_bot check host web-01"
+    );
+}
+
+#[tokio::test]
 async fn does_not_translate_mentions_of_other_bots() {
     let content = mention_case(
         "@some_other_bot hi",
@@ -685,6 +702,24 @@ async fn stores_photo_with_placeholder() {
 async fn stores_photo_with_caption() {
     let (_, msg) = media_case(json!({ "photo": [], "caption": "Look at this" })).await;
     assert_eq!(msg.unwrap().content, "[Photo] Look at this");
+}
+
+#[tokio::test]
+async fn a_caption_can_carry_the_trigger() {
+    // Written trigger: it stays at the start.
+    let (_, msg) = media_case(json!({ "photo": [], "caption": "@Talon what is this?" })).await;
+    assert_eq!(msg.unwrap().content, "@Talon what is this? [Photo]");
+    // Bot mention in the caption.
+    let (_, msg) = media_case(json!({
+        "photo": [],
+        "caption": "@talonai_bot is this phishing?",
+        "caption_entities": [{ "type": "mention", "offset": 0, "length": 12 }]
+    }))
+    .await;
+    assert_eq!(
+        msg.unwrap().content,
+        "@Talon @talonai_bot is this phishing? [Photo]"
+    );
 }
 
 #[tokio::test]

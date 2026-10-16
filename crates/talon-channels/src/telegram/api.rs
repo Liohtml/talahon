@@ -135,6 +135,8 @@ pub(crate) struct Message {
     #[serde(default)]
     pub entities: Vec<Entity>,
     #[serde(default)]
+    pub caption_entities: Vec<Entity>,
+    #[serde(default)]
     pub message_thread_id: Option<i64>,
     #[serde(default)]
     pub is_topic_message: Option<bool>,

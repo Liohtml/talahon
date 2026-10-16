@@ -226,7 +226,14 @@ impl Orchestrator {
             is_trusted_channel: group.trusted_session_commands,
         };
         match handle_session_command(request, &deps).await {
-            Ok(SessionCommandOutcome::Handled { success }) => return success,
+            Ok(SessionCommandOutcome::Handled { success }) => {
+                // Messages after the command stay pending; they get their
+                // own run now instead of waiting for the next message.
+                if success && !self.pending_messages(chat_jid).is_empty() {
+                    self.queue.enqueue_message_check(chat_jid);
+                }
+                return success;
+            }
             Ok(SessionCommandOutcome::NotHandled) => {}
             Err(e) => {
                 tracing::warn!(chat_jid, error = %e, "session command failed; will retry");

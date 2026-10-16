@@ -493,6 +493,28 @@ async fn session_is_persisted_with_provider_fingerprint_and_resumed() {
 }
 
 #[tokio::test]
+async fn stale_session_is_cleared_when_only_the_agent_frame_says_so() {
+    let h = harness();
+    let g = group("Main", "main", true);
+    h.orch
+        .register_group_inner(MAIN, g.clone(), true, false)
+        .unwrap();
+    h.orch.persist_session(&g, "gone-2", "vllm:qwen", None);
+    // The runner's error quotes the end of stderr, which no longer holds
+    // the reason; the agent's error frame does.
+    h.launcher.push(Script {
+        outputs: vec![ContainerOutput::error("session not found: gone-2")],
+        error: Some("Container exited with code 1: INFO mcp: servers stopped".into()),
+        ..Script::default()
+    });
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "1", "me", "hello", &ts(1)));
+    assert!(!h.orch.process_group_messages(MAIN).await);
+    assert_eq!(h.orch.session_for_key("main"), None);
+    assert_eq!(h.db.get_session("main").unwrap(), None);
+}
+
+#[tokio::test]
 async fn stale_session_is_cleared_after_error() {
     let h = harness();
     let g = group("Main", "main", true);
@@ -816,6 +838,24 @@ async fn trusted_lane_may_run_session_commands() {
 // ---------------------------------------------------------------------------
 // Message loop: piping, wake-ups, recovery
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn messages_after_a_session_command_get_their_own_run() {
+    let h = harness();
+    h.orch
+        .register_group_inner(MAIN, group("Main", "main", true), true, false)
+        .unwrap();
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "1", "me", "/new", &ts(1)));
+    h.orch
+        .accept_message(MAIN, msg(MAIN, "2", "me", "and now this", &ts(2)));
+    h.launcher.push(Script::reply("answer"));
+    assert!(h.orch.process_group_messages(MAIN).await);
+    h.launcher.wait_started(1).await;
+    let prompts = h.launcher.prompts();
+    assert!(prompts[0].contains("and now this"), "{}", prompts[0]);
+    assert!(!prompts[0].contains("/new"));
+}
 
 #[tokio::test]
 async fn follow_up_is_piped_into_the_active_container() {

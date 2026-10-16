@@ -38,7 +38,7 @@ use serde_json::{Value, json};
 use talon_core::channel::{Channel, ChannelHost, ChannelType};
 use talon_core::env::EnvFile;
 use talon_core::time::{now_iso, to_iso};
-use talon_core::types::{ChatMetadata, NewMessage};
+use talon_core::types::{ChatMetadata, NewMessage, RegisteredGroup};
 use talon_core::{Error, Result};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -564,6 +564,47 @@ impl Inner {
         }
     }
 
+    /// The trigger text and pattern of `group` (the default trigger for a
+    /// chat that is not registered).
+    fn trigger_for(&self, group: Option<&RegisteredGroup>) -> (String, Regex) {
+        match group.map(|g| g.trigger.trim()).filter(|t| !t.is_empty()) {
+            Some(trigger) => (
+                trigger.to_string(),
+                talon_core::trigger::build_trigger_pattern(trigger, &self.assistant_name),
+            ),
+            None => (
+                talon_core::trigger::default_trigger(&self.assistant_name),
+                self.trigger.clone(),
+            ),
+        }
+    }
+
+    /// Translate an `@bot_username` mention into the chat's trigger: a
+    /// Telegram mention (`@talonai_bot`) never matches `^@Talon\b`, nor a
+    /// group's own trigger word.
+    fn with_trigger(
+        &self,
+        text: String,
+        entities: &[api::Entity],
+        group: Option<&RegisteredGroup>,
+    ) -> String {
+        let Some(username) = self.bot_username() else {
+            return text;
+        };
+        let wanted = format!("@{}", username.to_lowercase());
+        let mentioned = entities.iter().any(|entity| {
+            entity.kind == "mention"
+                && utf16_slice(&text, entity.offset, entity.length)
+                    .is_some_and(|m| m.to_lowercase() == wanted)
+        });
+        let (trigger, pattern) = self.trigger_for(group);
+        if mentioned && !pattern.is_match(text.trim()) {
+            format!("{trigger} {text}")
+        } else {
+            text
+        }
+    }
+
     fn reply_fields(msg: &Message) -> (Option<String>, Option<String>, Option<String>) {
         match msg.reply_to_message.as_deref() {
             // In forum supergroups every topic message "replies" to the
@@ -620,20 +661,8 @@ impl Inner {
                 .unwrap_or_else(|| chat_jid.clone())
         };
 
-        // Translate `@bot_username` mentions into the trigger format: a
-        // Telegram mention (`@talonai_bot`) won't match `^@Talon\b`.
-        let mut content = text;
-        if let Some(username) = bot_username {
-            let wanted = format!("@{}", username.to_lowercase());
-            let mentioned = msg.entities.iter().any(|entity| {
-                entity.kind == "mention"
-                    && utf16_slice(&content, entity.offset, entity.length)
-                        .is_some_and(|m| m.to_lowercase() == wanted)
-            });
-            if mentioned && !self.trigger.is_match(&content) {
-                content = format!("@{} {content}", self.assistant_name);
-            }
-        }
+        let groups = self.host.registered_groups();
+        let content = self.with_trigger(text, &msg.entities, groups.get(&chat_jid));
 
         let is_group = is_group_chat(&msg.chat.kind);
         self.host
@@ -646,7 +675,7 @@ impl Inner {
             })
             .await;
 
-        if !self.host.registered_groups().contains_key(&chat_jid) {
+        if !groups.contains_key(&chat_jid) {
             debug!(chat_jid, "Message from unregistered Telegram chat");
             return;
         }
@@ -677,12 +706,22 @@ impl Inner {
 
     async fn store_non_text(&self, msg: &Message, placeholder: &str) {
         let chat_jid = format!("{TELEGRAM_JID_PREFIX}{}", msg.chat.id);
-        if !self.host.registered_groups().contains_key(&chat_jid) {
+        let groups = self.host.registered_groups();
+        let Some(group) = groups.get(&chat_jid) else {
             return;
-        }
+        };
         let timestamp = unix_to_iso(msg.date);
-        let content = match msg.caption.as_deref().filter(|c| !c.is_empty()) {
-            Some(caption) => format!("{placeholder} {caption}"),
+        let content = match msg.caption.clone().filter(|c| !c.is_empty()) {
+            Some(caption) => {
+                let caption = self.with_trigger(caption, &msg.caption_entities, Some(group));
+                // A caption that addresses the assistant keeps its trigger
+                // at the start, where the lane looks for it.
+                if self.trigger_for(Some(group)).1.is_match(caption.trim()) {
+                    format!("{caption} {placeholder}")
+                } else {
+                    format!("{placeholder} {caption}")
+                }
+            }
             None => placeholder.to_string(),
         };
         self.host

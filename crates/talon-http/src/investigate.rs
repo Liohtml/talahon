@@ -26,6 +26,8 @@ pub const WEBHOOK_JID: &str = "webhook:copilot";
 pub const DIGEST_CRON: &str = "*/15 * * * *";
 /// Investigation status written when a job is queued.
 pub const STATUS_QUEUED: &str = "queued";
+/// Investigation status while its task runs (written by the host).
+pub const STATUS_RUNNING: &str = "running";
 /// Terminal failure status; failed jobs never de-duplicate a new trigger.
 pub const STATUS_FAILED: &str = "failed";
 

@@ -12,6 +12,11 @@
 //! cron tasks to the next occurrence after now, interval tasks to the next
 //! grid point after now. Missed runs are never replayed in a burst.
 //!
+//! Retry policy: a failed run is retried with backoff (never later than the
+//! next regular run) up to `retry.max_retries` times. An interval task
+//! stays on its grid: the run after a retry is scheduled from the grid
+//! point the task was originally due at, not from the retry time.
+//!
 //! Lane policy (N-1): a task only ever runs in the lane it was created for —
 //! the group registered at its own `chat_jid` with its own folder. Lanes of
 //! the same folder are *not* interchangeable: each carries its own session
@@ -20,7 +25,8 @@
 //! lanes after a host restart or an idle sweep) or is registered for another
 //! folder, the run is deferred with capped backoff and never completed, so it
 //! runs in its own lane once that lane is registered again. There is no
-//! fallback to another JID of the same folder.
+//! fallback to another JID of the same folder. Deferrals back off on their
+//! own count and never spend the retry budget of failed runs.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -299,8 +305,32 @@ pub struct TaskScheduler {
     clock: Arc<dyn Clock>,
     wake: Notify,
     running: AtomicBool,
-    failures: Mutex<HashMap<String, u32>>,
+    retries: Mutex<HashMap<String, RetryState>>,
     rng: JitterRng,
+}
+
+/// What the scheduler keeps about a task while it is off its regular
+/// schedule. In memory only: a host restart starts afresh.
+#[derive(Debug, Default)]
+struct RetryState {
+    /// Consecutive failed runs: the retry budget.
+    failures: u32,
+    /// Consecutive deferrals because the task's lane was unresolved. They
+    /// back off on their own and never spend the retry budget.
+    deferrals: u32,
+    /// Set while a retry or deferral moved an interval task off its grid.
+    grid: Option<GridAnchor>,
+}
+
+/// The grid point an interval task was due at before a retry or deferral
+/// moved its `next_run` off the grid. Valid only while the task still holds
+/// the `next_run` that move wrote and the same schedule, i.e. nobody has
+/// rescheduled it since.
+#[derive(Debug)]
+struct GridAnchor {
+    anchor: String,
+    moved_to: String,
+    schedule_value: String,
 }
 
 impl fmt::Debug for TaskScheduler {
@@ -340,7 +370,7 @@ impl TaskScheduler {
             clock: Arc::new(SystemClock),
             wake: Notify::new(),
             running: AtomicBool::new(false),
-            failures: Mutex::new(HashMap::new()),
+            retries: Mutex::new(HashMap::new()),
             rng: JitterRng::new(),
         }
     }
@@ -497,6 +527,7 @@ impl TaskScheduler {
             }
         };
 
+        self.clear_deferrals(&task.id);
         let attempt = self.failure_count(&task.id);
         let late_by = scheduled_for
             .and_then(|due| (now - due).to_std().ok())
@@ -540,10 +571,11 @@ impl TaskScheduler {
             _ => "Completed".to_string(),
         };
 
+        let anchor = self.schedule_anchor(&task);
         let regular = compute_next_run(
             task.schedule_type,
             &task.schedule_value,
-            task.next_run.as_deref(),
+            anchor.as_deref(),
             self.config.timezone,
             finished,
         );
@@ -564,7 +596,9 @@ impl TaskScheduler {
                         Some(r) if task.schedule_type != ScheduleType::Once => r.min(retry_at),
                         _ => retry_at,
                     };
-                    Some(to_iso(next))
+                    let next = ensure_after(to_iso(next), finished);
+                    self.note_grid(&task, anchor.as_deref(), regular.as_deref(), &next);
+                    Some(next)
                 } else {
                     warn!(
                         task_id,
@@ -660,25 +694,30 @@ impl TaskScheduler {
         };
         self.log_run(&task.id, now, started.elapsed(), None, Some(error.clone()))
             .await;
-        let failures = self.record_failure(&task.id);
-        let retry_at = now + self.backoff(failures);
+        let deferrals = self.record_deferral(&task.id);
+        let retry_at = now + self.backoff(deferrals);
+        let anchor = self.schedule_anchor(task);
         let regular = if task.schedule_type == ScheduleType::Once {
             None
         } else {
             compute_next_run(
                 task.schedule_type,
                 &task.schedule_value,
-                task.next_run.as_deref(),
+                anchor.as_deref(),
                 self.config.timezone,
                 now,
             )
             .ok()
             .flatten()
-            .as_deref()
-            .and_then(parse_iso)
         };
-        let next = to_iso(regular.map_or(retry_at, |r| r.min(retry_at)));
+        let next = to_iso(
+            regular
+                .as_deref()
+                .and_then(parse_iso)
+                .map_or(retry_at, |r| r.min(retry_at)),
+        );
         let next = ensure_after(next, now);
+        self.note_grid(task, anchor.as_deref(), regular.as_deref(), &next);
         if let Err(e) = self.store.reschedule_task(&task.id, &next).await {
             error!(task_id = %task.id, error = %e, "failed to reschedule task");
         }
@@ -786,23 +825,81 @@ impl TaskScheduler {
         }
     }
 
-    fn failures(&self) -> MutexGuard<'_, HashMap<String, u32>> {
-        self.failures.lock().unwrap_or_else(PoisonError::into_inner)
+    fn retries(&self) -> MutexGuard<'_, HashMap<String, RetryState>> {
+        self.retries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn failure_count(&self, task_id: &str) -> u32 {
-        self.failures().get(task_id).copied().unwrap_or(0)
+        self.retries().get(task_id).map_or(0, |s| s.failures)
     }
 
     fn record_failure(&self, task_id: &str) -> u32 {
-        let mut failures = self.failures();
-        let count = failures.entry(task_id.to_string()).or_insert(0);
-        *count = count.saturating_add(1);
-        *count
+        let mut retries = self.retries();
+        let state = retries.entry(task_id.to_string()).or_default();
+        state.failures = state.failures.saturating_add(1);
+        state.failures
     }
 
+    fn record_deferral(&self, task_id: &str) -> u32 {
+        let mut retries = self.retries();
+        let state = retries.entry(task_id.to_string()).or_default();
+        state.deferrals = state.deferrals.saturating_add(1);
+        state.deferrals
+    }
+
+    fn clear_deferrals(&self, task_id: &str) {
+        if let Some(state) = self.retries().get_mut(task_id) {
+            state.deferrals = 0;
+        }
+    }
+
+    /// The task is back on its regular schedule (or gone): forget it.
     fn clear_failures(&self, task_id: &str) {
-        self.failures().remove(task_id);
+        self.retries().remove(task_id);
+    }
+
+    /// The `next_run` an interval schedule continues from: the grid point
+    /// the task was due at when a retry or deferral moved it off its grid,
+    /// as long as nothing has rescheduled the task since; otherwise the
+    /// task's own `next_run`.
+    fn schedule_anchor(&self, task: &ScheduledTask) -> Option<String> {
+        let retries = self.retries();
+        match retries.get(&task.id).and_then(|s| s.grid.as_ref()) {
+            Some(grid)
+                if task.schedule_type == ScheduleType::Interval
+                    && task.next_run.as_deref() == Some(grid.moved_to.as_str())
+                    && task.schedule_value == grid.schedule_value =>
+            {
+                Some(grid.anchor.clone())
+            }
+            _ => task.next_run.clone(),
+        }
+    }
+
+    /// Remember the grid anchor when `next` (the `next_run` about to be
+    /// stored) moves an interval task off the grid point `regular`.
+    fn note_grid(
+        &self,
+        task: &ScheduledTask,
+        anchor: Option<&str>,
+        regular: Option<&str>,
+        next: &str,
+    ) {
+        let grid = match anchor {
+            Some(anchor)
+                if task.schedule_type == ScheduleType::Interval && regular != Some(next) =>
+            {
+                Some(GridAnchor {
+                    anchor: anchor.to_string(),
+                    moved_to: next.to_string(),
+                    schedule_value: task.schedule_value.clone(),
+                })
+            }
+            _ => None,
+        };
+        if let Some(state) = self.retries().get_mut(&task.id) {
+            state.grid = grid;
+        }
     }
 }
 

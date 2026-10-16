@@ -104,14 +104,21 @@ pub async fn service_state(ctx: &SetupContext) -> ServiceState {
             };
             match raw.trim().parse::<u32>() {
                 Ok(pid) if pid > 0 => {
-                    let alive = runner
+                    // The recorded PID may belong to another process by now
+                    // (reboot, crash): it counts only while it runs Talon.
+                    let ps = runner
                         .run(&CommandSpec::new(
-                            "kill",
-                            ["-0".to_string(), pid.to_string()],
+                            "ps",
+                            [
+                                "-p".to_string(),
+                                pid.to_string(),
+                                "-o".into(),
+                                "args=".into(),
+                            ],
                         ))
-                        .await
-                        .success();
-                    if alive {
+                        .await;
+                    let ours = format!("{} run", ctx.talon_binary.display());
+                    if ps.success() && ps.stdout.contains(&ours) {
                         ServiceState::Running
                     } else {
                         ServiceState::Stopped
@@ -290,9 +297,20 @@ mod tests {
         assert_eq!(service_state(&c).await, ServiceState::NotFound);
         std::fs::write(dir.path().join("talon.pid"), "4242\n").unwrap();
         let runner = Arc::new(MockRunner::new());
-        runner.on("kill -0 4242", CommandOutput::ok(""));
+        runner.on(
+            "ps -p 4242 -o args=",
+            CommandOutput::ok(&format!("{} run\n", c.talon_binary.display())),
+        );
         c.runner = runner;
         assert_eq!(service_state(&c).await, ServiceState::Running);
+        // A stale PID now used by another process is not Talon.
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "ps -p 4242 -o args=",
+            CommandOutput::ok("/usr/sbin/sshd -D\n"),
+        );
+        c.runner = runner;
+        assert_eq!(service_state(&c).await, ServiceState::Stopped);
         std::fs::write(dir.path().join("talon.pid"), "garbage").unwrap();
         assert_eq!(service_state(&c).await, ServiceState::Stopped);
     }

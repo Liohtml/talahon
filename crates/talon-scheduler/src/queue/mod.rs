@@ -5,8 +5,10 @@
 //! in total. Lanes that cannot start because the limit is reached wait in a
 //! FIFO list. When a job finishes, the lane's own pending work runs next —
 //! tasks before messages, because messages are re-discovered from the
-//! database but queued tasks are not — unless other lanes are already
-//! waiting, in which case the lane queues behind them (fairness).
+//! database but queued tasks are not; after a task, though, pending
+//! messages go first, so a backlog of tasks cannot keep a chat waiting —
+//! unless other lanes are already waiting, in which case the lane queues
+//! behind them (fairness).
 //!
 //! The queue never calls into the host while holding its lock: jobs run in
 //! spawned tasks that call [`LaneProcessor`] without any lock held, and
@@ -234,6 +236,8 @@ struct Lane {
     pending_tasks: VecDeque<String>,
     retry_count: u32,
     retry_scheduled: bool,
+    /// The lane's last job was a task: pending messages go next.
+    last_was_task: bool,
 }
 
 impl Lane {
@@ -856,6 +860,7 @@ impl Inner {
         st.active_count = st.active_count.saturating_sub(1);
         if let Some(lane) = st.lanes.get_mut(jid) {
             lane.active = None;
+            lane.last_was_task = matches!(kind, RunKind::Task(_));
         }
         if *kind == RunKind::Messages {
             if success {
@@ -953,7 +958,8 @@ impl Inner {
         }
     }
 
-    /// Start the lane's next pending job (tasks before messages).
+    /// Start the lane's next pending job: tasks before messages, except
+    /// right after a task (see the module docs).
     fn start_next_for_lane(self: &Arc<Self>, st: &mut State, jid: &str) -> bool {
         let Some(lane) = st.lanes.get_mut(jid) else {
             return false;
@@ -961,7 +967,10 @@ impl Inner {
         if lane.active.is_some() {
             return false;
         }
-        if let Some(task_id) = lane.pending_tasks.pop_front() {
+        if lane.pending_messages && lane.last_was_task {
+            self.start_job(st, jid, RunKind::Messages);
+            true
+        } else if let Some(task_id) = lane.pending_tasks.pop_front() {
             self.start_job(st, jid, RunKind::Task(task_id));
             true
         } else if lane.pending_messages {

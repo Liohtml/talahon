@@ -352,6 +352,7 @@ impl Orchestrator {
             let mut rx = rx;
             let mut guard = OutputGuard::new(limits);
             let mut last_result: Option<String> = None;
+            let mut frame_error: Option<String> = None;
             let mut aborted: Option<String> = None;
             while let Some(output) = rx.recv().await {
                 let output = match guard.admit(output) {
@@ -375,6 +376,9 @@ impl Orchestrator {
                 if let Some(result) = output.result.as_ref().filter(|r| !r.is_empty()) {
                     last_result = Some(result.clone());
                 }
+                if output.status == OutputStatus::Error {
+                    frame_error.clone_from(&output.error);
+                }
                 sink.on_output(&output).await;
             }
             // Dropping the receiver makes every further send fail: the
@@ -385,9 +389,9 @@ impl Orchestrator {
                 sink.on_output(&ContainerOutput::error(reason.clone()))
                     .await;
             }
-            (last_result, aborted)
+            (last_result, frame_error, aborted)
         };
-        let (mut result, (streamed_result, aborted)) = tokio::join!(launch, consume);
+        let (mut result, (streamed_result, frame_error, aborted)) = tokio::join!(launch, consume);
         if let Some(reason) = aborted {
             result.status = OutputStatus::Error;
             result.error = Some(reason);
@@ -434,7 +438,12 @@ impl Orchestrator {
                 .error
                 .clone()
                 .unwrap_or_else(|| "Unknown error".to_string());
-            if opts.manage_session && session_id.is_some() && is_stale_session_error(&error) {
+            // The agent says so in its error frame; the runner's own error
+            // only quotes the end of stderr, where later log lines may have
+            // pushed the reason out.
+            let stale = is_stale_session_error(&error)
+                || frame_error.as_deref().is_some_and(is_stale_session_error);
+            if opts.manage_session && session_id.is_some() && stale {
                 tracing::warn!(
                     group = %group.name,
                     error = %error,

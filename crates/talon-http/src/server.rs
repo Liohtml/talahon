@@ -30,7 +30,7 @@ use talon_core::audit::{SharedAuditSink, event};
 use talon_core::channel::ChannelHost;
 use talon_core::time::now_iso;
 use talon_core::types::{
-    AdditionalMount, ChatMetadata, ContainerConfig, NewMessage, RegisteredGroup,
+    AdditionalMount, ChatMetadata, ContainerConfig, NewMessage, RegisteredGroup, TaskStatus,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -38,8 +38,8 @@ use crate::auth::{AuthThrottle, KeyVerifier, SecurityKeyVerifier};
 use crate::config::HttpConfig;
 use crate::files;
 use crate::investigate::{
-    self, InvestigationRequest, investigation_prompt, investigation_record, investigation_task,
-    is_duplicate, job_id,
+    self, InvestigationRequest, STATUS_QUEUED, STATUS_RUNNING, investigation_prompt,
+    investigation_record, investigation_task, is_duplicate, job_id,
 };
 use crate::lanes::{LaneIds, OpenError, StreamRegistry, USER_SESSION_KEY_PREFIX, UserId};
 use crate::metrics::{self, Gauges, Metrics};
@@ -785,10 +785,11 @@ async fn health() -> Response {
 async fn status(State(st): State<HttpState>) -> ApiResult {
     let s = &st.0;
     let folder = s.config.group_folder.clone();
-    let (tasks, rows) = run_blocking(&s.store, move |store| {
+    let (tasks, rows, investigations) = run_blocking(&s.store, move |store| {
         Ok((
             store.get_tasks_for_group(&folder)?,
             store.get_session_rows()?,
+            store.investigation_status_counts()?,
         ))
     })
     .await
@@ -821,8 +822,11 @@ async fn status(State(st): State<HttpState>) -> ApiResult {
             })
         })
         .collect();
+    // Finished `once` tasks (every investigation leaves one) are history,
+    // not schedule: listing them made the answer grow without bound.
     let scheduled_tasks: Vec<Value> = tasks
         .iter()
+        .filter(|t| t.status != TaskStatus::Completed)
         .map(|t| {
             json!({
                 "id": t.id,
@@ -839,8 +843,11 @@ async fn status(State(st): State<HttpState>) -> ApiResult {
     Ok(Json(json!({
         "status": "ok",
         "uptime_seconds": s.started_at.elapsed().as_secs(),
-        "active_investigations": counts.lanes_in_turn,
-        "pending_queue_depth": s.streams.pending_len(&s.lanes.base),
+        // Investigations by their recorded state; chat requests waiting for
+        // an answer on any lane (not only the shared one).
+        "active_investigations": investigations.get(STATUS_RUNNING).copied().unwrap_or(0),
+        "queued_investigations": investigations.get(STATUS_QUEUED).copied().unwrap_or(0),
+        "pending_queue_depth": counts.pending,
         "sessions": sessions,
         "scheduled_tasks": scheduled_tasks,
         "user_lanes": s.user_lane_jids().len(),

@@ -252,7 +252,8 @@ fn ts_migrations(tx: &Transaction<'_>, opts: &DbOptions) -> Result<()> {
         .db()?;
     }
 
-    // Chats: channel + is_group, backfilled from JID patterns.
+    // Chats: channel + is_group, backfilled from JID patterns. Telegram
+    // groups and supergroups have negative chat ids, private chats positive.
     let added_channel = add_column_if_missing(tx, &col("chats", "channel", "TEXT"))?;
     let added_is_group = add_column_if_missing(tx, &col("chats", "is_group", "INTEGER DEFAULT 0"))?;
     if added_channel || added_is_group {
@@ -260,7 +261,9 @@ fn ts_migrations(tx: &Transaction<'_>, opts: &DbOptions) -> Result<()> {
             "UPDATE chats SET channel = 'whatsapp', is_group = 1 WHERE jid LIKE '%@g.us';
              UPDATE chats SET channel = 'whatsapp', is_group = 0 WHERE jid LIKE '%@s.whatsapp.net';
              UPDATE chats SET channel = 'discord', is_group = 1 WHERE jid LIKE 'dc:%';
-             UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%';",
+             UPDATE chats SET channel = 'telegram',
+                              is_group = CASE WHEN jid LIKE 'tg:-%' THEN 1 ELSE 0 END
+               WHERE jid LIKE 'tg:%';",
         )
         .db()?;
         tracing::info!("migration: backfilled chats.channel / chats.is_group");
@@ -679,7 +682,7 @@ mod tests {
 
     // Legacy database migration.
     #[test]
-    fn defaults_telegram_backfill_chats_to_direct_messages() {
+    fn telegram_backfill_tells_groups_from_direct_messages() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store").join(DB_FILE_NAME);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -709,7 +712,7 @@ mod tests {
         assert_eq!(get("tg:12345").channel.as_deref(), Some("telegram"));
         assert!(!get("tg:12345").is_group);
         assert_eq!(get("tg:-10012345").channel.as_deref(), Some("telegram"));
-        assert!(!get("tg:-10012345").is_group);
+        assert!(get("tg:-10012345").is_group);
         assert_eq!(get("room@g.us").channel.as_deref(), Some("whatsapp"));
         assert!(get("room@g.us").is_group);
     }
