@@ -90,7 +90,9 @@ The operator configures it on the host in
 ```
 
 Without the file every sender is allowed, unless the operator sets
-`TALON_SENDER_ALLOWLIST_REQUIRED=true`.
+`TALON_SENDER_ALLOWLIST_REQUIRED=true`. A file with a mistake in it lets
+nobody trigger the agent until it is fixed (sender ids may be strings or
+numbers).
 
 ## Global instructions
 

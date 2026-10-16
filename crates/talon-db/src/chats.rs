@@ -1,7 +1,7 @@
 //! Chats (metadata only, for group discovery) and stored messages.
 
-use rusqlite::{Row, params};
-use talon_core::time::now_iso;
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use talon_core::time::{now_iso, parse_iso, to_iso};
 use talon_core::types::{ChatInfo, ChatMetadata, NewMessage};
 use talon_core::{Error, Result};
 
@@ -48,6 +48,34 @@ fn require_jid(jid: &str) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// The timestamp to store `msg` with (see [`Db::store_message`]): the stored
+/// one for a message already present, else its own time when that is later
+/// than every stored message, else 1 ms after the latest stored message.
+/// Times that are not RFC 3339 are stored as given.
+fn storage_timestamp(conn: &Connection, msg: &NewMessage) -> Result<String> {
+    let stored: Option<String> = conn
+        .prepare_cached("SELECT timestamp FROM messages WHERE id = ?1 AND chat_jid = ?2")
+        .db()?
+        .query_row(params![msg.id, msg.chat_jid], |row| row.get(0))
+        .optional()
+        .db()?;
+    if let Some(stored) = stored {
+        return Ok(stored);
+    }
+    let Some(own) = parse_iso(&msg.timestamp) else {
+        return Ok(msg.timestamp.clone());
+    };
+    let latest: Option<String> = conn
+        .prepare_cached("SELECT MAX(timestamp) FROM messages")
+        .db()?
+        .query_row([], |row| row.get(0))
+        .db()?;
+    Ok(match latest.as_deref().and_then(parse_iso) {
+        Some(latest) if own <= latest => to_iso(latest + chrono::Duration::milliseconds(1)),
+        _ => to_iso(own),
+    })
 }
 
 impl Db {
@@ -193,10 +221,20 @@ impl Db {
 
     /// Insert or replace (idempotent on `(id, chat_jid)`).
     ///
+    /// The message cursors compare timestamps (`timestamp > cursor`), so a
+    /// new message is stored after every message already stored: one whose
+    /// time is not later than the latest (a Telegram message, whose time has
+    /// whole-second precision, arriving in the same second as another or
+    /// after a message from another channel) is stored 1 ms after the latest
+    /// instead. Otherwise a cursor that already passed its time would skip
+    /// it for good. A message stored again keeps its first timestamp, so a
+    /// redelivery is not processed twice.
+    ///
     /// The chat row must exist (`messages.chat_jid` is a foreign key into
     /// `chats`); call [`Db::store_chat_metadata`] first.
     pub fn store_message(&self, msg: &NewMessage) -> Result<()> {
-        self.with_conn(|conn| {
+        self.with_tx(true, |conn| {
+            let timestamp = storage_timestamp(conn, msg)?;
             conn.prepare_cached(
                 "INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content,
                    timestamp, is_from_me, is_bot_message, thread_id, reply_to_message_id,
@@ -210,7 +248,7 @@ impl Db {
                 msg.sender,
                 msg.sender_name,
                 msg.content,
-                msg.timestamp,
+                timestamp,
                 i64::from(msg.is_from_me),
                 i64::from(msg.is_bot_message),
                 msg.thread_id,
@@ -446,6 +484,115 @@ mod tests {
     }
 
     #[test]
+    fn same_second_message_after_the_cursor_is_not_skipped() {
+        // Telegram times have whole-second precision: two messages in the
+        // same second share a time. The cursor moved to the first one before
+        // the second was stored.
+        let db = db();
+        db.store_chat_metadata(&meta("tg:1", T0)).unwrap();
+        let jids = vec!["tg:1".to_string()];
+        store(
+            &db,
+            "1",
+            "tg:1",
+            "u",
+            "U",
+            "part one",
+            "2024-01-01T10:00:05.000Z",
+        );
+        let (first, cursor) = db.get_new_messages(&jids, T0, "Talon").unwrap();
+        assert_eq!(first.len(), 1);
+        store(
+            &db,
+            "2",
+            "tg:1",
+            "u",
+            "U",
+            "part two",
+            "2024-01-01T10:00:05.000Z",
+        );
+        let (second, _) = db.get_new_messages(&jids, &cursor, "Talon").unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].content, "part two");
+        assert_eq!(second[0].timestamp, "2024-01-01T10:00:05.001Z");
+    }
+
+    #[test]
+    fn late_message_from_another_channel_is_not_skipped() {
+        // An HTTP message (host time, ms precision) moved the shared cursor
+        // past the time of a Telegram message that is stored afterwards.
+        let db = db();
+        db.store_chat_metadata(&meta("http:a", T0)).unwrap();
+        db.store_chat_metadata(&meta("tg:1", T0)).unwrap();
+        let jids = vec!["http:a".to_string(), "tg:1".to_string()];
+        store(
+            &db,
+            "h1",
+            "http:a",
+            "u",
+            "U",
+            "from http",
+            "2024-01-01T12:00:00.900Z",
+        );
+        let (_, cursor) = db.get_new_messages(&jids, T0, "Talon").unwrap();
+        store(
+            &db,
+            "t1",
+            "tg:1",
+            "u",
+            "U",
+            "from telegram",
+            "2024-01-01T12:00:00.000Z",
+        );
+        let (late, _) = db.get_new_messages(&jids, &cursor, "Talon").unwrap();
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].content, "from telegram");
+        assert!(
+            db.get_messages_since("tg:1", &cursor, "Talon", 10)
+                .unwrap()
+                .len()
+                == 1
+        );
+    }
+
+    #[test]
+    fn redelivered_message_keeps_its_time() {
+        let db = db();
+        db.store_chat_metadata(&meta("tg:1", T0)).unwrap();
+        let jids = vec!["tg:1".to_string()];
+        store(
+            &db,
+            "1",
+            "tg:1",
+            "u",
+            "U",
+            "hello",
+            "2024-01-01T10:00:05.000Z",
+        );
+        store(
+            &db,
+            "2",
+            "tg:1",
+            "u",
+            "U",
+            "later",
+            "2024-01-01T10:00:09.000Z",
+        );
+        let (_, cursor) = db.get_new_messages(&jids, T0, "Talon").unwrap();
+        store(
+            &db,
+            "1",
+            "tg:1",
+            "u",
+            "U",
+            "hello",
+            "2024-01-01T10:00:05.000Z",
+        );
+        let (again, _) = db.get_new_messages(&jids, &cursor, "Talon").unwrap();
+        assert!(again.is_empty(), "redelivery processed twice: {again:?}");
+    }
+
+    #[test]
     fn filters_out_empty_content() {
         let db = db();
         db.store_chat_metadata(&meta("group@g.us", T0)).unwrap();
@@ -598,8 +745,15 @@ mod tests {
     // --- getMessagesSince ---
 
     fn since_fixture() -> Db {
+        since_fixture_after(|_| {})
+    }
+
+    /// [`since_fixture`] with `history` stored first: messages arrive in
+    /// insertion order, so older history has to be stored before.
+    fn since_fixture_after(history: impl FnOnce(&Db)) -> Db {
         let db = db();
         db.store_chat_metadata(&meta("group@g.us", T0)).unwrap();
+        history(&db);
         store(
             &db,
             "m1",
@@ -667,18 +821,19 @@ mod tests {
 
     #[test]
     fn recovers_cursor_from_last_bot_reply() {
-        let db = since_fixture();
-        for i in 1..=50 {
-            store(
-                &db,
-                &format!("history-{i}"),
-                "group@g.us",
-                "user@s.whatsapp.net",
-                "User",
-                &format!("old message {i}"),
-                &format!("2023-06-{i:02}T12:00:00.000Z"),
-            );
-        }
+        let db = since_fixture_after(|db| {
+            for i in 1..=50 {
+                store(
+                    db,
+                    &format!("history-{i}"),
+                    "group@g.us",
+                    "user@s.whatsapp.net",
+                    "User",
+                    &format!("old message {i}"),
+                    &format!("2023-06-{i:02}T12:00:00.000Z"),
+                );
+            }
+        });
         store(
             &db,
             "new-1",

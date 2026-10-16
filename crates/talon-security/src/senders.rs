@@ -12,18 +12,21 @@
 //! }
 //! ```
 //!
-//! - `allow`: `"*"` (everyone) or an exact list of sender ids.
+//! - `allow`: `"*"` (everyone) or an exact list of sender ids (strings or
+//!   numbers: Telegram ids are often written as numbers).
 //! - `mode`: `trigger` (messages are stored, but only allowed senders can
 //!   wake the agent) or `drop` (messages from other senders are discarded
 //!   before they are stored).
 //!
-//! Load semantics: a missing, unreadable or invalid file (or an
-//! invalid `default` entry) yields the allow-all default; invalid per-chat
-//! entries are skipped. When the allowlist is *required*
-//! ([`SenderAllowlist::load_with_policy`] with `required = true`, or
-//! `TALON_SENDER_ALLOWLIST_REQUIRED` set in the process environment for
-//! [`SenderAllowlist::load`]), those cases fail closed instead: nobody may
-//! trigger the agent (messages are still stored, `trigger` mode).
+//! Load semantics: a missing file yields the allow-all default unless the
+//! allowlist is *required* ([`SenderAllowlist::load_with_policy`] with
+//! `required = true`, or `TALON_SENDER_ALLOWLIST_REQUIRED` set in the
+//! process environment for [`SenderAllowlist::load`]). A file that exists
+//! but cannot be used (unreadable, invalid JSON, invalid `default` entry)
+//! always fails closed, and so does an invalid per-chat entry for its chat:
+//! nobody may trigger the agent there (messages are still stored, `trigger`
+//! mode). An operator who wrote a file meant to restrict senders; a typo in
+//! it must not let everyone in.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -53,6 +56,13 @@ struct Entry {
 }
 
 impl Entry {
+    fn deny_all() -> Self {
+        Entry {
+            allow: Allow::List(HashSet::new()),
+            mode: Mode::Trigger,
+        }
+    }
+
     const fn allow_all() -> Self {
         Entry {
             allow: Allow::All,
@@ -67,8 +77,8 @@ impl Entry {
         }
     }
 
-    /// Valid entry: `allow` is `"*"` or an array of strings, `mode` is
-    /// `trigger` | `drop`.
+    /// Valid entry: `allow` is `"*"` or an array of strings or numbers,
+    /// `mode` is `trigger` | `drop`.
     fn parse(value: &serde_json::Value) -> Option<Self> {
         let obj = value.as_object()?;
         let allow = match obj.get("allow")? {
@@ -76,7 +86,12 @@ impl Entry {
             serde_json::Value::Array(items) => {
                 let mut set = HashSet::with_capacity(items.len());
                 for item in items {
-                    set.insert(item.as_str()?.to_string());
+                    let id = match item {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => return None,
+                    };
+                    set.insert(id);
                 }
                 Allow::List(set)
             }
@@ -126,69 +141,48 @@ impl SenderAllowlist {
         Self::load_with_policy(path, required)
     }
 
-    /// Load the allowlist. With `required`, a missing/invalid file denies
-    /// every sender (fail closed) instead of allowing everyone.
+    /// Load the allowlist. A missing file allows everyone, or nobody with
+    /// `required`; a file that exists but cannot be used denies everyone
+    /// (see the module docs).
     pub fn load_with_policy(path: &Path, required: bool) -> Self {
-        let fallback = || {
-            if required {
-                Self::deny_all()
-            } else {
-                Self::default()
-            }
+        let unusable = |reason: &str| {
+            tracing::error!(path = %path.display(), reason, "sender-allowlist: unusable file; nobody may trigger the agent until it is fixed");
+            Self::deny_all()
         };
         let md = match std::fs::metadata(path) {
             Ok(md) => md,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if required {
                     tracing::warn!(path = %path.display(), "sender-allowlist: required but missing; denying all senders");
+                    return Self::deny_all();
                 }
-                return fallback();
+                return Self::default();
             }
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "sender-allowlist: cannot read config");
-                return fallback();
-            }
+            Err(e) => return unusable(&e.to_string()),
         };
         if !md.is_file() || md.len() > MAX_FILE_BYTES {
-            tracing::warn!(path = %path.display(), "sender-allowlist: not a regular file or too large");
-            return fallback();
+            return unusable("not a regular file or too large");
         }
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "sender-allowlist: cannot read config");
-                return fallback();
-            }
+            Err(e) => return unusable(&e.to_string()),
         };
-        let value: serde_json::Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => {
-                tracing::warn!(path = %path.display(), "sender-allowlist: invalid JSON");
-                return fallback();
-            }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return unusable("invalid JSON");
         };
-        match Self::parse(&value) {
-            Some(list) => list,
-            None => {
-                tracing::warn!(path = %path.display(), "sender-allowlist: invalid or missing default entry");
-                fallback()
-            }
-        }
+        Self::parse(&value).unwrap_or_else(|| unusable("invalid or missing default entry"))
     }
 
     /// Build from an already parsed JSON document (an invalid `default`
-    /// yields the allow-all default).
+    /// denies everyone, as for a file).
     pub fn from_json(value: serde_json::Value) -> Self {
-        Self::parse(&value).unwrap_or_default()
+        Self::parse(&value).unwrap_or_else(Self::deny_all)
     }
 
     /// An allowlist nobody passes (`allow: []`, `trigger` mode).
     pub fn deny_all() -> Self {
         Self {
-            default: Entry {
-                allow: Allow::List(HashSet::new()),
-                mode: Mode::Trigger,
-            },
+            default: Entry::deny_all(),
             chats: HashMap::new(),
             log_denied: true,
         }
@@ -205,7 +199,8 @@ impl SenderAllowlist {
                         chats.insert(jid.clone(), e);
                     }
                     None => {
-                        tracing::warn!(jid = %jid, "sender-allowlist: skipping invalid chat entry");
+                        tracing::error!(jid = %jid, "sender-allowlist: invalid chat entry; nobody may trigger the agent in this chat");
+                        chats.insert(jid.clone(), Entry::deny_all());
                     }
                 }
             }
@@ -334,41 +329,62 @@ mod tests {
     }
 
     #[test]
-    fn invalid_json_allows_all() {
+    fn invalid_json_denies_all() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a.json");
         std::fs::write(&p, "{ not valid json }}}").unwrap();
-        assert!(SenderAllowlist::load_with_policy(&p, false).is_sender_allowed("g", "x"));
+        assert!(!SenderAllowlist::load_with_policy(&p, false).is_sender_allowed("g", "x"));
     }
 
     #[test]
-    fn invalid_schema_allows_all() {
+    fn invalid_schema_denies_all() {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, &json!({"default": {"oops": true}}));
-        assert!(SenderAllowlist::load_with_policy(&p, false).is_sender_allowed("g", "x"));
+        assert!(!SenderAllowlist::load_with_policy(&p, false).is_sender_allowed("g", "x"));
     }
 
     #[test]
-    fn non_string_allow_items_fall_back_to_default() {
+    fn numeric_ids_are_accepted() {
+        // Telegram user ids are numbers; writing them unquoted is the
+        // natural mistake and must not invalidate the file.
         let dir = tempfile::tempdir().unwrap();
         let p = write(
             &dir,
-            &json!({"default": {"allow": [123, null, true], "mode": "trigger"}, "chats": {}}),
+            &json!({"default": {"allow": [123456789, "alice"], "mode": "trigger"}}),
         );
-        assert!(SenderAllowlist::load_with_policy(&p, false).is_sender_allowed("g", "x"));
+        let cfg = SenderAllowlist::load_with_policy(&p, false);
+        assert!(cfg.is_sender_allowed("g", "123456789"));
+        assert!(cfg.is_sender_allowed("g", "alice"));
+        assert!(!cfg.is_sender_allowed("g", "mallory"));
     }
 
     #[test]
-    fn invalid_chat_entries_are_skipped() {
+    fn invalid_default_denies_everyone() {
         let dir = tempfile::tempdir().unwrap();
         let p = write(
             &dir,
-            &json!({"default": {"allow": "*", "mode": "trigger"}, "chats": {"good": {"allow": ["alice"], "mode": "trigger"}, "bad": {"allow": 123}}}),
+            &json!({"default": {"allow": [null, true], "mode": "trigger"}, "chats": {}}),
+        );
+        let cfg = SenderAllowlist::load_with_policy(&p, false);
+        assert!(!cfg.is_sender_allowed("g", "x"));
+        assert!(!cfg.is_trigger_allowed("g", "x"));
+        // trigger mode: messages are still stored
+        assert!(!cfg.should_drop_message("g", "x"));
+    }
+
+    #[test]
+    fn invalid_chat_entry_denies_that_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &json!({"default": {"allow": "*", "mode": "trigger"}, "chats": {"good": {"allow": ["alice"], "mode": "trigger"}, "bad": {"allow": ["bob"], "mode": "trgger"}}}),
         );
         let cfg = SenderAllowlist::load_with_policy(&p, false);
         assert!(!cfg.is_sender_allowed("good", "bob"));
-        // "bad" fell back to the default entry
-        assert!(cfg.is_sender_allowed("bad", "bob"));
+        assert!(cfg.is_sender_allowed("good", "alice"));
+        // "bad" does not fall back to the allow-all default
+        assert!(!cfg.is_trigger_allowed("bad", "bob"));
+        assert!(cfg.is_sender_allowed("other", "anyone"));
     }
 
     #[test]
@@ -392,10 +408,17 @@ mod tests {
     }
 
     #[test]
-    fn directory_instead_of_file_falls_back() {
+    fn unusable_file_denies_everyone() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(SenderAllowlist::load_with_policy(dir.path(), false).is_sender_allowed("g", "x"));
-        assert!(!SenderAllowlist::load_with_policy(dir.path(), true).is_sender_allowed("g", "x"));
+        for required in [false, true] {
+            assert!(
+                !SenderAllowlist::load_with_policy(dir.path(), required)
+                    .is_sender_allowed("g", "x")
+            );
+        }
+        let p = dir.path().join("broken.json");
+        std::fs::write(&p, "{ not json").unwrap();
+        assert!(!SenderAllowlist::load_with_policy(&p, false).is_sender_allowed("g", "x"));
     }
 
     // --- isSenderAllowed (ported) ---
@@ -438,14 +461,15 @@ mod tests {
     }
 
     #[test]
-    fn from_json_invalid_is_default() {
+    fn from_json_invalid_denies_all() {
         let cfg = SenderAllowlist::from_json(json!([1, 2, 3]));
-        assert!(cfg.is_sender_allowed("g", "x"));
+        assert!(!cfg.is_sender_allowed("g", "x"));
         let cfg =
             SenderAllowlist::from_json(json!({"default": {"allow": "all", "mode": "trigger"}}));
-        assert!(cfg.is_sender_allowed("g", "x"));
+        assert!(!cfg.is_sender_allowed("g", "x"));
         let cfg = SenderAllowlist::from_json(json!({"default": {"allow": "*", "mode": "block"}}));
         assert!(!cfg.is_drop_mode("g"));
+        assert!(!cfg.is_trigger_allowed("g", "x"));
     }
 
     // --- shouldDropMessage (ported, with sender) ---

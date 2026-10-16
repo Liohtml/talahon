@@ -94,7 +94,17 @@ fn next_cron(value: &str, tz: Tz, now: DateTime<Utc>) -> Result<String> {
     let next = cron
         .find_next_occurrence(&local_now, false)
         .map_err(|e| Error::invalid(format!("cron {value:?} has no next occurrence: {e}")))?;
-    Ok(to_iso(next.with_timezone(&Utc)))
+    let mut next_utc = next.with_timezone(&Utc);
+    if next_utc <= now {
+        // A local time that occurs twice (DST fall-back) is resolved to its
+        // first instant, which has already passed while `now` is in the
+        // repeated hour; the scheduler would then run the task on every poll
+        // until the hour is over. Take the second instant of that time.
+        if let Some(later) = tz.from_local_datetime(&next.naive_local()).latest() {
+            next_utc = later.with_timezone(&Utc);
+        }
+    }
+    Ok(to_iso(next_utc))
 }
 
 /// Next run *after* a completed run. `None` for `once` (task completes).
@@ -137,6 +147,35 @@ mod tests {
 
     fn t(s: &str) -> DateTime<Utc> {
         parse_iso(s).unwrap()
+    }
+
+    #[test]
+    fn cron_next_in_repeated_dst_hour_is_in_the_future() {
+        // Europe/Berlin falls back at 03:00 CEST (01:00Z) on 2026-10-25, so
+        // 02:00-02:59 local happens twice. 01:05Z is 02:05 in the second pass.
+        let tz: Tz = "Europe/Berlin".parse().unwrap();
+        let second_pass = t("2026-10-25T01:05:00.000Z");
+        let next = |expr| compute_next_run(ScheduleType::Cron, expr, None, tz, second_pass);
+        assert_eq!(
+            next("*/15 * * * *").unwrap().as_deref(),
+            Some("2026-10-25T01:15:00.000Z")
+        );
+        assert_eq!(
+            next("30 2 * * *").unwrap().as_deref(),
+            Some("2026-10-25T01:30:00.000Z")
+        );
+        // The first pass is unchanged: 02:15 CEST.
+        let first_pass = t("2026-10-25T00:05:00.000Z");
+        assert_eq!(
+            compute_next_run(ScheduleType::Cron, "*/15 * * * *", None, tz, first_pass)
+                .unwrap()
+                .as_deref(),
+            Some("2026-10-25T00:15:00.000Z")
+        );
+        assert_eq!(
+            first_run(ScheduleType::Cron, "*/15 * * * *", tz, second_pass).unwrap(),
+            "2026-10-25T01:15:00.000Z"
+        );
     }
 
     #[test]
