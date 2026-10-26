@@ -2,6 +2,11 @@
 
 All notable changes to Talon are documented in this file.
 
+## [2.1.0] - 2026-10-26
+
+- feat(llm): Anthropic Messages API as a gateway upstream (#13)
+- chore(deps): bump rustls-webpki and webpki-roots for RUSTSEC-2026-0381/0382 (#14)
+
 ## [2.0.5] - 2026-10-16
 
 - fix: remaining minor bugs carried over from the old version (#12)
