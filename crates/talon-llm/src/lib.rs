@@ -133,6 +133,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod anthropic;
 pub mod backend;
 pub mod client;
 pub mod error;

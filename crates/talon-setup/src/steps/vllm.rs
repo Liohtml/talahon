@@ -49,7 +49,11 @@ pub(crate) fn add_vllm_fields(
 /// Never fails internally; problems are reported in the block.
 pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOutcome> {
     let (config, check) = check_configured_vllm(ctx).await;
-    let api_key_set = ctx.config.env.file_value("TALON_VLLM_API_KEY").is_some();
+    let api_key_set = ctx
+        .config
+        .env
+        .file_value(crate::checks::api_key_env(ctx))
+        .is_some();
 
     let mut block = StatusBlock::new("CHECK_VLLM");
     add_vllm_fields(&mut block, config.as_ref(), api_key_set, &check);

@@ -61,13 +61,23 @@ pub struct AllowedRoot {
 // Provider (vLLM)
 // ---------------------------------------------------------------------------
 
-/// Agent model provider. Talon speaks the OpenAI-compatible API exposed by
-/// vLLM. Values written by older releases (`"anthropic"`, `"ollama"`)
-/// deserialize to [`ProviderKind::Unsupported`] and are ignored with a warning.
+/// Agent model provider.
+///
+/// The agent always speaks the OpenAI-compatible chat API to the host LLM
+/// gateway. What the gateway talks to upstream is the provider:
+///
+/// - [`ProviderKind::Vllm`] — a vLLM server, passed through.
+/// - [`ProviderKind::Anthropic`] — the Anthropic Messages API; the gateway
+///   translates requests, responses and SSE streams
+///   (`talon_llm::anthropic`).
+///
+/// Values written by older releases (`"ollama"`, ...) deserialize to
+/// [`ProviderKind::Unsupported`] and are ignored with a warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     Vllm,
+    Anthropic,
     #[serde(other)]
     Unsupported,
 }
@@ -76,12 +86,27 @@ impl ProviderKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             ProviderKind::Vllm => "vllm",
+            ProviderKind::Anthropic => "anthropic",
             ProviderKind::Unsupported => "unsupported",
+        }
+    }
+
+    /// The `.env` key holding this provider's upstream API key. Read only
+    /// by the host (gateway, setup, doctor); never enters a container.
+    pub fn api_key_env(&self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "TALON_ANTHROPIC_API_KEY",
+            ProviderKind::Vllm | ProviderKind::Unsupported => "TALON_VLLM_API_KEY",
         }
     }
 }
 
-/// Connection + sampling settings for a vLLM OpenAI-compatible server.
+/// Connection + sampling settings of the configured model provider.
+///
+/// Historically vLLM-only, hence the name; with
+/// [`ProviderKind::Anthropic`] the same fields describe the Anthropic
+/// endpoint (`base_url` = `https://api.anthropic.com`, `model` = e.g.
+/// `claude-sonnet-5-5`), and `enable_thinking` switches adaptive thinking.
 ///
 /// The API key is intentionally *not* part of this struct: it is read by the
 /// host from `.env` (`TALON_VLLM_API_KEY`) and only ever held by the host-side

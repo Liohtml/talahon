@@ -165,7 +165,11 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
     };
 
     let (vllm_cfg, vllm) = check_configured_vllm(ctx).await;
-    let api_key_set = ctx.config.env.file_value("TALON_VLLM_API_KEY").is_some();
+    let api_key_set = ctx
+        .config
+        .env
+        .file_value(crate::checks::api_key_env(ctx))
+        .is_some();
 
     let channels = configured_channels(ctx);
     let channel_names: Vec<&str> = channels.keys().copied().collect();

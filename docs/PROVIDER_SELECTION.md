@@ -1,4 +1,13 @@
-# Model Provider: vLLM
+# Model Provider: vLLM or Anthropic
+
+Talon's agent loop speaks the OpenAI-compatible chat API to the **host LLM
+gateway**. What the gateway talks to is the provider:
+
+| `TALON_PROVIDER` | upstream | notes |
+|---|---|---|
+| `vllm` (default) | your vLLM server | passthrough, see below |
+| `anthropic` | Anthropic Messages API | translated in the gateway, see [Anthropic](#anthropic) |
+
 
 Talon 2.0 runs its agents against a **vLLM** server through vLLM's
 OpenAI-compatible API (`/v1/chat/completions` with tool calling and
@@ -109,3 +118,53 @@ sessions cheap.
 talon setup vllm      # probes <base>/v1/models, checks MODEL and FAST_MODEL are served
 talon doctor          # environment + container + gateway + vLLM in one report
 ```
+
+## Anthropic
+
+```bash
+# /opt/talon/.env
+TALON_PROVIDER=anthropic
+TALON_ANTHROPIC_MODEL=claude-sonnet-5-5
+TALON_ANTHROPIC_FAST_MODEL=claude-haiku-5-5   # optional
+TALON_ANTHROPIC_MAX_CONTEXT=200000
+TALON_ANTHROPIC_API_KEY=...                   # host only, like TALON_VLLM_API_KEY
+```
+
+Then `talon setup vllm` (probes `GET /v1/models` with the key) and
+`talon doctor` as usual. Nothing changes inside the container: the agent
+keeps calling `/v1/chat/completions` on the gateway with its per-run token,
+and the gateway translates (`crates/talon-llm/src/anthropic/`):
+
+| OpenAI chat field | Messages API |
+|---|---|
+| `system` messages | `system` text blocks, one `cache_control: ephemeral` breakpoint (Talon's system prompt is byte-stable, so every turn after the first is a cache hit) |
+| `user` / `assistant` / `tool` messages | alternating `user` / `assistant` turns; `tool_calls` → `tool_use` blocks, `tool` messages → `tool_result` blocks merged into one `user` turn |
+| `tools` (function) | `tools` with `input_schema` (after the gateway's schema sanitizer) |
+| `tool_choice`, `parallel_tool_calls` | `tool_choice` `auto` / `any` / `tool` / `none`, `disable_parallel_tool_use` |
+| `response_format: json_schema` | `output_config.format` (structured outputs) |
+| `max_tokens` (clamped by the gateway) | `max_tokens` |
+| `stop` | `stop_sequences` |
+| `chat_template_kwargs.enable_thinking` | `thinking: {type: adaptive}` — only when `TALON_ANTHROPIC_THINKING=true` |
+| `temperature`, `top_p`, `top_k`, penalties, `seed` | dropped (current Claude models reject sampling parameters) |
+| `cache_salt` | not sent (Anthropic's prompt cache is keyed by the exact prefix and scoped to the organisation) |
+| `/v1/models` | answered from the gateway's allow-list, no upstream call |
+| `/tokenize` | `POST /v1/messages/count_tokens` |
+
+Responses come back as `chat.completion` / `chat.completion.chunk` with
+`usage.prompt_tokens_details.cached_tokens` = `cache_read_input_tokens`, so
+the usage accounting and `cache_read_input_tokens` reporting work unchanged.
+
+**Thinking.** Off by default. With `TALON_ANTHROPIC_THINKING=true` the
+gateway requests adaptive thinking. The API requires the signed `thinking`
+blocks of an assistant turn to be replayed when its tool calls are answered;
+the OpenAI shape has no place for them, so the gateway appends them to
+`reasoning_content` as an opaque `<talon-thinking>…</talon-thinking>` marker
+(hex-encoded JSON) after the readable thinking text, and restores them from
+the history the agent sends back. Readable thinking text is only present when
+the model's `display` setting returns it.
+
+**Egress.** The host process (not a container) connects to
+`api.anthropic.com:443`; `talon setup egress` is about container egress and
+needs no change. Rate limits and overloads come back to the agent as
+`429` / `529` with the Anthropic error message in the OpenAI error shape; the
+client's retry/backoff applies.

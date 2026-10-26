@@ -14,6 +14,7 @@ use talon_security::redact::Redactor;
 /// or the process environment).
 pub const KNOWN_SECRET_KEYS: &[&str] = &[
     "TALON_VLLM_API_KEY",
+    "TALON_ANTHROPIC_API_KEY",
     "HTTP_API_KEY",
     "TELEGRAM_BOT_TOKEN",
     "WEBHOOK_SECRET",

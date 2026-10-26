@@ -70,7 +70,11 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
 
     // vLLM.
     let (vllm_cfg, vllm) = check_configured_vllm(ctx).await;
-    let api_key_set = ctx.config.env.file_value("TALON_VLLM_API_KEY").is_some();
+    let api_key_set = ctx
+        .config
+        .env
+        .file_value(crate::checks::api_key_env(ctx))
+        .is_some();
     add_vllm_fields(&mut block, vllm_cfg.as_ref(), api_key_set, &vllm);
     if vllm.status != VllmStatus::Ok {
         issues.push(format!("vllm_{}", vllm.status.as_str()));

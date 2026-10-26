@@ -49,7 +49,7 @@ launchctl kickstart -k gui/$(id -u)/com.talon        # macOS
 
 ## Model Provider
 
-vLLM only (`TALON_VLLM_*` in `.env`, see [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md)). The vLLM API key stays on the host gateway; containers receive a per-run token over stdin.
+vLLM (`TALON_VLLM_*`, the default) or the Anthropic Messages API (`TALON_PROVIDER=anthropic`, `TALON_ANTHROPIC_*`), see [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md). The agent always speaks the OpenAI-compatible API to the host gateway; for Anthropic the gateway translates (`crates/talon-llm/src/anthropic/`). The upstream API key stays on the host gateway; containers receive a per-run token over stdin.
 
 ## Skills
 
