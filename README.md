@@ -99,7 +99,7 @@ API. Verdicts and IOC sightings stay local for cross-alert correlation.
 | | |
 |---|---|
 | Runtime | Rust workspace: `talon` on the host, `talon-agent` in the container |
-| Model | **vLLM** on your own GPUs, behind an authenticated host gateway |
+| Model | **vLLM** on your own GPUs, or the **Anthropic Messages API** — both behind the authenticated host gateway |
 | Model credentials | The key stays on the host; each run gets a short-lived token over stdin |
 | Container | Root supervisor without LLM; MCP servers as separate `mcp-*` users; agent unprivileged |
 | Untrusted data | Nonce-fenced envelopes plus an injection scanner (EN/DE) |

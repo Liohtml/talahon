@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use talon_core::env::EnvFile;
-use talon_core::provider::effective_vllm;
+use talon_core::provider::{effective_vllm, provider_kind};
+use talon_core::types::ProviderKind;
 
 use crate::context::SetupContext;
 use crate::fsutil::ensure_writable_dir;
@@ -222,6 +223,29 @@ pub async fn check_vllm(
     api_key: Option<&str>,
     timeout: Duration,
 ) -> VllmCheck {
+    check_provider(
+        ProviderKind::Vllm,
+        base_url,
+        model,
+        fast_model,
+        api_key,
+        timeout,
+    )
+    .await
+}
+
+/// Probe the configured provider's model list: `GET <base>/v1/models` with
+/// `Authorization: Bearer` (vLLM) or `x-api-key` + `anthropic-version`
+/// (Anthropic — its `/v1/models` has the same `{"data":[{"id":..}]}`
+/// shape, so the checks are identical).
+pub async fn check_provider(
+    kind: ProviderKind,
+    base_url: &str,
+    model: &str,
+    fast_model: Option<&str>,
+    api_key: Option<&str>,
+    timeout: Duration,
+) -> VllmCheck {
     if base_url.trim().is_empty() || model.trim().is_empty() {
         return VllmCheck::status(VllmStatus::NotConfigured, None);
     }
@@ -244,7 +268,12 @@ pub async fn check_vllm(
     };
     let mut req = client.get(&url).header("accept", "application/json");
     if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-        req = req.bearer_auth(key);
+        req = match kind {
+            ProviderKind::Anthropic => req
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01"),
+            ProviderKind::Vllm | ProviderKind::Unsupported => req.bearer_auth(key),
+        };
     }
     let mut resp = match req.send().await {
         Ok(r) => r,
@@ -327,8 +356,10 @@ pub async fn check_configured_vllm(
     let Some(v) = effective_vllm(&ctx.config.provider_defaults) else {
         return (None, VllmCheck::status(VllmStatus::NotConfigured, None));
     };
-    let api_key = ctx.config.env.file_value("TALON_VLLM_API_KEY");
-    let check = check_vllm(
+    let kind = provider_kind(&ctx.config.provider_defaults).unwrap_or(ProviderKind::Vllm);
+    let api_key = ctx.config.env.file_value(kind.api_key_env());
+    let check = check_provider(
+        kind,
         &v.base_url,
         &v.model,
         v.fast_model.as_deref(),
@@ -429,6 +460,13 @@ pub fn parse_df_available_kb(output: &str) -> Option<u64> {
 pub const ISSUE_VLLM_API_KEY_UNSET: &str = "vllm_api_key_unset";
 /// Issue code: `COPILOT_HTTP_BIND` listens on every interface.
 pub const ISSUE_HTTP_BIND_ALL_INTERFACES: &str = "http_bind_all_interfaces";
+
+/// The `.env` key holding the configured provider's upstream API key.
+pub fn api_key_env(ctx: &SetupContext) -> &'static str {
+    provider_kind(&ctx.config.provider_defaults)
+        .unwrap_or(ProviderKind::Vllm)
+        .api_key_env()
+}
 
 /// `TALON_VLLM_API_KEY` is set (non-blank) in `.env` — the only place the
 /// secret is read from.

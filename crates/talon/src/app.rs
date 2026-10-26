@@ -34,8 +34,8 @@ use talon_container::{ContainerRunner, ContainerRuntime, LogRedactor, MountPolic
 use talon_core::audit::{SharedAuditSink, event};
 use talon_core::channel::{Channel, ChannelHost};
 use talon_core::config::TalonConfig;
-use talon_core::provider::{effective_vllm, merge_container_config};
-use talon_core::types::RegisteredGroup;
+use talon_core::provider::{effective_vllm, merge_container_config, provider_kind};
+use talon_core::types::{ProviderKind, RegisteredGroup};
 use talon_db::{Db, DbAuditSink, DbOptions, default_db_path};
 use talon_http::{HttpChannel, HttpConfig};
 use talon_ipc::{IpcHost, IpcWatcher, IpcWatcherConfig};
@@ -91,15 +91,26 @@ pub enum ApiKeyPolicy {
     Missing,
 }
 
-/// Evaluate the vLLM API key requirement for `config`.
+/// The `.env` key holding the configured provider's API key
+/// (`TALON_VLLM_API_KEY`, or `TALON_ANTHROPIC_API_KEY` for the Anthropic
+/// provider).
+pub fn api_key_env(config: &TalonConfig) -> &'static str {
+    provider_kind(&config.provider_defaults)
+        .unwrap_or(ProviderKind::Vllm)
+        .api_key_env()
+}
+
+/// Evaluate the upstream API key requirement for `config`. The Anthropic
+/// provider has no opt-out: without a key nothing works.
 pub fn api_key_policy(config: &TalonConfig) -> ApiKeyPolicy {
     let present = config
         .env
-        .file_value("TALON_VLLM_API_KEY")
+        .file_value(api_key_env(config))
         .is_some_and(|k| !k.trim().is_empty());
+    let anthropic = provider_kind(&config.provider_defaults) == Some(ProviderKind::Anthropic);
     if present {
         ApiKeyPolicy::Present
-    } else if config.env.get_bool(ALLOW_NO_API_KEY_ENV) {
+    } else if !anthropic && config.env.get_bool(ALLOW_NO_API_KEY_ENV) {
         ApiKeyPolicy::MissingAllowed
     } else {
         ApiKeyPolicy::Missing
@@ -128,13 +139,14 @@ pub fn gateway_config(
     bind: SocketAddr,
 ) -> Option<GatewayConfig> {
     let vllm = effective_vllm(&config.provider_defaults)?;
+    let kind = provider_kind(&config.provider_defaults)?;
     let api_key = config
         .env
-        .file_value("TALON_VLLM_API_KEY")
+        .file_value(api_key_env(config))
         .map(str::trim)
         .filter(|k| !k.is_empty())
         .map(str::to_string);
-    let mut gw = GatewayConfig::from_vllm(vllm, api_key);
+    let mut gw = GatewayConfig::from_provider(kind, vllm, api_key);
     gw.bind = bind;
     if let Some(rpm) = config
         .env
@@ -217,8 +229,9 @@ async fn start_gateway(
 ) -> anyhow::Result<Option<GatewayHandle>> {
     if effective_vllm(&config.provider_defaults).is_none() {
         tracing::error!(
-            "vLLM is not configured (TALON_VLLM_BASE_URL / TALON_VLLM_MODEL): the LLM gateway is \
-             not started and every agent run will fail until it is — run `talon doctor`"
+            "no model provider is configured (TALON_VLLM_BASE_URL / TALON_VLLM_MODEL, or \
+             TALON_PROVIDER=anthropic + TALON_ANTHROPIC_MODEL): the LLM gateway is not started and \
+             every agent run will fail until it is — run `talon doctor`"
         );
         return Ok(None);
     }
@@ -229,7 +242,14 @@ async fn start_gateway(
              without an API key; make sure agent containers cannot reach vLLM directly"
         ),
         ApiKeyPolicy::Missing => {
-            tracing::error!("{VLLM_API_KEY_REQUIRED}");
+            if provider_kind(&config.provider_defaults) == Some(ProviderKind::Anthropic) {
+                tracing::error!(
+                    "TALON_ANTHROPIC_API_KEY is not set: refusing to start the LLM gateway — the \
+                     Anthropic provider cannot work without it"
+                );
+            } else {
+                tracing::error!("{VLLM_API_KEY_REQUIRED}");
+            }
             return Ok(None);
         }
     }

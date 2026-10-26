@@ -49,21 +49,22 @@ use axum::http::header::{
     ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER,
     WWW_AUTHENTICATE,
 };
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use talon_core::audit::{SharedAuditSink, event};
 use talon_core::protocol::LlmEndpoint;
 use talon_core::provider::DEFAULT_MAX_CONTEXT_TOKENS;
-use talon_core::types::VllmConfig;
+use talon_core::types::{ProviderKind, VllmConfig};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
+use crate::anthropic;
 use crate::client::{BaseUrls, normalize_base_url, read_body_capped};
 use crate::error::LlmError;
 use crate::sse::SseDecoder;
@@ -129,11 +130,17 @@ pub struct GatewayConfig {
     /// Listen address (default `127.0.0.1:3001`; on Linux docker bind the
     /// bridge address so `host.docker.internal` reaches it).
     pub bind: SocketAddr,
-    /// vLLM base URL, with or without `/v1`.
+    /// What the upstream speaks: vLLM (passthrough) or the Anthropic
+    /// Messages API (translated, see [`crate::anthropic`]).
+    pub upstream_kind: UpstreamKind,
+    /// Upstream base URL, with or without `/v1`.
     pub upstream_base_url: String,
-    /// vLLM `--api-key` (`TALON_VLLM_API_KEY`). Injected upstream; never
-    /// visible to containers.
+    /// vLLM `--api-key` (`TALON_VLLM_API_KEY`) or the Anthropic API key
+    /// (`TALON_ANTHROPIC_API_KEY`). Injected upstream; never visible to
+    /// containers.
     pub upstream_api_key: Option<String>,
+    /// Anthropic only: allow adaptive thinking (`TALON_ANTHROPIC_THINKING`).
+    pub anthropic_thinking: bool,
     /// Models containers may use (in addition to `default_model`).
     pub allowed_models: Vec<String>,
     /// Model substituted for any model not on the allow-list.
@@ -182,10 +189,22 @@ pub struct GatewayConfig {
     pub use_system_proxy: bool,
 }
 
+/// The API the gateway's upstream speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpstreamKind {
+    /// vLLM's OpenAI-compatible API: requests pass through.
+    #[default]
+    Vllm,
+    /// Anthropic Messages API: requests, responses and streams are
+    /// translated in the gateway.
+    Anthropic,
+}
+
 impl fmt::Debug for GatewayConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GatewayConfig")
             .field("bind", &self.bind)
+            .field("upstream_kind", &self.upstream_kind)
             .field("upstream_base_url", &self.upstream_base_url)
             .field(
                 "upstream_api_key",
@@ -212,8 +231,10 @@ impl GatewayConfig {
     pub fn new(upstream_base_url: impl Into<String>, default_model: impl Into<String>) -> Self {
         Self {
             bind: SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_GATEWAY_PORT)),
+            upstream_kind: UpstreamKind::Vllm,
             upstream_base_url: upstream_base_url.into(),
             upstream_api_key: None,
+            anthropic_thinking: false,
             allowed_models: Vec::new(),
             default_model: default_model.into(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
@@ -246,6 +267,25 @@ impl GatewayConfig {
             cfg.request_timeout = Duration::from_secs(secs);
         }
         cfg
+    }
+
+    /// From the host's provider settings: [`GatewayConfig::from_vllm`] for
+    /// vLLM; for Anthropic the upstream is the Messages API, the per-label
+    /// `cache_salt` is off (not a Messages API field — Anthropic's prompt
+    /// cache is keyed by the exact prefix and scoped to the organisation)
+    /// and `enable_thinking` switches adaptive thinking.
+    pub fn from_provider(
+        kind: ProviderKind,
+        cfg: &VllmConfig,
+        upstream_api_key: Option<String>,
+    ) -> Self {
+        let mut gw = Self::from_vllm(cfg, upstream_api_key);
+        if kind == ProviderKind::Anthropic {
+            gw.upstream_kind = UpstreamKind::Anthropic;
+            gw.cache_salt = false;
+            gw.anthropic_thinking = cfg.enable_thinking.unwrap_or(false);
+        }
+        gw
     }
 
     /// Allow an additional model (e.g. a per-group override).
@@ -313,14 +353,26 @@ impl LlmGateway {
         let upstream = normalize_base_url(&config.upstream_base_url)?;
         let upstream_auth = match config.upstream_api_key.as_deref().map(str::trim) {
             Some(key) if !key.is_empty() => {
-                let mut v = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
+                // vLLM: `Authorization: Bearer`; Anthropic: `x-api-key`.
+                let (name, raw) = match config.upstream_kind {
+                    UpstreamKind::Vllm => (AUTHORIZATION, format!("Bearer {key}")),
+                    UpstreamKind::Anthropic => {
+                        (HeaderName::from_static("x-api-key"), key.to_string())
+                    }
+                };
+                let mut v = HeaderValue::from_str(&raw).map_err(|_| {
                     LlmError::Config("upstream API key contains invalid characters".into())
                 })?;
                 v.set_sensitive(true);
-                Some(v)
+                Some((name, v))
             }
             _ => None,
         };
+        if config.upstream_kind == UpstreamKind::Anthropic && upstream_auth.is_none() {
+            return Err(LlmError::Config(
+                "the Anthropic provider needs an API key (TALON_ANTHROPIC_API_KEY)".into(),
+            ));
+        }
         let mut builder = reqwest::Client::builder()
             .user_agent(concat!("talon-llm-gateway/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
@@ -413,6 +465,7 @@ impl LlmGateway {
         tracing::info!(
             %addr,
             upstream = %state.upstream.api,
+            upstream_kind = ?state.config.upstream_kind,
             default_model = %state.config.default_model,
             max_concurrent_requests = state.config.max_concurrent_requests,
             max_connections = state.config.server_limits.max_connections,
@@ -569,7 +622,7 @@ impl GatewayHandle {
 struct GatewayState {
     config: GatewayConfig,
     upstream: BaseUrls,
-    upstream_auth: Option<HeaderValue>,
+    upstream_auth: Option<(HeaderName, HeaderValue)>,
     http: reqwest::Client,
     tokens: TokenStore,
     stats: StatsRecorder,
@@ -608,9 +661,23 @@ impl GatewayState {
     }
 
     fn upstream_request(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.upstream_auth {
-            Some(auth) => builder.header(AUTHORIZATION, auth.clone()),
+        let builder = match &self.upstream_auth {
+            Some((name, value)) => builder.header(name.clone(), value.clone()),
             None => builder,
+        };
+        match self.config.upstream_kind {
+            UpstreamKind::Vllm => builder,
+            UpstreamKind::Anthropic => builder.header("anthropic-version", anthropic::API_VERSION),
+        }
+    }
+
+    fn is_anthropic(&self) -> bool {
+        self.config.upstream_kind == UpstreamKind::Anthropic
+    }
+
+    fn anthropic_options(&self) -> anthropic::translate::Options {
+        anthropic::translate::Options {
+            thinking: self.config.anthropic_thinking,
         }
     }
 }
@@ -1058,6 +1125,9 @@ async fn chat_completions(
         }
     };
     note_policy(&state, &label, ROUTE_CHAT, &outcome);
+    if state.is_anthropic() {
+        return anthropic_chat(state, label, guard, json, outcome).await;
+    }
     let payload = match encode_payload(json) {
         Ok(p) => p,
         Err(r) => return *r,
@@ -1103,7 +1173,11 @@ async fn chat_completions(
             label.clone(),
         );
         let tap = UsageTap {
-            inner: Box::pin(upstream.bytes_stream()),
+            inner: Box::pin(
+                upstream
+                    .bytes_stream()
+                    .map_err(|e| LlmError::from_reqwest(&e)),
+            ),
             decoder: Some(SseDecoder::default()),
             usage: None,
             state: state.clone(),
@@ -1209,6 +1283,21 @@ async fn list_models(
         Ok(a) => a,
         Err(r) => return *r,
     };
+    if state.is_anthropic() {
+        // No upstream call: the allow-list *is* the model list, and the
+        // Messages API's `/v1/models` has another shape anyway.
+        let mut ids = vec![state.config.default_model.clone()];
+        for m in &state.config.allowed_models {
+            if !ids.contains(m) {
+                ids.push(m.clone());
+            }
+        }
+        let data: Vec<Value> = ids
+            .into_iter()
+            .map(|id| json!({"id": id, "object": "model", "owned_by": "anthropic"}))
+            .collect();
+        return axum::Json(json!({"object": "list", "data": data})).into_response();
+    }
     let url = format!("{}/models", state.upstream.api);
     let request = state.upstream_request(
         state
@@ -1281,6 +1370,9 @@ async fn tokenize(
         }
     };
     note_policy(&state, &label, ROUTE_TOKENIZE, &outcome);
+    if state.is_anthropic() {
+        return anthropic_count_tokens(&state, &label, json).await;
+    }
     let payload = match encode_payload(json) {
         Ok(p) => p,
         Err(r) => return *r,
@@ -1312,6 +1404,288 @@ async fn tokenize(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Anthropic upstream
+// ---------------------------------------------------------------------------
+
+/// Seconds since the epoch, for `created`.
+fn now_secs() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+}
+
+/// Map a Messages API error body to the OpenAI error shape the agent's
+/// client understands, keeping the status.
+fn anthropic_error_body(status: StatusCode, body: &[u8]) -> Vec<u8> {
+    let parsed = serde_json::from_slice::<Value>(body).ok();
+    let err = parsed.as_ref().and_then(|v| v.get("error"));
+    let message = err
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("upstream error");
+    let kind = err
+        .and_then(|e| e.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("upstream_error");
+    json!({"error": {"message": message, "type": kind, "code": status.as_u16()}})
+        .to_string()
+        .into_bytes()
+}
+
+/// `POST /v1/chat/completions` against the Messages API.
+async fn anthropic_chat(
+    state: SharedState,
+    label: String,
+    guard: AdmissionGuard,
+    json: Value,
+    outcome: PolicyOutcome,
+) -> Response {
+    let translated = match anthropic::translate::request(&json, state.anthropic_options()) {
+        Ok(t) => t,
+        Err(msg) => {
+            return reject(
+                &state,
+                &label,
+                ROUTE_CHAT,
+                StatusCode::BAD_REQUEST,
+                "policy",
+                &msg,
+            );
+        }
+    };
+    let payload = match encode_payload(translated.body) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    let started = Instant::now();
+    let url = format!("{}/messages", state.upstream.api);
+    let accept = if translated.stream {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
+    let request = state.upstream_request(
+        state
+            .http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, accept)
+            .timeout(state.config.request_timeout)
+            .body(payload),
+    );
+    let upstream = match request.send().await {
+        Ok(r) => r,
+        Err(e) => return upstream_failure(&state, &label, ROUTE_CHAT, &LlmError::from_reqwest(&e)),
+    };
+    let status = upstream.status();
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return upstream_auth_failure(&state, &label, ROUTE_CHAT, status);
+    }
+
+    if translated.stream && status.is_success() && is_event_stream(upstream.headers()) {
+        let stop = state.kill.child_token();
+        spawn_stream_watchdog(
+            guard,
+            stop.clone(),
+            state
+                .config
+                .request_timeout
+                .saturating_add(STREAM_DEADLINE_SLACK),
+            label.clone(),
+        );
+        let translating = TranslatingStream {
+            inner: Box::pin(
+                upstream
+                    .bytes_stream()
+                    .map_err(|e| LlmError::from_reqwest(&e)),
+            ),
+            translator: anthropic::Translator::new(outcome.model.clone(), now_secs()),
+            finished: false,
+        };
+        let tap = UsageTap {
+            inner: Box::pin(translating),
+            decoder: Some(SseDecoder::default()),
+            usage: None,
+            state: state.clone(),
+            label,
+            model: outcome.model,
+            started,
+            completed: false,
+            failed: false,
+            stopped: false,
+            stop: Box::pin(stop.clone().cancelled_owned()),
+            _done: stop.drop_guard(),
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .header(CACHE_CONTROL, "no-cache")
+            .header("x-accel-buffering", "no")
+            .body(Body::from_stream(tap))
+            .unwrap_or_else(|_| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "cannot build response",
+                )
+            });
+    }
+
+    let upstream_headers = upstream.headers().clone();
+    let body = match read_body_capped(upstream, state.config.max_response_bytes).await {
+        Ok(b) => b,
+        Err(e) => return upstream_failure(&state, &label, ROUTE_CHAT, &e),
+    };
+    drop(guard);
+    if !status.is_success() {
+        state.stats.error(&label);
+        tracing::debug!(
+            label,
+            status = status.as_u16(),
+            "LLM gateway upstream returned an error"
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if let Some(v) = upstream_headers.get(RETRY_AFTER) {
+            headers.insert(RETRY_AFTER, v.clone());
+        }
+        return passthrough(status, &headers, anthropic_error_body(status, &body));
+    }
+    let message = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return upstream_failure(
+                &state,
+                &label,
+                ROUTE_CHAT,
+                &LlmError::Decode("invalid Messages API response".into()),
+            );
+        }
+    };
+    let completion = anthropic::translate::response(&message, now_secs());
+    let bytes = completion.to_string().into_bytes();
+    let usage = usage_from_json(&bytes);
+    state.stats.completion(&label, usage.as_ref(), false);
+    state.audit_request(
+        &label,
+        ROUTE_CHAT,
+        "allowed",
+        request_details(&outcome.model, false, status, usage.as_ref(), started),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    passthrough(StatusCode::OK, &headers, bytes)
+}
+
+/// `POST /tokenize` against `POST /v1/messages/count_tokens`.
+async fn anthropic_count_tokens(state: &GatewayState, label: &str, json: Value) -> Response {
+    let body = match anthropic::translate::count_tokens_request(&json, state.anthropic_options()) {
+        Ok(b) => b,
+        Err(msg) => {
+            return reject(
+                state,
+                label,
+                ROUTE_TOKENIZE,
+                StatusCode::BAD_REQUEST,
+                "policy",
+                &msg,
+            );
+        }
+    };
+    let payload = match encode_payload(body) {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
+    let url = format!("{}/messages/count_tokens", state.upstream.api);
+    let request = state.upstream_request(
+        state
+            .http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json")
+            .timeout(AUX_TIMEOUT.min(state.config.request_timeout))
+            .body(payload),
+    );
+    let upstream = match request.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return upstream_failure(state, label, ROUTE_TOKENIZE, &LlmError::from_reqwest(&e));
+        }
+    };
+    let status = upstream.status();
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return upstream_auth_failure(state, label, ROUTE_TOKENIZE, status);
+    }
+    let body = match read_body_capped(upstream, state.config.max_response_bytes).await {
+        Ok(b) => b,
+        Err(e) => return upstream_failure(state, label, ROUTE_TOKENIZE, &e),
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if !status.is_success() {
+        state.stats.error(label);
+        return passthrough(status, &headers, anthropic_error_body(status, &body));
+    }
+    let count = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("input_tokens").and_then(Value::as_u64));
+    match count {
+        Some(n) => passthrough(
+            StatusCode::OK,
+            &headers,
+            json!({"count": n, "tokens": []}).to_string().into_bytes(),
+        ),
+        None => upstream_failure(
+            state,
+            label,
+            ROUTE_TOKENIZE,
+            &LlmError::Decode("invalid count_tokens response".into()),
+        ),
+    }
+}
+
+/// Upstream Anthropic SSE bytes in, OpenAI chunk SSE bytes out.
+struct TranslatingStream {
+    inner: UpstreamBytes,
+    translator: anthropic::Translator,
+    finished: bool,
+}
+
+impl Stream for TranslatingStream {
+    type Item = Result<Bytes, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        loop {
+            if this.finished {
+                return Poll::Ready(None);
+            }
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(bytes))) => match this.translator.push(&bytes) {
+                    Ok(out) if out.is_empty() => continue,
+                    Ok(out) => return Poll::Ready(Some(Ok(Bytes::from(out)))),
+                    Err(e) => {
+                        this.finished = true;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                },
+                Poll::Ready(Some(Err(e))) => {
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
+                Poll::Ready(None) => {
+                    this.finished = true;
+                    return match this.translator.finish() {
+                        Ok(out) if out.is_empty() => Poll::Ready(None),
+                        Ok(out) => Poll::Ready(Some(Ok(Bytes::from(out)))),
+                        Err(e) => Poll::Ready(Some(Err(e))),
+                    };
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
 async fn not_found() -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found_error", "not found")
 }
@@ -1320,7 +1694,7 @@ async fn not_found() -> Response {
 // SSE passthrough with usage accounting
 // ---------------------------------------------------------------------------
 
-type UpstreamBytes = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+type UpstreamBytes = Pin<Box<dyn Stream<Item = Result<Bytes, LlmError>> + Send>>;
 
 /// Passes upstream SSE bytes through unchanged while watching for the
 /// usage chunk; records stats/audit when the stream ends or is dropped
@@ -1366,7 +1740,7 @@ impl UsageTap {
 }
 
 impl Stream for UsageTap {
-    type Item = Result<Bytes, reqwest::Error>;
+    type Item = Result<Bytes, LlmError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
