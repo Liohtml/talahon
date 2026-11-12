@@ -188,6 +188,7 @@ Each crate lives in `crates/talon-*` and is published on crates.io as
 | `talon-intel` | [`talahon-intel`](https://crates.io/crates/talahon-intel) | IOC / MITRE / command-line / triage / correlation engine + report schema |
 | `talon-anon` | [`talahon-anon`](https://crates.io/crates/talahon-anon) | PII anonymizer and `talon-anon-proxy` |
 | `talon-mcp-opensearch` | [`talahon-mcp-opensearch`](https://crates.io/crates/talahon-mcp-opensearch) | Native read-only OpenSearch MCP server `talon-opensearch-mcp` (opt-in) |
+| `talon-mcp-mysql` | [`talahon-mcp-mysql`](https://crates.io/crates/talahon-mcp-mysql) | Native MySQL MCP server `talon-mysql-mcp` (opt-in) |
 | `talon-security` | [`talahon-security`](https://crates.io/crates/talahon-security) | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
 | `talon-container` | [`talahon-container`](https://crates.io/crates/talahon-container) | Hardened docker/podman launcher, mounts, output parser |
 | `talon-net` | [`talahon-net`](https://crates.io/crates/talahon-net) | Hardened HTTP serving: header timeouts, connection caps |
@@ -349,7 +350,7 @@ container they are readable only by that server's user.
 | Directory | Setup | Credentials |
 |---|---|---|
 | `siem/` | `bash siem/setup.sh` | `OPENSEARCH_HOSTS`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`; optional `TALON_OPENSEARCH_MCP=rust` |
-| `mysql/` | `bash mysql/setup.sh` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB` |
+| `mysql/` | `bash mysql/setup.sh` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB`; optional `TALON_MYSQL_MCP=rust` |
 | `copilot-mcp/` | `bash copilot-mcp/setup.sh` | `COPILOT_URL`, `COPILOT_USERNAME`, `COPILOT_PASSWORD` |
 | `wazuh-mcp/` | `bash wazuh-mcp/setup.sh` | `WAZUH_PROD_URL`, `WAZUH_PROD_USERNAME`, `WAZUH_PROD_PASSWORD` |
 | `velociraptor-mcp/` | `bash velociraptor-mcp/setup.sh` + `api.config.yaml` | Velociraptor API client config |
@@ -365,6 +366,15 @@ change the pin and rebuild the image.
 `TALON_OPENSEARCH_MCP=rust` in `siem/.env` (opt-in) serves the SIEM tools from
 the native `talon-opensearch-mcp` binary (read-only, no Python cold start)
 instead of the Python `opensearch-mcp-server`, which stays the default.
+
+`TALON_MYSQL_MCP=rust` in `mysql/.env` (opt-in) serves the MySQL tools
+(`execute_sql`, `get_schema_info`, `get_table_sample`) from the native
+`talon-mysql-mcp` binary instead of the Python `mysql-mcp-server`, which stays
+the default: same arguments and result text, no Python cold start, and bounded
+statements (connect and query timeouts, row and byte limits). Like the Python
+server it runs any single statement the database account may run, so what the
+agent can change is decided by that account's grants. TLS follows
+`MYSQL_SSL_MODE` (see [`mysql/.env.example`](mysql/.env.example)).
 
 Services on the Talon host are reachable from containers as
 `host.docker.internal`. Which servers a group uses, and as which user, is

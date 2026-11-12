@@ -1,0 +1,37 @@
+[package]
+name = "talahon-mcp-mysql"
+description = "Native MySQL MCP server (stdio) for the Talon agent container"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities"]
+
+[lib]
+name = "talon_mcp_mysql"
+
+[dependencies]
+talon-core = { workspace = true }
+talon-mcp = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+# Pure-Rust MySQL client. TLS goes through rustls + ring like the rest of the
+# workspace (never native-tls/OpenSSL, see deny.toml); `minimal-rust` keeps
+# zlib in Rust and leaves out the derive macros.
+mysql_async = { version = "0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"] }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "talon-mysql-mcp"
+path = "src/main.rs"
