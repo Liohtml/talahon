@@ -63,7 +63,7 @@ Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
 ### Accepted residual risks
 - Prompt injection is inherent; containment (per-lane isolation, privilege
   separation, egress firewall) is the control. `talon setup egress --apply`
-  is opt-in, needs root and must be re-applied after a reboot.
+  is opt-in and needs root; `--persist` re-applies it at boot.
 - Shared-by-design state within a group folder: `MEMORY.md` (fenced),
   MemPalace (readable by every lane of the deployment).
 - Anonymization limits exposure in model context and logs; it is not a

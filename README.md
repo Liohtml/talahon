@@ -384,7 +384,9 @@ Without `--allow` the rules block private address ranges and keep internet
 egress (`--keep-internet` combines both).
 
 > [!NOTE]
-> The rules don't survive a reboot. Re-apply them from a root boot unit.
+> The rules don't survive a reboot on their own. Add `--persist` to the
+> `--apply` call (systemd hosts): it installs `talon-egress.service`, which
+> re-applies the same rules at every boot. `--uninstall --apply` removes it.
 
 ### 7. Register groups and install the service
 
