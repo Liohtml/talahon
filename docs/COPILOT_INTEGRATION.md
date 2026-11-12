@@ -483,7 +483,7 @@ data/sessions/copilot-investigate/evals/<alert_id>-<job_id>.json   # /home/agent
   "selection_method": "hints",
   "template_override": null,
   "tools_called": [
-    "mcp__mysql__query",
+    "mcp__mysql__execute_sql",
     "mcp__opensearch_anon__get_document",
     "mcp__velociraptor__GetAgentInfo",
     "mcp__velociraptor__CollectArtifactTool:Windows.System.Pslist"

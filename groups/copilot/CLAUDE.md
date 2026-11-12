@@ -364,7 +364,7 @@ cat > /home/agent/.talon/evals/<alert_id>-<job_id>.json <<'EOF'
   "template_used": "<filename or null>",
   "selection_method": "hints" | "fallback" | "default" | "override",
   "template_override": "<filename>" | null,
-  "tools_called": ["mcp__mysql__query", "mcp__opensearch_anon__get_document", ...],
+  "tools_called": ["mcp__mysql__execute_sql", "mcp__opensearch_anon__get_document", ...],
   "artifacts_collected": ["Windows.System.Pslist", ...],
   "ioc_count": <number>,
   "severity": "<Critical|High|Medium|Low|Informational>",
