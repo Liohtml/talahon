@@ -2,6 +2,10 @@
 
 All notable changes to Talon are documented in this file.
 
+## [3.0.0] - 2026-11-12
+
+- feat!: rename the user-facing surface from Talon to Talahon; group instructions in AGENT.md (#18)
+
 ## [2.3.0] - 2026-11-12
 
 - feat: keyed audit chain, lane fair share, native MySQL MCP server and redaction fixes (#17)
