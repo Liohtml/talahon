@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release automation for the Talon workspace (run by .github/workflows/release.yml).
+"""Release automation for the Talahon workspace (run by .github/workflows/release.yml).
 
 Every merge to `main` that passes CI and changes a published crate becomes a
 release: one version for the whole workspace, a `chore(release)` commit, a
@@ -174,7 +174,7 @@ def extract_notes(version: str) -> str:
     text = CHANGELOG.read_text(encoding="utf-8")
     m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
     notes = m[1].strip() if m else ""
-    return (notes or f"Talon v{version}") + "\n"
+    return (notes or f"Talahon v{version}") + "\n"
 
 
 def cmd_bump(args: argparse.Namespace) -> None:
@@ -208,7 +208,7 @@ def cmd_bump(args: argparse.Namespace) -> None:
         git("add", "Cargo.toml", "Cargo.lock", "CHANGELOG.md")
         git("commit", "-m", f"{RELEASE_PREFIX} v{new} [skip ci]")
 
-    git("tag", "-a", f"v{new}", "-m", f"Talon v{new}")
+    git("tag", "-a", f"v{new}", "-m", f"Talahon v{new}")
     if args.notes:
         Path(args.notes).write_text(extract_notes(new), encoding="utf-8")
     set_output(created="true", version=new, tag=f"v{new}")
