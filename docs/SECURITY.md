@@ -49,9 +49,15 @@ containment is what protects the host, the credentials and other tenants.
   mount points, and the agent reads only `AGENT.md` in the group folder.
   Template copies (`register_group`, `talon setup register`, the Emacs
   bootstrap) follow the same precedence, create `AGENT.md` only in a folder
-  that has neither name, and never replace either. If both names have
-  content, `AGENT.md` wins, the run is audited
-  (`instructions.legacy_ignored`) and `talon doctor` reports it.
+  that has neither name, and never replace either.
+- If both names have content, nothing picks a side. Before the rename the
+  name `AGENT.md` was not protected, so one created by an agent under an
+  older version cannot be told from one the operator wrote, and a legitimate
+  installation never has both. The launch is refused (`mount.rejected`,
+  also when the second file appears between the host's decision and the
+  binds), template copies and the assistant rename leave both files
+  untouched, and `talon doctor` reports `instructions_conflict`. The
+  operator inspects both files and keeps the one they wrote.
 - Group, session and IPC lane directories must be real directories; symlinks
   refuse the launch.
 - Output from the container is parsed with frame/byte budgets and bounded
@@ -221,13 +227,15 @@ findings, proofs of concept and their fixes are tracked in
 
   Anchor `talon audit head` on a system the host cannot write (append-only
   log store, another host) if these matter.
-- The `AGENT.md` name was not protected before the rename: an `AGENT.md` an
-  agent created in its group folder under an older version is
-  indistinguishable from one the operator wrote, and takes precedence over
-  `CLAUDE.md` after the upgrade. Check `ls groups/*/AGENT.md` before
-  upgrading; afterwards `talon doctor` (`instructions_legacy_ignored`) and
-  the `instructions.legacy_ignored` audit event point at every folder where
-  both files have content.
+- The `AGENT.md` name was not protected before the rename. Next to a
+  `CLAUDE.md` with content this is caught (the launch is refused, see
+  Boundaries). In a group folder that had **no** `CLAUDE.md` with content
+  before the upgrade, an `AGENT.md` an agent created under an older version
+  is the only candidate and is used: check `ls groups/*/AGENT.md` before
+  upgrading for files you did not write. In `groups/global/` (never
+  writable from a container) and in extra mounts (their notes are only
+  pointed to, never loaded into the system prompt) `AGENT.md` simply takes
+  precedence over `CLAUDE.md`.
 - Egress firewall rules are opt-in and must be applied by the operator; they
   survive a reboot only when applied with `--persist` (systemd hosts).
 - Model capacity is shared between lanes by a per-lane ceiling on requests

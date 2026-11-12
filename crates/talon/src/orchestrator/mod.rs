@@ -568,7 +568,16 @@ impl Orchestrator {
     ) {
         match InstructionFiles::inspect_at(dir) {
             Ok(files) if files.is_vacant() => {}
-            Ok(_) => return,
+            Ok(files) => {
+                if files.is_conflict() {
+                    tracing::warn!(
+                        folder = %group.folder,
+                        fix = talon_security::instructions::CONFLICT_FIX,
+                        "group folder has both AGENT.md and CLAUDE.md with content; both left untouched, runs there are refused"
+                    );
+                }
+                return;
+            }
             Err(e) => {
                 tracing::warn!(folder = %group.folder, error = %e, "cannot inspect the group instructions");
                 return;
@@ -631,7 +640,8 @@ impl Orchestrator {
 /// precedence as for a run in that folder). Neither the folder nor the file
 /// may be a symlink, the file must be a regular, size-capped UTF-8 file (a
 /// FIFO cannot block the open), and a symlink or other non-regular entry
-/// under **either** name means no template. Missing templates are silent.
+/// under **either** name means no template, as do two files with content
+/// (no side is picked). Missing templates are silent.
 fn read_template(groups: BorrowedFd<'_>, template_folder: &str) -> Option<String> {
     let folder = match safe_fs::open_dir_at(groups, template_folder) {
         Ok(fd) => fd,
@@ -645,7 +655,7 @@ fn read_template(groups: BorrowedFd<'_>, template_folder: &str) -> Option<String
         Ok(Ok(Some(name))) => name,
         Ok(Ok(None)) => return None,
         Ok(Err(found)) => {
-            tracing::warn!(template = template_folder, reason = %found, "unsafe instructions template; not copied");
+            tracing::warn!(template = template_folder, reason = %found, "unusable instructions template; not copied");
             return None;
         }
         Err(e) => {

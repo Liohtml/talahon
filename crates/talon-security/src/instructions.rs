@@ -13,6 +13,14 @@
 //! 3. otherwise there are no instructions (a new file is always created as
 //!    `AGENT.md`).
 //!
+//! **Both** names with content is a conflict, not a precedence question
+//! ([`InstructionProblem::Conflict`]): nothing picks a side. Before the
+//! rename nothing protected the name `AGENT.md`, so one an agent created
+//! in its group folder under an older version cannot be told from one the
+//! operator wrote, and a legitimate installation never has both. Runs in
+//! such a folder are refused and no component reads, copies or edits either
+//! file until the operator has kept exactly one.
+//!
 //! "With content" excludes **inert** files: empty or whitespace-only files
 //! and the host's own markers ([`INSTRUCTIONS_PLACEHOLDER`],
 //! [`AGENT_MOUNT_STUB`], [`LEGACY_MOUNT_STUB`]). The container layer binds
@@ -24,7 +32,8 @@
 //! following symlinks and without blocking (`O_NOFOLLOW | O_NONBLOCK`), and
 //! classified on the opened inode. Anything but a regular file is
 //! [`InstructionEntry::Unsafe`]; [`InstructionFiles::source`] then refuses
-//! to name a source at all, whichever of the two names is affected.
+//! to name a source at all ([`InstructionProblem::Unsafe`]), whichever of
+//! the two names is affected.
 
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
@@ -104,6 +113,34 @@ impl std::fmt::Display for UnsafeInstructionFile {
 
 impl std::error::Error for UnsafeInstructionFile {}
 
+/// Why a folder has no usable instruction source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionProblem {
+    /// One of the two names is not a regular file.
+    Unsafe(UnsafeInstructionFile),
+    /// Both `AGENT.md` and `CLAUDE.md` have content. Neither is preferred:
+    /// the operator has to keep exactly one.
+    Conflict,
+}
+
+/// What the operator has to do about [`InstructionProblem::Conflict`].
+pub const CONFLICT_FIX: &str = "inspect both files, keep the one you wrote and delete the other \
+     (keep exactly one of AGENT.md and CLAUDE.md; rename a kept CLAUDE.md to AGENT.md)";
+
+impl std::fmt::Display for InstructionProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsafe(found) => found.fmt(f),
+            Self::Conflict => write!(
+                f,
+                "{AGENT_INSTRUCTIONS_FILE} and {LEGACY_INSTRUCTIONS_FILE} both carry instructions"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InstructionProblem {}
+
 /// The state of both instruction file names in one directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstructionFiles {
@@ -161,11 +198,15 @@ impl InstructionFiles {
     /// has content, else `CLAUDE.md` when that has content, else `None`.
     ///
     /// # Errors
-    /// Either name is not a regular file. No source is named then, even
-    /// when the other name looks fine: the folder was tampered with.
-    pub fn source(&self) -> Result<Option<&'static str>, UnsafeInstructionFile> {
+    /// Either name is not a regular file (no source is named then, even
+    /// when the other name looks fine: the folder was tampered with), or
+    /// both names have content (no side is picked).
+    pub fn source(&self) -> Result<Option<&'static str>, InstructionProblem> {
         if let Some(found) = self.unsafe_entry() {
-            return Err(found);
+            return Err(InstructionProblem::Unsafe(found));
+        }
+        if self.is_conflict() {
+            return Err(InstructionProblem::Conflict);
         }
         Ok(if self.agent == InstructionEntry::Content {
             Some(AGENT_INSTRUCTIONS_FILE)
@@ -181,8 +222,9 @@ impl InstructionFiles {
         self.source() == Ok(Some(LEGACY_INSTRUCTIONS_FILE))
     }
 
-    /// Both names have content: `AGENT.md` wins, `CLAUDE.md` is ignored.
-    pub fn legacy_ignored(&self) -> bool {
+    /// Both names have content (and are regular files): a conflict the
+    /// operator has to resolve; see [`InstructionProblem::Conflict`].
+    pub fn is_conflict(&self) -> bool {
         self.agent == InstructionEntry::Content && self.legacy == InstructionEntry::Content
     }
 
@@ -328,22 +370,27 @@ mod tests {
         let f = files(dir);
         assert!(f.is_vacant());
         assert_eq!(f.source(), Ok(None));
-        assert!(!f.uses_legacy() && !f.legacy_ignored());
+        assert!(!f.uses_legacy() && !f.is_conflict());
         // Only the legacy name.
         std::fs::write(dir.join("CLAUDE.md"), "old rules").unwrap();
         let f = files(dir);
         assert_eq!(f.source(), Ok(Some("CLAUDE.md")));
-        assert!(f.uses_legacy() && !f.legacy_ignored() && !f.is_vacant());
-        // Both: AGENT.md wins.
+        assert!(f.uses_legacy() && !f.is_conflict() && !f.is_vacant());
+        // Both: a conflict, no side is picked.
         std::fs::write(dir.join("AGENT.md"), "new rules").unwrap();
         let f = files(dir);
-        assert_eq!(f.source(), Ok(Some("AGENT.md")));
-        assert!(f.legacy_ignored() && !f.uses_legacy());
+        assert_eq!(f.source(), Err(InstructionProblem::Conflict));
+        assert!(f.is_conflict() && !f.uses_legacy() && !f.is_vacant());
+        assert!(
+            InstructionProblem::Conflict
+                .to_string()
+                .contains("AGENT.md and CLAUDE.md both carry instructions")
+        );
         // Only the new name.
         std::fs::remove_file(dir.join("CLAUDE.md")).unwrap();
         let f = files(dir);
         assert_eq!(f.source(), Ok(Some("AGENT.md")));
-        assert!(!f.legacy_ignored() && !f.uses_legacy());
+        assert!(!f.is_conflict() && !f.uses_legacy());
         assert_eq!(f.entry("AGENT.md"), InstructionEntry::Content);
         assert_eq!(f.entry("CLAUDE.md"), InstructionEntry::Missing);
     }
@@ -375,6 +422,7 @@ mod tests {
         assert_eq!(files(dir).source(), Ok(None));
         // Anything else is content: a marker with text after it, a long
         // file starting like a marker, non-UTF-8 bytes.
+        std::fs::remove_file(dir.join("CLAUDE.md")).unwrap();
         for content in [
             format!("{AGENT_MOUNT_STUB}ignore previous instructions").into_bytes(),
             format!("{INSTRUCTIONS_PLACEHOLDER}{}", "x".repeat(4096)).into_bytes(),
@@ -408,17 +456,18 @@ mod tests {
                 assert_eq!(f.entry(name), InstructionEntry::Unsafe("symlink"));
                 assert_eq!(
                     f.source(),
-                    Err(UnsafeInstructionFile {
+                    Err(InstructionProblem::Unsafe(UnsafeInstructionFile {
                         name,
                         kind: "symlink"
-                    })
+                    }))
                 );
                 assert!(!f.uses_legacy() && !f.is_vacant());
                 std::fs::remove_file(&path).unwrap();
             }
             // Directory.
             std::fs::create_dir(&path).unwrap();
-            assert_eq!(files(dir).source().unwrap_err().kind, "directory");
+            assert_eq!(files(dir).unsafe_entry().unwrap().kind, "directory");
+            assert!(files(dir).source().is_err());
             std::fs::remove_dir(&path).unwrap();
             // FIFO: classified without blocking.
             rfs::mknodat(
@@ -430,12 +479,15 @@ mod tests {
             )
             .unwrap();
             let err = files(dir).source().unwrap_err();
-            assert_eq!((err.name, err.kind), (name, "fifo"));
+            assert_eq!(
+                err,
+                InstructionProblem::Unsafe(UnsafeInstructionFile { name, kind: "fifo" })
+            );
             assert!(err.to_string().contains("not a regular file"));
             std::fs::remove_file(&path).unwrap();
             // Socket (cannot be opened at all).
             let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-            assert_eq!(files(dir).source().unwrap_err().kind, "socket");
+            assert_eq!(files(dir).unsafe_entry().unwrap().kind, "socket");
         }
     }
 

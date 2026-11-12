@@ -530,12 +530,15 @@ in Talon 2.x. Existing installations keep working unchanged:
   folder is running: removing a mount point on the host frees the name
   inside the running container (stop Talon first; a missing stub is
   recreated on the next run).
-- If both files have content, `AGENT.md` wins, each run records an
-  `instructions.legacy_ignored` audit event and `talon doctor` fails with
-  `instructions_legacy_ignored` until one of them is removed. **Before
-  upgrading**, check that no group folder already contains an `AGENT.md` you
-  did not write (`ls groups/*/AGENT.md`): older versions did not protect that
-  name, so an agent could have created it, and it would now take precedence.
+- If both files of a group folder have content, Talon does not pick one:
+  every run in that folder is refused (`mount.rejected` in the audit log, the
+  error names the folder) and `talon doctor` fails with
+  `instructions_conflict`. Older versions did not protect the name
+  `AGENT.md`, so one that appears next to your `CLAUDE.md` may have been
+  written by an agent, and it would otherwise become the trusted system
+  prompt. If a launch is refused because both files exist, inspect both,
+  keep the one you wrote and delete the other (rename a kept `CLAUDE.md` to
+  `AGENT.md`). You can check before upgrading with `ls groups/*/AGENT.md`.
 - The host and the agent image must be upgraded together
   (`./container/build.sh`): a new image refuses to run under an older host,
   because that host does not bind `AGENT.md` read-only.

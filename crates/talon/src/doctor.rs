@@ -107,11 +107,12 @@ pub fn hint(issue: &str) -> &'static str {
             "TALON_AUDIT_KEY is too short or not random (openssl rand -hex 32); `talon run` \
              refuses to start"
         }
-        "instructions_legacy_ignored" => {
+        "instructions_conflict" => {
             "a group folder has both AGENT.md and CLAUDE.md with content (see CHECK_INSTRUCTIONS \
-             IGNORED_LEGACY): AGENT.md is used and CLAUDE.md is ignored. Check that AGENT.md is \
-             the file you wrote (it is the trusted system prompt), then delete the CLAUDE.md or \
-             merge it into AGENT.md"
+             CONFLICT): every run in that folder is refused, because the file is the trusted \
+             system prompt and older versions did not protect the name AGENT.md. Inspect both \
+             files, keep the one you wrote and delete the other (keep exactly one; rename a kept \
+             CLAUDE.md to AGENT.md)"
         }
         "instructions_unsafe" => {
             "AGENT.md or CLAUDE.md of a group folder is a symlink, directory or other non-regular \
@@ -352,9 +353,8 @@ fn listed(names: &[String]) -> String {
 ///
 /// - `LEGACY`: folders that still read `CLAUDE.md` (the fallback). Not a
 ///   problem: a `HINT` says how to rename the file.
-/// - `IGNORED_LEGACY`: folders in which both names have content, so
-///   `AGENT.md` is used and `CLAUDE.md` is ignored
-///   (`instructions_legacy_ignored`).
+/// - `CONFLICT`: folders in which both names have content; runs there are
+///   refused until the operator keeps exactly one (`instructions_conflict`).
 /// - `UNSAFE`: folders in which either name is a symlink or another
 ///   non-regular file; runs there are refused (`instructions_unsafe`).
 ///
@@ -372,7 +372,7 @@ pub fn instructions_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
         })
         .unwrap_or_default();
     folders.sort();
-    let (mut legacy, mut ignored, mut unsafe_entries) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut legacy, mut conflicts, mut unsafe_entries) = (Vec::new(), Vec::new(), Vec::new());
     for folder in &folders {
         let files = match InstructionFiles::inspect(&config.groups_dir.join(folder)) {
             Ok(files) => files,
@@ -383,15 +383,15 @@ pub fn instructions_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
         };
         if let Some(found) = files.unsafe_entry() {
             unsafe_entries.push(format!("{folder} ({found})"));
-        } else if files.legacy_ignored() {
-            ignored.push(folder.clone());
+        } else if files.is_conflict() {
+            conflicts.push(folder.clone());
         } else if files.uses_legacy() {
             legacy.push(folder.clone());
         }
     }
     block.set("FOLDERS", folders.len());
     block.set("LEGACY", listed(&legacy));
-    block.set("IGNORED_LEGACY", listed(&ignored));
+    block.set("CONFLICT", listed(&conflicts));
     block.set("UNSAFE", listed(&unsafe_entries));
     if !legacy.is_empty() {
         block.set(
@@ -402,8 +402,8 @@ pub fn instructions_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
              there; use `git mv -f` for tracked files)",
         );
     }
-    if !ignored.is_empty() {
-        issues.push("instructions_legacy_ignored".to_string());
+    if !conflicts.is_empty() {
+        issues.push("instructions_conflict".to_string());
     }
     if !unsafe_entries.is_empty() {
         issues.push("instructions_unsafe".to_string());
@@ -738,7 +738,7 @@ mod tests {
             "http_config_invalid",
             "http_api_key_unset",
             "audit_chain_tampered",
-            "instructions_legacy_ignored",
+            "instructions_conflict",
             "instructions_unsafe",
         ] {
             assert_ne!(hint(issue), hint("unknown_issue"), "{issue}");
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn instructions_block_reports_legacy_ignored_and_unsafe_files() {
+    fn instructions_block_reports_legacy_conflicting_and_unsafe_files() {
         use talon_security::instructions::{
             AGENT_MOUNT_STUB, INSTRUCTIONS_PLACEHOLDER, LEGACY_MOUNT_STUB,
         };
@@ -780,7 +780,7 @@ mod tests {
         let (block, issues) = instructions_block(&config);
         assert_eq!(block.get("FOLDERS"), Some("7"));
         assert_eq!(block.get("LEGACY"), Some("copilot,team"));
-        assert_eq!(block.get("IGNORED_LEGACY"), Some("none"));
+        assert_eq!(block.get("CONFLICT"), Some("none"));
         assert_eq!(block.get("UNSAFE"), Some("none"));
         assert!(
             block
@@ -792,15 +792,17 @@ mod tests {
         assert_eq!(block.get("STATUS"), Some("success"));
         assert!(issues.is_empty());
 
-        // Both names with content: AGENT.md wins, the ignored file is
-        // reported as a problem.
+        // Both names with content: runs are refused; reported as a
+        // problem with the fix.
         write("both/AGENT.md", "new rules");
         write("both/CLAUDE.md", "old rules");
         let (block, issues) = instructions_block(&config);
-        assert_eq!(block.get("IGNORED_LEGACY"), Some("both"));
+        assert_eq!(block.get("CONFLICT"), Some("both"));
         assert_eq!(block.get("LEGACY"), Some("copilot,team"));
         assert_eq!(block.get("STATUS"), Some("failed"));
-        assert_eq!(issues, vec!["instructions_legacy_ignored"]);
+        assert_eq!(issues, vec!["instructions_conflict"]);
+        assert!(hint("instructions_conflict").contains("keep the one you wrote"));
+        assert!(hint("instructions_conflict").contains("keep exactly one"));
 
         // A symlink under either name (and a symlinked folder is skipped).
         std::fs::remove_file(groups.join("both/CLAUDE.md")).unwrap();

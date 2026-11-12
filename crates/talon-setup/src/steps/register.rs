@@ -15,7 +15,10 @@
 //! Instructions live in `AGENT.md`; a folder that still has the legacy
 //! `CLAUDE.md` keeps it (same precedence as for a run, see
 //! `talon_security::instructions`): no `AGENT.md` is created next to it and
-//! the assistant is renamed in the file that is in use.
+//! the assistant is renamed in the file that is in use. A folder in which
+//! both names have content is left alone entirely (runs there are refused
+//! until the operator keeps exactly one): it is neither a template nor
+//! renamed.
 
 use std::io;
 use std::os::fd::AsFd;
@@ -26,7 +29,9 @@ use regex::{NoExpand, Regex};
 use talon_core::paths::{group_folder_path, is_valid_group_folder};
 use talon_core::time::now_iso;
 use talon_core::types::RegisteredGroup;
-use talon_security::instructions::{self, AGENT_INSTRUCTIONS_FILE, InstructionFiles};
+use talon_security::instructions::{
+    self, AGENT_INSTRUCTIONS_FILE, InstructionFiles, InstructionProblem,
+};
 
 use super::StepArgs;
 use crate::context::{SETUP_LOG, SetupContext};
@@ -173,6 +178,9 @@ pub fn prepare_group_folder(
         .with_context(|| format!("opening {}", group_dir.display()))?;
     let existing = InstructionFiles::inspect_at(dir.as_fd())
         .with_context(|| format!("inspecting the instructions in {}", group_dir.display()))?;
+    if existing.is_conflict() {
+        warn_conflict(&group_dir);
+    }
     if !existing.is_vacant() {
         return Ok(false);
     }
@@ -182,7 +190,7 @@ pub fn prepare_group_folder(
     }
     // No template when either name there is a symlink or another
     // non-regular entry (`groups/main` is writable by the main agent).
-    let Ok(Ok(Some(name))) = InstructionFiles::inspect(&template_dir).map(|f| f.source()) else {
+    let Some(name) = instruction_source(&template_dir) else {
         return Ok(false);
     };
     let template = template_dir.join(name);
@@ -198,6 +206,28 @@ pub fn prepare_group_folder(
     }
     tracing::info!(file = %dest.display(), template = %template.display(), "Created AGENT.md from template");
     Ok(true)
+}
+
+fn warn_conflict(dir: &Path) {
+    tracing::warn!(
+        dir = %dir.display(),
+        fix = instructions::CONFLICT_FIX,
+        "group folder has both AGENT.md and CLAUDE.md with content; both left untouched, runs there are refused"
+    );
+}
+
+/// The instructions file in use in `dir`, or `None` when there is none,
+/// either name is not a regular file, or both names have content (warned
+/// about: no side is picked).
+fn instruction_source(dir: &Path) -> Option<&'static str> {
+    match InstructionFiles::inspect(dir).map(|f| f.source()) {
+        Ok(Ok(name)) => name,
+        Ok(Err(InstructionProblem::Conflict)) => {
+            warn_conflict(dir);
+            None
+        }
+        Ok(Err(InstructionProblem::Unsafe(_))) | Err(_) => None,
+    }
 }
 
 /// Replace assistant name `old_name` in `content` with `new_name`: the first
@@ -220,8 +250,9 @@ pub fn rename_assistant(content: &str, old_name: &str, new_name: &str) -> String
 /// Apply [`rename_assistant`] to the instructions of every group folder:
 /// `groups/*/AGENT.md`, or the legacy `groups/*/CLAUDE.md` where that is
 /// still the file in use. Symlinked folders are skipped, and so is a folder
-/// in which either name is a symlink or another non-regular entry. Returns
-/// the files changed.
+/// in which either name is a symlink or another non-regular entry, or in
+/// which both names have content (neither file is edited). Returns the
+/// files changed.
 ///
 /// # Errors
 /// I/O errors reading the groups directory or writing a file.
@@ -242,7 +273,7 @@ pub fn apply_assistant_name(
         if !is_real_dir(&dir) {
             continue;
         }
-        let Ok(Ok(Some(name))) = InstructionFiles::inspect(&dir).map(|f| f.source()) else {
+        let Some(name) = instruction_source(&dir) else {
             continue;
         };
         let md = dir.join(name);
@@ -705,16 +736,22 @@ mod tests {
             instructions::AGENT_MOUNT_STUB
         );
 
-        // Both names with content: AGENT.md is the one in use.
+        // Both names with content: no side is picked, neither file is
+        // renamed, and the folder is no template target.
         std::fs::write(dir.join("AGENT.md"), "You are Atlas. New.").unwrap();
         let changed = apply_assistant_name(&f.groups, "Atlas", "Luna").unwrap();
-        assert!(changed.contains(&dir.join("AGENT.md")));
+        assert!(!changed.contains(&dir.join("AGENT.md")));
         assert!(!changed.contains(&dir.join("CLAUDE.md")));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("AGENT.md")).unwrap(),
+            "You are Atlas. New."
+        );
         assert!(
             std::fs::read_to_string(dir.join("CLAUDE.md"))
                 .unwrap()
                 .contains("You are Atlas")
         );
+        assert!(!prepare_group_folder(&f.groups, "telegram_old", false).unwrap());
     }
 
     /// The template folder follows the same precedence, and the mount-point
@@ -732,9 +769,15 @@ mod tests {
         .unwrap();
         simulate(&f, "b", false, "Talon");
         assert_eq!(read(&f, "b"), read(&f, "a"));
+        // Both names with content: not a template at all.
         std::fs::write(f.groups.join("global/AGENT.md"), "new global").unwrap();
         simulate(&f, "c", false, "Talon");
-        assert_eq!(read(&f, "c"), "new global");
+        assert!(!f.groups.join("c/AGENT.md").exists());
+        assert!(!f.groups.join("c/CLAUDE.md").exists());
+        // Migrated: AGENT.md only.
+        std::fs::remove_file(f.groups.join("global/CLAUDE.md")).unwrap();
+        simulate(&f, "d", false, "Talon");
+        assert_eq!(read(&f, "d"), "new global");
     }
 
     #[test]

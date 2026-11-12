@@ -31,7 +31,9 @@
 //!   exist on the host as regular files (the unused one as a host-created
 //!   stub): with two candidate names, an agent could otherwise create the
 //!   one that is not in use and have the host prefer it on the next run.
-//!   A symlink, directory, FIFO, ... under either name refuses the launch.
+//!   A symlink, directory, FIFO, ... under either name refuses the launch,
+//!   and so do two files with content: no side is picked (an `AGENT.md`
+//!   from before the rename may have been written by an agent).
 //!   Agent-writable memory lives in [`GROUP_MEMORY_FILE`], which the agent
 //!   loads as untrusted data.
 //! - `prompts/` (investigation templates the model follows as instructions)
@@ -91,8 +93,8 @@ use talon_core::types::RegisteredGroup;
 use talon_core::{Error, Result};
 use talon_security::instructions::{
     AGENT_INSTRUCTIONS_FILE, AGENT_MOUNT_STUB, INSTRUCTION_FILE_NAMES, INSTRUCTIONS_PLACEHOLDER,
-    InstructionEntry, InstructionFiles, LEGACY_INSTRUCTIONS_FILE, LEGACY_MOUNT_STUB,
-    UnsafeInstructionFile,
+    InstructionEntry, InstructionFiles, InstructionProblem, LEGACY_INSTRUCTIONS_FILE,
+    LEGACY_MOUNT_STUB,
 };
 use talon_security::mounts::{MountDecision, ValidatedMount};
 
@@ -761,9 +763,37 @@ type RaceHook = Box<dyn Fn(&Path)>;
 /// under either name (a planted symlink, a directory, a FIFO) refuses the
 /// launch, and so does a picture that changes between the first look and
 /// the binds (a name that appears with content, a file swapped for
-/// something else). Both refusals are audited.
+/// something else).
+///
+/// Both names with content refuses the launch as well, whether found at the
+/// first look or at the second: older versions did not protect the name
+/// `AGENT.md`, so preferring it could turn a file an agent wrote before the
+/// upgrade into the system prompt, and preferring `CLAUDE.md` would ignore
+/// a migration. The operator keeps exactly one. Every refusal is audited
+/// (`mount.rejected`).
 fn bind_group_instructions(req: &MountRequest<'_>, group_dir: &Path) -> Result<Vec<VolumeMount>> {
-    let refuse_unsafe = |found: UnsafeInstructionFile| -> Error {
+    let refuse = |problem: InstructionProblem| -> Error {
+        let found = match problem {
+            InstructionProblem::Unsafe(found) => found,
+            InstructionProblem::Conflict => {
+                let reason = "group AGENT.md and CLAUDE.md both carry instructions";
+                audit_rejected(
+                    req,
+                    &group_dir.to_string_lossy(),
+                    reason,
+                    serde_json::json!({ "files": INSTRUCTION_FILE_NAMES }),
+                );
+                return Error::security(format!(
+                    "group folder {} ({}) has both {} and {} with content; refusing to launch \
+                     rather than guess which one is the trusted system prompt: {}",
+                    req.group.folder,
+                    group_dir.display(),
+                    GROUP_INSTRUCTIONS_FILE,
+                    GROUP_LEGACY_INSTRUCTIONS_FILE,
+                    talon_security::instructions::CONFLICT_FIX,
+                ));
+            }
+        };
         let path = group_dir.join(found.name);
         audit_rejected(
             req,
@@ -790,7 +820,7 @@ fn bind_group_instructions(req: &MountRequest<'_>, group_dir: &Path) -> Result<V
     let before = inspect()?;
     let source = before
         .source()
-        .map_err(refuse_unsafe)?
+        .map_err(refuse)?
         .unwrap_or(GROUP_INSTRUCTIONS_FILE);
     #[cfg(test)]
     AFTER_FIRST_LOOK.with(|hook| {
@@ -822,7 +852,7 @@ fn bind_group_instructions(req: &MountRequest<'_>, group_dir: &Path) -> Result<V
     // Second look, now that both names exist: what is bound is what was
     // decided on.
     let after = inspect()?;
-    let still = after.source().map_err(refuse_unsafe)?;
+    let still = after.source().map_err(refuse)?;
     let both_regular = after.agent.is_regular() && after.legacy.is_regular();
     if !both_regular || still.unwrap_or(GROUP_INSTRUCTIONS_FILE) != source {
         let reason = "group instruction files changed during launch";
@@ -839,23 +869,7 @@ fn bind_group_instructions(req: &MountRequest<'_>, group_dir: &Path) -> Result<V
             still.unwrap_or("neither file"),
         )));
     }
-    if after.legacy_ignored() {
-        let ignored = group_dir.join(GROUP_LEGACY_INSTRUCTIONS_FILE);
-        tracing::warn!(
-            group = %req.group.name,
-            ignored = %ignored.display(),
-            "both AGENT.md and CLAUDE.md have content: AGENT.md is used, CLAUDE.md is ignored (remove it, or see `talon doctor`)"
-        );
-        if let Some(audit) = req.audit {
-            audit.record(event(
-                "instructions.legacy_ignored",
-                &req.group.folder,
-                Some(&ignored.to_string_lossy()),
-                "allowed",
-                serde_json::json!({ "used": GROUP_INSTRUCTIONS_FILE, "isMain": req.is_main }),
-            ));
-        }
-    } else if source == GROUP_LEGACY_INSTRUCTIONS_FILE {
+    if source == GROUP_LEGACY_INSTRUCTIONS_FILE {
         tracing::debug!(
             group = %req.group.name,
             "group instructions are read from the legacy CLAUDE.md (rename it to AGENT.md)"
@@ -2580,30 +2594,53 @@ mod tests {
         assert_eq!(read(&dir.join("CLAUDE.md")), LEGACY_MOUNT_STUB);
     }
 
-    /// Also the upgrade boundary: an `AGENT.md` with content that exists
-    /// next to the `CLAUDE.md` in use wins (as documented) and every such
-    /// launch leaves an audit row naming the ignored file.
+    /// The upgrade boundary: older versions did not protect the name
+    /// `AGENT.md`, so one with content next to the `CLAUDE.md` in use may
+    /// have been written by an agent. No side is picked: the launch is
+    /// refused until the operator has kept exactly one.
     #[test]
-    fn both_names_agent_md_wins_and_the_ignored_file_is_audited() {
+    fn both_names_with_content_refuse_launch() {
         let fx = fixture();
         let dir = team(&fx);
         fs::write(dir.join("AGENT.md"), "new rules").unwrap();
         fs::write(dir.join("CLAUDE.md"), "old rules").unwrap();
         let audit = MemoryAuditSink::default();
-        let mounts = launch(&fx, Some(&audit)).unwrap();
-        // The ignored file is not even visible in the container: its name
-        // shows the source as well.
-        assert_eq!(instructions_source(&dir, &mounts), dir.join("AGENT.md"));
-        assert_eq!(read(&dir.join("AGENT.md")), "new rules");
-        assert_eq!(read(&dir.join("CLAUDE.md")), "old rules");
+        for _ in 0..2 {
+            let err = launch(&fx, Some(&audit)).unwrap_err().to_string();
+            assert!(
+                err.contains("has both AGENT.md and CLAUDE.md with content"),
+                "{err}"
+            );
+            // Names the folder and says what to do.
+            assert!(err.contains("group folder team ("), "{err}");
+            assert!(err.contains(dir.to_str().unwrap()), "{err}");
+            assert!(err.contains("refusing to launch"), "{err}");
+            assert!(err.contains("keep the one you wrote"), "{err}");
+            assert!(err.contains("keep exactly one"), "{err}");
+            // Neither file was touched.
+            assert_eq!(read(&dir.join("AGENT.md")), "new rules");
+            assert_eq!(read(&dir.join("CLAUDE.md")), "old rules");
+        }
         let events = audit.snapshot();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "instructions.legacy_ignored");
-        assert_eq!(events[0].outcome, "allowed");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "mount.rejected");
+        assert_eq!(events[0].outcome, "denied");
+        assert_eq!(events[0].actor, "team");
+        assert_eq!(events[0].target.as_deref(), dir.to_str());
         assert_eq!(
-            events[0].target.as_deref(),
-            Some(dir.join("CLAUDE.md").to_str().unwrap())
+            events[0].details["reason"],
+            "group AGENT.md and CLAUDE.md both carry instructions"
         );
+
+        // Resolved by the operator, either way: the launch works again.
+        fs::remove_file(dir.join("AGENT.md")).unwrap();
+        let mounts = launch(&fx, None).unwrap();
+        assert_eq!(instructions_source(&dir, &mounts), dir.join("CLAUDE.md"));
+        fs::write(dir.join("AGENT.md"), "new rules").unwrap();
+        assert!(launch(&fx, None).is_err());
+        fs::remove_file(dir.join("CLAUDE.md")).unwrap();
+        let mounts = launch(&fx, None).unwrap();
+        assert_eq!(instructions_source(&dir, &mounts), dir.join("AGENT.md"));
     }
 
     /// The name that is not in use must not be a way in: a symlink,
@@ -2690,8 +2727,8 @@ mod tests {
     /// becomes the source of this launch.
     #[test]
     fn name_appearing_between_resolve_and_mount() {
-        // Legacy install; AGENT.md shows up with content: refused (this
-        // launch decided on CLAUDE.md and must not bind anything else).
+        // Legacy install; AGENT.md shows up with content: refused (two
+        // files with content; no side is picked).
         let fx = fixture();
         let dir = team(&fx);
         fs::write(dir.join("CLAUDE.md"), "trusted rules").unwrap();
@@ -2700,13 +2737,20 @@ mod tests {
             |dir| fs::write(dir.join("AGENT.md"), "planted rules").unwrap(),
             || launch(&fx, Some(&audit)).unwrap_err(),
         );
-        assert!(err.to_string().contains("changed during launch"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("has both AGENT.md and CLAUDE.md with content"),
+            "{err}"
+        );
         let events = audit.snapshot();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "mount.rejected");
-        assert_eq!(events[0].details["detail"]["decided"], "CLAUDE.md");
-        assert_eq!(events[0].details["detail"]["now"], "AGENT.md");
+        assert_eq!(
+            events[0].details["reason"],
+            "group AGENT.md and CLAUDE.md both carry instructions"
+        );
         assert_eq!(read(&dir.join("AGENT.md")), "planted rules");
+        assert_eq!(read(&dir.join("CLAUDE.md")), "trusted rules");
 
         // ... as a symlink (to the planted file, or to CLAUDE.md itself).
         for target in ["planted.md", "CLAUDE.md"] {
@@ -2734,19 +2778,24 @@ mod tests {
         );
         assert!(err.to_string().contains("changed during launch"), "{err}");
 
-        // AGENT.md install; CLAUDE.md shows up: AGENT.md stays the source
-        // (the legacy name never outranks it) and the ignored file is
-        // audited.
+        // AGENT.md install; CLAUDE.md shows up with content: refused as
+        // well, and audited.
         let fx = fixture();
         let dir = team(&fx);
         fs::write(dir.join("AGENT.md"), "trusted rules").unwrap();
         let audit = MemoryAuditSink::default();
-        let mounts = with_race(
+        let err = with_race(
             |dir| fs::write(dir.join("CLAUDE.md"), "planted rules").unwrap(),
-            || launch(&fx, Some(&audit)).unwrap(),
+            || launch(&fx, Some(&audit)).unwrap_err(),
         );
-        assert_eq!(instructions_source(&dir, &mounts), dir.join("AGENT.md"));
-        assert_eq!(audit.snapshot()[0].kind, "instructions.legacy_ignored");
+        assert!(
+            err.to_string()
+                .contains("has both AGENT.md and CLAUDE.md with content"),
+            "{err}"
+        );
+        assert_eq!(audit.snapshot().len(), 1);
+        assert_eq!(audit.snapshot()[0].kind, "mount.rejected");
+        assert_eq!(read(&dir.join("AGENT.md")), "trusted rules");
 
         // Two lanes of one folder launching at once: the other launch
         // created the stub first. Not a change of source.

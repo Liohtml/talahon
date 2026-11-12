@@ -392,6 +392,14 @@ fn ensure_instructions(dir: &Path) {
         );
         return;
     }
+    if files.is_conflict() {
+        warn!(
+            dir = %dir.display(),
+            fix = instructions::CONFLICT_FIX,
+            "Emacs channel: the folder has both AGENT.md and CLAUDE.md with content; both left untouched, the lane will not start until exactly one is kept"
+        );
+        return;
+    }
     if !files.is_vacant() {
         debug!(
             legacy = files.uses_legacy(),

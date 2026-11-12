@@ -1441,10 +1441,20 @@ async fn group_bootstrap_honours_legacy_claude_md() {
     assert_eq!(read("a/AGENT.md"), "# Talon\nold global\n");
     assert!(!groups.join("a/CLAUDE.md").exists());
 
-    // Both names in the template folder: AGENT.md wins.
+    // Both names with content in the template folder: no side is picked,
+    // nothing is copied.
     std::fs::write(groups.join("global/AGENT.md"), "# Talon\nnew global\n").unwrap();
     register("fake:b", "b").await;
-    assert_eq!(read("b/AGENT.md"), "# Talon\nnew global\n");
+    assert!(!groups.join("b/AGENT.md").exists());
+    assert!(!groups.join("b/CLAUDE.md").exists());
+
+    // Destination with both names with content: both left untouched.
+    std::fs::create_dir_all(groups.join("both")).unwrap();
+    std::fs::write(groups.join("both/AGENT.md"), "new rules").unwrap();
+    std::fs::write(groups.join("both/CLAUDE.md"), "old rules").unwrap();
+    register("fake:both", "both").await;
+    assert_eq!(read("both/AGENT.md"), "new rules");
+    assert_eq!(read("both/CLAUDE.md"), "old rules");
 
     // An inert AGENT.md (the mount-point stub of a legacy folder) is not a
     // template; the CLAUDE.md next to it is.
