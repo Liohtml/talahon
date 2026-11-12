@@ -105,7 +105,7 @@ API. Verdicts and IOC sightings stay local for cross-alert correlation.
 | Untrusted data | Nonce-fenced envelopes plus an injection scanner (EN/DE) |
 | Isolation | Per lane: every analyst, the investigation lane and the webhook lane are separate principals |
 | Verdicts | `submit_triage_report` with JSON schema, stored and queryable via `GET /investigations` |
-| Audit | SHA-256 hash-chained audit table, `talon audit verify` |
+| Audit | Hash-chained audit table, HMAC-keyed with `TALON_AUDIT_KEY`; `talon audit verify` |
 
 ## 🧩 Architecture
 
@@ -224,7 +224,7 @@ reach.
 | Memory | MemPalace data belongs to `mcp-palace`; agents can neither read nor plant files there, and host `/palace/*` calls run in a one-shot locked-down container |
 | Supply chain | Base images pinned by digest, every MCP server pinned to a commit SHA or exact version in [`container/mcp-versions.env`](container/mcp-versions.env), CI actions pinned by SHA; licenses, sources and banned crates enforced with `cargo deny`; the image is built and smoke-tested in CI |
 | Secrets in output | Logs and outbound messages pass through a redactor (bearer/JWT/vendor keys/PEM/basic auth + every configured secret value) |
-| Audit | Append-only SQLite audit log with a SHA-256 hash chain; `talon audit verify` detects tampering |
+| Audit | Append-only SQLite audit log with a hash chain: SHA-256 by default, HMAC-SHA-256 once `TALON_AUDIT_KEY` is set, so a database writer without the key cannot forge or recompute rows; a keyed checkpoint file outside the database reveals a truncated tail. `talon audit verify` checks all of it, `talon audit head` exports the head for external anchoring ([limits](docs/SECURITY.md#7-audit)) |
 
 The rewrite went through three rounds of adversarial review; findings, proofs
 of concept, fixes and accepted residual risks are in
@@ -429,7 +429,8 @@ interface if CoPilot runs on another host, and terminate TLS in front of it.
 | `talon run` | Run the service (default) |
 | `talon doctor` | Diagnose runtime, image, vLLM, gateway, directories, audit chain |
 | `talon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `egress`, `service`, `verify` |
-| `talon audit verify` | Recompute the audit hash chain (exit code 1 on tampering) |
+| `talon audit verify` | Verify the audit chain, its MACs and the truncation checkpoint (exit code 1 on tampering) |
+| `talon audit head` | Print the newest row's id, hash and sequence number, for anchoring off-host |
 | `talon audit tail -n 50 --kind ipc.` | Recent audit events as JSON lines |
 | `talon eval score --reports <dir>` | Score saved verdicts against the golden set (offline) |
 | `talon eval run` | Investigate every golden case through a running Talon, then score |

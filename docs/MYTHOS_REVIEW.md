@@ -23,8 +23,11 @@ work order for the fix agents; each finding lists its owners.
 Residual risks accepted for now: prompt injection is inherent (bash is always
 available, so containment matters more than detection); the raw `opensearch`
 MCP is exposed next to `opensearch_anon`; the audit chain is unkeyed and its
-tail can be truncated by someone with host DB write access; no global vLLM
-fairness between lanes.
+tail can be truncated by someone with host DB write access (since addressed:
+HMAC-keyed chain and truncation checkpoint with `TALON_AUDIT_KEY`, see
+[SECURITY.md](SECURITY.md#7-audit); opt-in, and rollback by someone who can
+also write the checkpoint file still needs an external anchor); no global
+vLLM fairness between lanes.
 
 ## Round 2 — verification and new findings
 
@@ -69,7 +72,11 @@ Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
 - Anonymization limits exposure in model context and logs; it is not a
   confidentiality control against the model (`opensearch` raw server and
   `deanonymize` remain available).
-- The audit chain is unkeyed; anchor `audit_chain_head()` externally.
+- The audit chain is keyed only when `TALON_AUDIT_KEY` is set (HMAC-SHA-256
+  rows plus a keyed truncation checkpoint outside the database). Without the
+  key it can be recomputed or truncated by a database writer; with it, a
+  writer of both the database and the checkpoint file can still roll back to
+  a state whose checkpoint they kept. Anchor `talon audit head` externally.
 - vLLM capacity between lanes: mitigated, not scheduled. The gateway counts
   requests in flight per lane and caps one lane at
   `TALON_LLM_GATEWAY_LANE_SHARE` percent of the global cap (default 75 %,

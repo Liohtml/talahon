@@ -196,6 +196,18 @@ const RUST_COLUMNS: &[ColumnMigration] = &[
     col("registered_groups", "lane_config", "TEXT"),
 ];
 
+/// Columns of tables created by [`RUST_SCHEMA`], added after it ran. The
+/// `CREATE TABLE` statements keep the shape of the release that introduced
+/// them, so fresh and upgraded databases take the same path.
+///
+/// `audit_log.scheme` says how a row's `hash` was computed (`sha256` for
+/// every row written before the keyed chain existed, hence the default) and
+/// `audit_log.seq` is the position of a keyed row in the chain.
+const RUST_TABLE_COLUMNS: &[ColumnMigration] = &[
+    col("audit_log", "scheme", "TEXT NOT NULL DEFAULT 'sha256'"),
+    col("audit_log", "seq", "INTEGER"),
+];
+
 /// Create the schema and bring an existing database up to date.
 pub(crate) fn migrate(conn: &mut Connection, opts: &DbOptions) -> Result<()> {
     let tx = conn
@@ -207,6 +219,9 @@ pub(crate) fn migrate(conn: &mut Connection, opts: &DbOptions) -> Result<()> {
         add_column_if_missing(&tx, m)?;
     }
     tx.execute_batch(RUST_SCHEMA).db()?;
+    for m in RUST_TABLE_COLUMNS {
+        add_column_if_missing(&tx, m)?;
+    }
     tx.commit().db()?;
     Ok(())
 }

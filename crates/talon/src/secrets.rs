@@ -19,6 +19,7 @@ pub const KNOWN_SECRET_KEYS: &[&str] = &[
     "TELEGRAM_BOT_TOKEN",
     "WEBHOOK_SECRET",
     "EMACS_AUTH_TOKEN",
+    "TALON_AUDIT_KEY",
     "ONECLI_API_KEY",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -97,6 +98,8 @@ mod tests {
     fn secret_key_detection() {
         assert!(is_secret_key("TALON_VLLM_API_KEY"));
         assert!(is_secret_key("HTTP_API_KEY"));
+        assert!(is_secret_key(talon_db::AUDIT_KEY_ENV));
+        assert!(KNOWN_SECRET_KEYS.contains(&talon_db::AUDIT_KEY_ENV));
         assert!(is_secret_key("MYSQL_PASSWORD"));
         assert!(is_secret_key("some_token"));
         assert!(!is_secret_key("TALON_VLLM_MODEL"));
@@ -110,7 +113,8 @@ mod tests {
             dir.path().join(".env"),
             "TALON_VLLM_API_KEY=vllm-secret-123456\nHTTP_API_KEY=http-secret-abcdef\n\
              TALON_VLLM_MODEL=qwen\nCUSTOM_DB_PASSWORD=hunter2hunter2\n\
-             TALON_VLLM_MAX_TOKENS=131072\nSOME_TOKEN_REQUIRED=true\n",
+             TALON_VLLM_MAX_TOKENS=131072\nSOME_TOKEN_REQUIRED=true\n\
+             TALON_AUDIT_KEY=4c1f0e9a7b3d5c2e8f6a1b0d9c7e5f3a2b4d6c8e0f1a3b5c7d9e1f2a4b6c8d0e\n",
         )
         .unwrap();
         let env = EnvFile::load(dir.path());
@@ -129,5 +133,12 @@ mod tests {
         let out = redactor.redact("key is vllm-secret-123456 and model qwen");
         assert!(!out.contains("vllm-secret-123456"));
         assert!(out.contains("qwen"));
+        // The audit key is scrubbed from logs and outbound text like any
+        // other secret.
+        let audit_key = "4c1f0e9a7b3d5c2e8f6a1b0d9c7e5f3a2b4d6c8e0f1a3b5c7d9e1f2a4b6c8d0e";
+        assert!(secrets.contains(&audit_key.to_string()));
+        let line = format!("audit key {audit_key} leaked");
+        let out = redactor.redact(&line);
+        assert!(!out.contains(audit_key), "{out}");
     }
 }

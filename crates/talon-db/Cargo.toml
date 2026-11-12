@@ -21,11 +21,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+subtle = { workspace = true }
+# Not the workspace entry: its `derive` feature would add a proc-macro crate
+# that nothing needs.
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
 hex = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

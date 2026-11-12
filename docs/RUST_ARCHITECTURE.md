@@ -162,6 +162,15 @@ Kinds: `http.auth.failed`, `http.investigate`, `ipc.message.denied`,
 `container.launch`, `container.exit`, `gateway.auth.failed`,
 `gateway.request`, `injection.detected`, `egress.denied`, `tool.call`.
 
+The host sink (`talon_db::DbAuditSink`) appends to the hash-chained
+`audit_log` table. With `TALON_AUDIT_KEY` the host calls
+`Db::enable_keyed_audit` (rows are HMAC-SHA-256 under the key, and
+`store/audit.checkpoint` anchors the newest row against truncation); the
+database then appends two kinds on its own: `audit.chain.keyed` (first keyed
+row of a chain that has unkeyed rows) and `audit.checkpoint.anomaly`
+(checkpoint and table disagree). Verification is `Db::verify_audit`
+(`talon audit verify`); see [SECURITY.md](SECURITY.md#7-audit).
+
 ---
 
 ## 4. How it was built

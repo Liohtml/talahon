@@ -24,7 +24,9 @@
 //!   single connection for everything.
 //! - New tables: `audit_log` (append-only, **hash-chained**: each row stores
 //!   `prev_hash` and `hash = sha256_hex(prev_hash || canonical_json(event))`,
-//!   with [`Db::verify_audit_chain`]), `investigations`, `ioc_sightings`,
+//!   or an HMAC-SHA-256 under the audit key once
+//!   [`Db::enable_keyed_audit`] was called, see [`audit`]; verified with
+//!   [`Db::verify_audit`]), `investigations`, `ioc_sightings`,
 //!   `task_owners` (who created a scheduled task over IPC, see
 //!   [`Db::set_task_owner`] / [`Db::get_task_owner`]; per-lane quotas use
 //!   [`Db::count_tasks_owned_by`], per-lane task snapshots
@@ -45,7 +47,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::Duration;
 
 use rusqlite::types::ValueRef;
@@ -54,6 +56,7 @@ use serde::{Deserialize, Serialize};
 use talon_core::{Error, Result};
 
 pub mod audit;
+mod audit_key;
 mod chats;
 mod groups;
 mod investigations;
@@ -62,7 +65,12 @@ mod schema;
 mod state;
 mod tasks;
 
-pub use audit::{AUDIT_GENESIS_HASH, DbAuditSink, audit_event_hash, canonical_json};
+pub use audit::{
+    AUDIT_CHECKPOINT_FILE_NAME, AUDIT_GENESIS_HASH, AUDIT_KEY_ENV, AUDIT_KIND_CHAIN_KEYED,
+    AUDIT_KIND_CHECKPOINT_ANOMALY, AuditCheckpointState, AuditFailure, AuditHead, AuditKey,
+    AuditKeyStatus, AuditRowFailure, AuditScheme, AuditVerification, DbAuditSink,
+    MIN_AUDIT_KEY_LEN, audit_event_hash, canonical_json, default_audit_checkpoint_path,
+};
 pub use investigations::INVESTIGATION_STATUSES;
 pub use iocs::{MAX_IOC_TYPE_LEN, MAX_IOC_VALUE_LEN};
 pub use tasks::MAX_TASK_OWNER_LEN;
@@ -170,6 +178,8 @@ struct Inner {
     readers: Vec<Mutex<Connection>>,
     /// Round-robin cursor into `readers`.
     next_reader: AtomicUsize,
+    /// Audit key and checkpoint path ([`Db::enable_keyed_audit`]).
+    audit_keying: OnceLock<audit_key::AuditKeying>,
 }
 
 impl std::fmt::Debug for Db {
@@ -219,6 +229,7 @@ impl Db {
                 conn: Mutex::new(conn),
                 readers: Vec::new(),
                 next_reader: AtomicUsize::new(0),
+                audit_keying: OnceLock::new(),
             }),
         })
     }

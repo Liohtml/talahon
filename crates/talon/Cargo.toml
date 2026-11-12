@@ -53,6 +53,8 @@ rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Tampering with the audit log behind talon-db's back (audit tests).
+rusqlite = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]

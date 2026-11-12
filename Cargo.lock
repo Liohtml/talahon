@@ -1777,6 +1777,7 @@ dependencies = [
  "futures",
  "regex",
  "reqwest",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -1921,13 +1922,17 @@ version = "2.2.0"
 dependencies = [
  "chrono",
  "hex",
+ "hmac",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "talahon-core",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
