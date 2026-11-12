@@ -105,7 +105,7 @@ API. Verdicts and IOC sightings stay local for cross-alert correlation.
 | Untrusted data | Nonce-fenced envelopes plus an injection scanner (EN/DE) |
 | Isolation | Per lane: every analyst, the investigation lane and the webhook lane are separate principals |
 | Verdicts | `submit_triage_report` with JSON schema, stored and queryable via `GET /investigations` |
-| Audit | SHA-256 hash-chained audit table, `talon audit verify` |
+| Audit | Hash-chained audit table, HMAC-keyed with `TALON_AUDIT_KEY`; `talon audit verify` |
 
 ## 🧩 Architecture
 
@@ -188,6 +188,7 @@ Each crate lives in `crates/talon-*` and is published on crates.io as
 | `talon-intel` | [`talahon-intel`](https://crates.io/crates/talahon-intel) | IOC / MITRE / command-line / triage / correlation engine + report schema |
 | `talon-anon` | [`talahon-anon`](https://crates.io/crates/talahon-anon) | PII anonymizer and `talon-anon-proxy` |
 | `talon-mcp-opensearch` | [`talahon-mcp-opensearch`](https://crates.io/crates/talahon-mcp-opensearch) | Native read-only OpenSearch MCP server `talon-opensearch-mcp` (opt-in) |
+| `talon-mcp-mysql` | [`talahon-mcp-mysql`](https://crates.io/crates/talahon-mcp-mysql) | Native MySQL MCP server `talon-mysql-mcp` (opt-in) |
 | `talon-security` | [`talahon-security`](https://crates.io/crates/talahon-security) | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
 | `talon-container` | [`talahon-container`](https://crates.io/crates/talahon-container) | Hardened docker/podman launcher, mounts, output parser |
 | `talon-net` | [`talahon-net`](https://crates.io/crates/talahon-net) | Hardened HTTP serving: header timeouts, connection caps |
@@ -213,7 +214,7 @@ reach.
 | Layer | Defence |
 |---|---|
 | Prompt injection | Untrusted data is wrapped in randomly nonced `<untrusted_data>` envelopes the model is told never to obey; a ~75-rule EN/DE scanner (normalization, base64/exfil decoders, tuned to stay quiet on real SIEM telemetry) flags and audits high-risk content |
-| Model credentials | The vLLM key stays on the host gateway; each run gets a short-lived token (stored as SHA-256, revoked at the end) over stdin, never env. The gateway pins models, clamps tokens, forwards only allowlisted request fields, salts the prefix cache per lane and rate-limits per run and globally |
+| Model credentials | The vLLM key stays on the host gateway; each run gets a short-lived token (stored as SHA-256, revoked at the end) over stdin, never env. The gateway pins models, clamps tokens, forwards only allowlisted request fields, salts the prefix cache per lane, rate-limits per run and globally and caps the share of concurrency one lane may hold |
 | Container | `--cap-drop=ALL` (+ minimal supervisor caps), `no-new-privileges`, read-only rootfs + tmpfs, `--init`, pid/memory/cpu limits, no sudo or node in the image; read-only `CLAUDE.md`, `.mcp.json` and MCP dirs; mounts containing the project root, `store/`, `data/`, `groups/` or `.env` are refused; credential files in any mount are shadowed |
 | Privilege separation | The root supervisor starts each MCP server as its own `mcp-*` user with a private HOME; the agent runs unprivileged and can't read MCP secrets or their process environments |
 | Lane isolation | Every lane is its own principal: it can only message and schedule into itself, touch tasks it owns and never attach scripts; transcripts, reports and archives are per lane |
@@ -224,7 +225,7 @@ reach.
 | Memory | MemPalace data belongs to `mcp-palace`; agents can neither read nor plant files there, and host `/palace/*` calls run in a one-shot locked-down container |
 | Supply chain | Base images pinned by digest, every MCP server pinned to a commit SHA or exact version in [`container/mcp-versions.env`](container/mcp-versions.env), CI actions pinned by SHA; licenses, sources and banned crates enforced with `cargo deny`; the image is built and smoke-tested in CI |
 | Secrets in output | Logs and outbound messages pass through a redactor (bearer/JWT/vendor keys/PEM/basic auth + every configured secret value) |
-| Audit | Append-only SQLite audit log with a SHA-256 hash chain; `talon audit verify` detects tampering |
+| Audit | Append-only SQLite audit log with a hash chain: SHA-256 by default, HMAC-SHA-256 once `TALON_AUDIT_KEY` is set, so a database writer without the key cannot forge or recompute rows; a keyed checkpoint file outside the database reveals a truncated tail. `talon audit verify` checks all of it, `talon audit head` exports the head for external anchoring ([limits](docs/SECURITY.md#7-audit)) |
 
 The rewrite went through three rounds of adversarial review; findings, proofs
 of concept, fixes and accepted residual risks are in
@@ -349,7 +350,7 @@ container they are readable only by that server's user.
 | Directory | Setup | Credentials |
 |---|---|---|
 | `siem/` | `bash siem/setup.sh` | `OPENSEARCH_HOSTS`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`; optional `TALON_OPENSEARCH_MCP=rust` |
-| `mysql/` | `bash mysql/setup.sh` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB` |
+| `mysql/` | `bash mysql/setup.sh` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB`; optional `TALON_MYSQL_MCP=rust` |
 | `copilot-mcp/` | `bash copilot-mcp/setup.sh` | `COPILOT_URL`, `COPILOT_USERNAME`, `COPILOT_PASSWORD` |
 | `wazuh-mcp/` | `bash wazuh-mcp/setup.sh` | `WAZUH_PROD_URL`, `WAZUH_PROD_USERNAME`, `WAZUH_PROD_PASSWORD` |
 | `velociraptor-mcp/` | `bash velociraptor-mcp/setup.sh` + `api.config.yaml` | Velociraptor API client config |
@@ -365,6 +366,15 @@ change the pin and rebuild the image.
 `TALON_OPENSEARCH_MCP=rust` in `siem/.env` (opt-in) serves the SIEM tools from
 the native `talon-opensearch-mcp` binary (read-only, no Python cold start)
 instead of the Python `opensearch-mcp-server`, which stays the default.
+
+`TALON_MYSQL_MCP=rust` in `mysql/.env` (opt-in) serves the MySQL tools
+(`execute_sql`, `get_schema_info`, `get_table_sample`) from the native
+`talon-mysql-mcp` binary instead of the Python `mysql-mcp-server`, which stays
+the default: same arguments and result text, no Python cold start, and bounded
+statements (connect and query timeouts, row and byte limits). Like the Python
+server it runs any single statement the database account may run, so what the
+agent can change is decided by that account's grants. TLS follows
+`MYSQL_SSL_MODE` (see [`mysql/.env.example`](mysql/.env.example)).
 
 Services on the Talon host are reachable from containers as
 `host.docker.internal`. Which servers a group uses, and as which user, is
@@ -429,7 +439,8 @@ interface if CoPilot runs on another host, and terminate TLS in front of it.
 | `talon run` | Run the service (default) |
 | `talon doctor` | Diagnose runtime, image, vLLM, gateway, directories, audit chain |
 | `talon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `egress`, `service`, `verify` |
-| `talon audit verify` | Recompute the audit hash chain (exit code 1 on tampering) |
+| `talon audit verify` | Verify the audit chain, its MACs and the truncation checkpoint (exit code 1 on tampering) |
+| `talon audit head` | Print the newest row's id, hash and sequence number, for anchoring off-host |
 | `talon audit tail -n 50 --kind ipc.` | Recent audit events as JSON lines |
 | `talon eval score --reports <dir>` | Score saved verdicts against the golden set (offline) |
 | `talon eval run` | Investigate every golden case through a running Talon, then score |

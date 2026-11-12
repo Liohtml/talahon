@@ -75,6 +75,7 @@ async fn dispatch(cli: Cli, root: PathBuf) -> i32 {
             let (config, _) = bootstrap(&root, LogTarget::Stderr, "warn");
             let result = match command {
                 AuditCommand::Verify => talon::audit_cmd::verify(&config),
+                AuditCommand::Head => talon::audit_cmd::head(&config),
                 AuditCommand::Tail { lines, kind } => {
                     talon::audit_cmd::tail(&config, *lines, kind.as_deref())
                 }

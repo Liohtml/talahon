@@ -94,7 +94,16 @@ pub fn hint(issue: &str) -> &'static str {
             "HTTP_API_KEY is not set: the CoPilot HTTP API rejects every request (openssl rand -hex 32)"
         }
         "audit_chain_tampered" => {
-            "the audit log hash chain is broken: investigate with `talon audit tail` before trusting it"
+            "the audit log does not verify (see AUDIT_VERIFY ERROR): investigate with `talon audit \
+             tail` before trusting it"
+        }
+        "audit_key_missing" => {
+            "the audit log has keyed rows but TALON_AUDIT_KEY is not set in .env: restore the key \
+             (`talon run` refuses to start without it)"
+        }
+        "audit_key_invalid" => {
+            "TALON_AUDIT_KEY is too short or not random (openssl rand -hex 32); `talon run` \
+             refuses to start"
         }
         _ => "see the blocks above",
     }
@@ -328,9 +337,26 @@ fn audit_block(config: &TalonConfig) -> Option<(StatusBlock, Vec<String>)> {
             ));
         }
     };
+    if let Err(e) = crate::audit_cmd::enable_audit_key(&db, config) {
+        return Some((
+            StatusBlock::new("AUDIT_VERIFY")
+                .field("STATUS", "failed")
+                .field("ERROR", format!("{e:#}")),
+            vec!["audit_key_invalid".to_string()],
+        ));
+    }
     match crate::audit_cmd::verify_block(&db) {
+        // An unkeyed chain is reported as a HINT in the block, not as an
+        // issue: it is the default.
         Ok((block, true)) => Some((block, Vec::new())),
-        Ok((block, false)) => Some((block, vec!["audit_chain_tampered".to_string()])),
+        Ok((block, false)) => {
+            let issue = if block.get("CHAIN") == Some("unverifiable") {
+                "audit_key_missing"
+            } else {
+                "audit_chain_tampered"
+            };
+            Some((block, vec![issue.to_string()]))
+        }
         Err(e) => Some((
             StatusBlock::new("AUDIT_VERIFY")
                 .field("STATUS", "failed")
@@ -432,6 +458,55 @@ mod tests {
             Path::new("/tmp/talon-doctor-test"),
             talon_core::env::EnvFile::from_str_content(content),
         )
+    }
+
+    #[test]
+    fn audit_block_reports_unkeyed_hint_and_key_problems() {
+        const KEY: &str = "7a9c1e3b5d7f9a0c2e4b6d8f0a1c3e5b7d9f1a3c5e7b9d0f2a4c6e8b0d1f3a5c";
+        let dir = tempfile::tempdir().unwrap();
+        let config = |env: &str| {
+            TalonConfig::from_env(dir.path(), talon_core::env::EnvFile::from_str_content(env))
+        };
+        let record = |config: &TalonConfig| {
+            let db = Db::open(&default_db_path(&config.store_dir)).unwrap();
+            crate::audit_cmd::enable_audit_key(&db, config).unwrap();
+            db.record_audit(&talon_core::audit::event(
+                "talon.start",
+                "talon",
+                None,
+                "info",
+                serde_json::json!({}),
+            ))
+            .unwrap();
+        };
+        // No database yet: nothing to report.
+        assert!(audit_block(&config("")).is_none());
+
+        // Unkeyed chain: a hint, not an issue (the exit code is unchanged).
+        record(&config(""));
+        let (block, issues) = audit_block(&config("")).unwrap();
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(block.get("STATUS"), Some("success"));
+        assert!(block.get("HINT").unwrap().contains("TALON_AUDIT_KEY"));
+
+        // Invalid key.
+        let (block, issues) = audit_block(&config("TALON_AUDIT_KEY=tooshort-pw\n")).unwrap();
+        assert_eq!(issues, vec!["audit_key_invalid"]);
+        assert!(!format!("{block}").contains("tooshort-pw"));
+        assert!(hint("audit_key_invalid").contains("openssl rand -hex 32"));
+
+        // Keyed chain: no hint; without the key afterwards: an issue.
+        let keyed = config(&format!("TALON_AUDIT_KEY={KEY}\n"));
+        record(&keyed);
+        let (block, issues) = audit_block(&keyed).unwrap();
+        assert!(issues.is_empty(), "{block}");
+        assert_eq!(block.get("HINT"), None);
+        assert_eq!(block.get("CHECKPOINT"), Some("verified"));
+        assert!(!format!("{block}").contains(KEY));
+        let (block, issues) = audit_block(&config("")).unwrap();
+        assert_eq!(issues, vec!["audit_key_missing"]);
+        assert_eq!(block.get("CHAIN"), Some("unverifiable"));
+        assert!(hint("audit_key_missing").contains("TALON_AUDIT_KEY"));
     }
 
     /// The process environment overrides `.env` for non-secret keys.

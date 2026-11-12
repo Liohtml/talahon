@@ -7,12 +7,14 @@ use super::*;
 /// Text an attacker (or an unlucky log line) puts around a secret: pieces
 /// of the credential syntaxes themselves, so that neighbouring matches,
 /// exemptions and placeholders are exercised.
-///
-/// Deliberately absent: unterminated `-----BEGIN ... PRIVATE KEY-----`
-/// headers, `Authorization:` and the scheme words (`Bearer`, `Basic`,
-/// `Token`). In front of another credential they trigger the known
-/// limitations pinned by the `#[ignore]`d tests at the end of this file.
 const CONTEXT: &[&str] = &[
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY----- ",
+    "Authorization: ",
+    "Authorization: Token ",
+    "Bearer ",
+    "Basic ",
+    "Token ",
     " ",
     "\n",
     "\r\n",
@@ -443,14 +445,11 @@ fn authorization_header_followed_by_an_assignment() {
     );
 }
 
-/// KNOWN LIMITATION (found by `supported_credentials_never_survive`, not
-/// fixed): the detector for PEM blocks that lack their `-----END` line
-/// consumes the base64-ish text after the header, here ` api`, which leaves
-/// `_key=<value>` behind — no longer a sensitive key. Fixing it means
-/// re-ordering the detectors or bounding the unterminated-PEM match, both
-/// of which change what is redacted in real key material.
+/// Found by `supported_credentials_never_survive`: the detector for PEM
+/// blocks that lack their `-----END` line consumed the base64-ish text after
+/// the header, here ` api`, and left `_key=<value>` behind — no longer a
+/// sensitive key. It now takes a word up to its end.
 #[test]
-#[ignore = "known limitation: unterminated PEM header swallows the start of the next key"]
 fn unterminated_pem_header_before_an_assignment() {
     assert!(!survives(
         "-----BEGIN PRIVATE KEY----- api_key=aaA000aAA ",
@@ -458,12 +457,9 @@ fn unterminated_pem_header_before_an_assignment() {
     ));
 }
 
-/// KNOWN LIMITATION (found by `supported_credentials_never_survive`, not
-/// fixed): an auth scheme word directly followed by something that is not
-/// its credential. `Bearer` takes `AWS_SECRET_ACCESS_KEY=` as the token and
-/// the value survives.
+/// Found by `supported_credentials_never_survive`: `Bearer` took
+/// `AWS_SECRET_ACCESS_KEY=` as its token and the value survived.
 #[test]
-#[ignore = "known limitation: scheme word followed by another credential syntax"]
 fn bearer_before_an_assignment() {
     assert!(!survives(
         "Bearer  AWS_SECRET_ACCESS_KEY=aaA0000a0 ",
@@ -471,13 +467,91 @@ fn bearer_before_an_assignment() {
     ));
 }
 
-/// KNOWN LIMITATION (not fixed): with a doubled scheme the first one takes
-/// the second as its credential and the real token survives.
+/// With a doubled scheme the first one took the second as its credential
+/// and the real token survived.
 #[test]
-#[ignore = "known limitation: doubled Authorization scheme"]
 fn doubled_authorization_scheme() {
     assert!(!survives(
         "Authorization: Token Bearer abcdefgh1234ABCDEFGH ",
         "abcdefgh1234ABCDEFGH"
     ));
+}
+
+/// Found after widening the hostile vocabulary: a detector must not take
+/// the head of a neighbouring credential as its own credential, and must
+/// not decline a real credential because punctuation follows it.
+#[test]
+fn detectors_do_not_hide_neighbouring_credentials() {
+    for (text, secret) in [
+        // Scheme word followed by an assignment, with every separator style.
+        ("Authorization: Token  password:Aaa00AAaa ", "Aaa00AAaa"),
+        ("Authorization: Token  password: aaA00AaA0 ", "aaA00AaA0"),
+        ("Authorization: Token  password = AAA00AAA0 ", "AAA00AAA0"),
+        // A header inside the "credential" of another header.
+        (
+            "Authorization: Token  Authorization: Token AaA000a00 ",
+            "AaA000a00",
+        ),
+        (
+            "Authorization: Token a(Authorization: Token aaa00AA0A ",
+            "aaa00AA0A",
+        ),
+        (
+            "Authorization: Token https://(Bearer aaaaaaaa0000AAaAaAAa ",
+            "aaaaaaaa0000AAaAaAAa",
+        ),
+        // A real credential followed by punctuation stays a credential.
+        (" Authorization: Bearer aaA00aAa0 :", "aaA00aAa0"),
+        (" Authorization: Bearer AAa00A0A0\t:", "AAa00A0A0"),
+        (
+            " Authorization: Bearer Aaa00aaaa(Authorization: ",
+            "Aaa00aaaa",
+        ),
+        (
+            " Authorization: Bearer AaA00aa00(password:\n  ",
+            "AaA00aa00",
+        ),
+        // Unterminated PEM header followed by an assignment.
+        (
+            "-----BEGIN PRIVATE KEY----- password = aaA000aAa,",
+            "aaA000aAa",
+        ),
+        (
+            "-----BEGIN PRIVATE KEY-----\npassword: \"hunter2x9\"",
+            "hunter2x9",
+        ),
+    ] {
+        assert!(!survives(text, secret), "{text:?}");
+    }
+}
+
+/// An unterminated PEM block is still redacted as far as it looks like key
+/// material, including a long base64 run glued to a delimiter.
+#[test]
+fn unterminated_pem_key_material_is_still_redacted() {
+    let header = "-----BEGIN PRIVATE KEY-----";
+    for (tail, leaked) in [
+        (
+            "\nMIIEvQIBADANBgkqhkiG9w0BAQEF\nAASCBKcwggSjAgEA",
+            "AASCBKcwggSjAgEA",
+        ),
+        ("\nMIIEvQIBADANBgkqhkiG9w0BAQEF\nshortEnd==", "shortEnd=="),
+        (
+            "MIIEvQIBADANBgkqhkiG9w0BAQEF\"}",
+            "MIIEvQIBADANBgkqhkiG9w0BAQEF",
+        ),
+        (
+            "\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,0123ABCD\n\nMIIEvQIBADANBgkq",
+            "MIIEvQIBADANBgkq",
+        ),
+    ] {
+        let text = format!("{header}{tail}");
+        assert!(!survives(&text, leaked), "{text:?}");
+    }
+    // A second run does not change the result.
+    let red = Redactor::new();
+    let once = red
+        .redact("x -----BEGIN PRIVATE KEY----- api_key=aaA000aAA y")
+        .into_owned();
+    assert_eq!(red.redact(&once), once);
 }

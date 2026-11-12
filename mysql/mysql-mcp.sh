@@ -15,19 +15,38 @@
 # .env keys: MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASS (or
 # MYSQL_PASSWORD), MYSQL_DB (or MYSQL_DATABASE). Both spellings are
 # accepted and exported.
+#
+# Server implementation:
+#
+#   default                the Python `mysql-mcp-server` (PyPI)
+#   TALON_MYSQL_MCP=rust   the native `talon-mysql-mcp` binary
+#                          (crates/talon-mcp-mysql): same tools, arguments
+#                          and result text, no Python cold start, bounded
+#                          statements (timeouts, row and byte limits).
+#                          Opt-in; set it in the env file loaded below or in
+#                          the server's environment. Looked up in
+#                          /usr/local/bin, then PATH, and in dev mode also in
+#                          the repo's target/{release,debug}. If the binary
+#                          is missing the Python server is used.
+#
+# Started by the agent runtime as an MCP server command; not for direct use.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Never let an (agent-writable) working directory shadow Python modules.
 cd /
 export PYTHONSAFEPATH=1
 
 LOCAL_MCP="$SCRIPT_DIR/.venv/bin/mysql_mcp_server"
 SYSTEM_MCP="/opt/mysql-mcp/bin/mysql_mcp_server"
 ISOLATED_ENV="/etc/mcp-secrets/mysql.env"
+NATIVE_NAME="talon-mysql-mcp"
 TAG="[mysql-mcp]"
 
 _err() { echo "$TAG ERROR: $*" >&2; }
+_warn() { echo "$TAG WARNING: $*" >&2; }
 
 _load_env() {
     set -a
@@ -52,6 +71,30 @@ _is_native_exec() {
     return 0
 }
 
+# Exec the native Rust server if it was asked for (TALON_MYSQL_MCP=rust, from
+# the env file just loaded or the environment) and a binary exists. Extra
+# arguments are further directories to search (dev mode only). Returns when
+# the Python server should be used.
+_maybe_exec_native() {
+    [[ "${TALON_MYSQL_MCP:-}" == "rust" ]] || return 0
+    local candidates=("/usr/local/bin/$NATIVE_NAME")
+    local on_path
+    on_path="$(command -v "$NATIVE_NAME" 2>/dev/null || true)"
+    [[ -n "$on_path" ]] && candidates+=("$on_path")
+    local dir
+    for dir in "$@"; do
+        candidates+=("$dir/$NATIVE_NAME")
+    done
+    local c
+    for c in "${candidates[@]}"; do
+        if _is_native_exec "$c"; then
+            exec "$c"
+        fi
+    done
+    _warn "TALON_MYSQL_MCP=rust but $NATIVE_NAME was not found; using the Python server"
+    return 0
+}
+
 # === Container: isolated mcp-mysql account ===
 if [[ -e "$ISOLATED_ENV" ]]; then
     if [[ "$(id -u)" == "0" ]]; then
@@ -63,6 +106,7 @@ if [[ -e "$ISOLATED_ENV" ]]; then
         exit 1
     fi
     _load_env "$ISOLATED_ENV"
+    _maybe_exec_native
     if [[ ! -x "$SYSTEM_MCP" ]]; then
         _err "mysql_mcp_server is not installed in the image (rebuild: container/build.sh)"
         exit 1
@@ -78,6 +122,8 @@ else
     _err "Run setup.sh first and fill in your MySQL credentials."
     exit 1
 fi
+
+_maybe_exec_native "$REPO_DIR/target/release" "$REPO_DIR/target/debug"
 
 if _is_native_exec "$LOCAL_MCP"; then
     exec "$LOCAL_MCP"

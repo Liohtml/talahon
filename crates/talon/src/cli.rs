@@ -143,8 +143,12 @@ pub struct SetupArgs {
 /// `talon audit` subcommands.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum AuditCommand {
-    /// Recompute the hash chain; exit code 1 if it was tampered with.
+    /// Verify the chain (and, with `TALON_AUDIT_KEY`, its MACs and the
+    /// truncation checkpoint); exit code 1 if anything does not verify.
     Verify,
+    /// Print the newest row's id, hash and sequence number, for anchoring
+    /// the chain on a system this host cannot write.
+    Head,
     /// Print recent audit events (oldest first) as JSON lines.
     Tail {
         /// Number of events.
@@ -213,6 +217,12 @@ mod tests {
             parse(&["talon", "audit", "verify"]).command(),
             &Command::Audit {
                 command: AuditCommand::Verify
+            }
+        );
+        assert_eq!(
+            parse(&["talon", "audit", "head"]).command(),
+            &Command::Audit {
+                command: AuditCommand::Head
             }
         );
         assert_eq!(

@@ -6,7 +6,7 @@
 //!    traffic off; MYTH-05) unless the operator chose the runtime default —
 //!    fatal when it cannot be created;
 //! 2. database: open + migrate, import legacy JSON state, hash-chained audit
-//!    sink, log the audit chain head;
+//!    sink (keyed with `TALON_AUDIT_KEY` when set), log the audit chain head;
 //! 3. LLM gateway (when vLLM is configured *and* `TALON_VLLM_API_KEY` is
 //!    set — without a key containers could call vLLM directly and bypass
 //!    the gateway, so it is refused unless `TALON_VLLM_ALLOW_NO_API_KEY=true`;
@@ -67,11 +67,12 @@ const CHANNEL_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long background loops get to stop at shutdown.
 const LOOP_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Log the audit chain head (anchors the chain outside the database).
+/// Log the audit chain head (anchors the chain outside the database, as
+/// far as the log is shipped off the host).
 pub fn log_audit_head(db: &Db, phase: &str) {
-    match (db.audit_chain_head(), db.audit_count()) {
-        (Ok(Some((id, hash))), Ok(count)) => {
-            tracing::info!(phase, head_id = id, head_hash = %hash, events = count, "audit chain head");
+    match (db.audit_head(), db.audit_count()) {
+        (Ok(Some(head)), Ok(count)) => {
+            tracing::info!(phase, head_id = head.id, head_hash = %head.hash, head_scheme = %head.scheme, head_seq = ?head.seq, events = count, "audit chain head");
         }
         (Ok(None), _) => tracing::info!(phase, "audit chain empty"),
         (Err(e), _) | (_, Err(e)) => {
@@ -163,6 +164,16 @@ pub fn gateway_config(
                 value = %raw,
                 default = gw.max_concurrent_requests,
                 "TALON_LLM_GATEWAY_MAX_CONCURRENT is not a number; using the default"
+            ),
+        }
+    }
+    if let Some(raw) = config.env.get("TALON_LLM_GATEWAY_LANE_SHARE") {
+        match raw.trim().trim_end_matches('%').trim_end().parse::<u32>() {
+            Ok(percent) => gw.lane_share_percent = percent,
+            Err(_) => tracing::warn!(
+                value = %raw,
+                default = gw.lane_share_percent,
+                "TALON_LLM_GATEWAY_LANE_SHARE is not a percentage; using the default"
             ),
         }
     }
@@ -382,6 +393,9 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
     )
     .map_err(|e| anyhow!("cannot open database: {e}"))?;
     tracing::info!("Database initialized");
+    // Audit key (TALON_AUDIT_KEY): keyed chain + truncation checkpoint.
+    // Refuses to start when events could not be recorded with it.
+    crate::audit_cmd::prepare_audit(&db, &config)?;
     let audit: SharedAuditSink = Arc::new(DbAuditSink::new(db.clone()));
     log_audit_head(&db, "startup");
     audit.record(event(
@@ -664,6 +678,7 @@ mod tests {
             "TALON_VLLM_BASE_URL",
             "TALON_VLLM_MODEL",
             "TALON_LLM_GATEWAY_MAX_CONCURRENT",
+            "TALON_LLM_GATEWAY_LANE_SHARE",
             "TALON_LLM_GATEWAY_CACHE_SALT",
         ]
         .iter()
@@ -674,6 +689,24 @@ mod tests {
         let bind: SocketAddr = "127.0.0.1:3999".parse().unwrap();
         let defaults = gateway_config(&cfg(base), &HashMap::new(), bind).unwrap();
         assert!(defaults.cache_salt);
+        assert_eq!(defaults.lane_share_percent, 75);
+        assert_eq!(defaults.max_concurrent_per_lane(), Some(24));
+        for (raw, percent, per_lane) in [
+            ("50", 50, Some(16)),
+            ("25%", 25, Some(8)),
+            ("100", 100, None),
+            ("0", 0, None),
+            ("half", 75, Some(24)),
+        ] {
+            let gw = gateway_config(
+                &cfg(&format!("{base}TALON_LLM_GATEWAY_LANE_SHARE={raw}\n")),
+                &HashMap::new(),
+                bind,
+            )
+            .unwrap();
+            assert_eq!(gw.lane_share_percent, percent, "{raw:?}");
+            assert_eq!(gw.max_concurrent_per_lane(), per_lane, "{raw:?}");
+        }
         let gw = gateway_config(
             &cfg(&format!(
                 "{base}TALON_LLM_GATEWAY_MAX_CONCURRENT=7\nTALON_LLM_GATEWAY_CACHE_SALT=false\n"
