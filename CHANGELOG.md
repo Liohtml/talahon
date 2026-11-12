@@ -2,6 +2,11 @@
 
 All notable changes to Talon are documented in this file.
 
+## [2.3.0] - 2026-11-12
+
+- feat: keyed audit chain, lane fair share, native MySQL MCP server and redaction fixes (#17)
+- chore(ci): bump actions/checkout from 4.4.0 to 7.0.1 (#16)
+
 ## [2.2.0] - 2026-11-12
 
 - feat: supply-chain pins, native OpenSearch MCP server, eval harness and hardening (#15)
