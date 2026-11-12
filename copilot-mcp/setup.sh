@@ -51,9 +51,12 @@ fi
 
 # ── Install copilot-mcp-server ────────────────────────────────────────────────
 echo "Installing copilot-mcp-server from GitHub..."
+# Pinned upstream versions (shared with the agent image).
+# shellcheck source=../container/mcp-versions.env
+source "$SCRIPT_DIR/../container/mcp-versions.env"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet \
-    "git+https://github.com/socfortress/copilot-mcp-server.git"
+    "git+https://github.com/socfortress/copilot-mcp-server.git@${COPILOT_MCP_REF}"
 echo "copilot-mcp-server installed  ✓"
 
 # ── .env ─────────────────────────────────────────────────────────────────────

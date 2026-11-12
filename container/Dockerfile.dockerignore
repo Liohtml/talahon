@@ -11,6 +11,7 @@
 !LICENSE
 !crates/
 !container/entrypoint.sh
+!container/mcp-versions.env
 !container/mysql-tools/
 
 # Never ship build output or secrets, even from allowlisted directories.

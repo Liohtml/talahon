@@ -26,8 +26,11 @@
 # mcp-palace and execs `talon-agent supervise`, which runs every MCP server
 # as its mcp-* user and the agent as `agent`.
 
-ARG RUST_IMAGE=rust:1-bookworm
-ARG DEBIAN_IMAGE=debian:bookworm-slim
+# Base images are pinned by digest (multi-arch index); Dependabot proposes
+# updates (.github/dependabot.yml). Override with --build-arg to test a newer
+# base.
+ARG RUST_IMAGE=rust:1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
 # ---------------------------------------------------------------------------
 # 1. Rust binaries
@@ -60,47 +63,63 @@ RUN set -eux; \
         ca-certificates git python3 python3-venv python3-dev build-essential; \
     rm -rf /var/lib/apt/lists/*
 
-# OpenSearch (SIEM) MCP server + pyyaml for the Python anon-proxy fallback.
-RUN python3 -m venv /opt/opensearch-mcp \
-    && /opt/opensearch-mcp/bin/pip install --quiet opensearch-mcp-server pyyaml
+# Every MCP server is pinned in container/mcp-versions.env (git sources by
+# commit SHA, PyPI packages by exact version); nothing floats.
+COPY container/mcp-versions.env /tmp/mcp-versions.env
+
+# OpenSearch (SIEM) MCP server.
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/opensearch-mcp \
+    && /opt/opensearch-mcp/bin/pip install --quiet \
+       "opensearch-mcp-server==${OPENSEARCH_MCP_VERSION}"
 
 # MySQL MCP server (Python). Env: MYSQL_HOST/PORT/USER/PASSWORD/DATABASE —
 # the wrapper also accepts MYSQL_PASS/MYSQL_DB.
-RUN python3 -m venv /opt/mysql-mcp \
-    && /opt/mysql-mcp/bin/pip install --quiet mysql-mcp-server
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/mysql-mcp \
+    && /opt/mysql-mcp/bin/pip install --quiet \
+       "mysql-mcp-server==${MYSQL_MCP_VERSION}"
 
 # pymysql for the mysql-query helper (locked to mcp-mysql below).
-RUN python3 -m venv /opt/mysql-tools \
-    && /opt/mysql-tools/bin/pip install --quiet pymysql \
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/mysql-tools \
+    && /opt/mysql-tools/bin/pip install --quiet "pymysql==${PYMYSQL_VERSION}" \
     && mkdir -p /opt/mysql-tools/lib
 
-RUN python3 -m venv /opt/copilot-mcp \
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/copilot-mcp \
     && /opt/copilot-mcp/bin/pip install --quiet \
-       "git+https://github.com/socfortress/copilot-mcp-server.git"
+       "git+https://github.com/socfortress/copilot-mcp-server.git@${COPILOT_MCP_REF}"
 
-RUN python3 -m venv /opt/wazuh-mcp \
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/wazuh-mcp \
     && /opt/wazuh-mcp/bin/pip install --quiet \
-       "git+https://github.com/socfortress/wazuh-mcp-server.git"
+       "git+https://github.com/socfortress/wazuh-mcp-server.git@${WAZUH_MCP_REF}"
 
-RUN python3 -m venv /opt/velociraptor-mcp \
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/velociraptor-mcp \
     && /opt/velociraptor-mcp/bin/pip install --quiet \
-       "git+https://github.com/socfortress/velociraptor-mcp-server.git"
+       "git+https://github.com/socfortress/velociraptor-mcp-server.git@${VELOCIRAPTOR_MCP_REF}"
 
 # Shuffle: interactive access to Shuffle's app catalog mid-investigation.
-RUN python3 -m venv /opt/shuffle-mcp \
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/shuffle-mcp \
     && /opt/shuffle-mcp/bin/pip install --quiet \
-       "git+https://github.com/socfortress/shuffle-mcp-server.git"
+       "git+https://github.com/socfortress/shuffle-mcp-server.git@${SHUFFLE_MCP_REF}"
 
 # CVE / threat-intel server (CVE, EPSS, KEV, exploit availability, IP
 # reputation, VirusTotal, urlscan, MITRE ATT&CK, GitHub advisories).
-RUN python3 -m venv /opt/cve-mcp \
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/cve-mcp \
     && /opt/cve-mcp/bin/pip install --quiet \
-       "git+https://github.com/mukul975/cve-mcp-server.git"
+       "git+https://github.com/mukul975/cve-mcp-server.git@${CVE_MCP_REF}"
 
 # MemPalace (semantic memory; chromadb is large — keep this layer last).
-RUN python3 -m venv /opt/mempalace \
+RUN . /tmp/mcp-versions.env \
+    && python3 -m venv /opt/mempalace \
     && /opt/mempalace/bin/pip install --quiet \
-       "chromadb>=0.5.0,<0.7" "pyyaml>=6.0" mempalace
+       "chromadb==${CHROMADB_VERSION}" "pyyaml==${PYYAML_VERSION}" \
+       "mempalace==${MEMPALACE_VERSION}"
 
 # Byte-compile everything now: the runtime root filesystem is read-only.
 RUN python3 -m compileall -q /opt >/dev/null || true

@@ -93,8 +93,11 @@ fi
 
 # ── Install dependencies ──────────────────────────────────────────────────────
 echo "Installing dependencies..."
+# Pinned upstream versions (shared with the agent image).
+# shellcheck source=../container/mcp-versions.env
+source "$SCRIPT_DIR/../container/mcp-versions.env"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -r "$SCRIPT_DIR/requirements.txt"
+"$VENV_DIR/bin/pip" install --quiet "opensearch-mcp-server==${OPENSEARCH_MCP_VERSION}"
 echo "Dependencies installed  ✓"
 
 # ── .env ─────────────────────────────────────────────────────────────────────
