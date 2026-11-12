@@ -1,0 +1,37 @@
+{
+  "id": "sysmon22-random-looking-dns-query",
+  "description": "Ambiguous: an unsigned per-user updater resolves a random-looking hostname once. No reputation data, no follow-up activity; neither a confident true positive nor a dismissal is justified.",
+  "alert_type": "sysmon_event_22",
+  "request": {
+    "alert_id": 900006,
+    "customer_code": "golden"
+  },
+  "alert": {
+    "timestamp": "2026-03-10T13:57:44.918Z",
+    "agent_name": "WS-MKT-022",
+    "agent_ip": "192.0.2.122",
+    "rule_id": "92210",
+    "rule_level": 6,
+    "rule_description": "Sysmon - DNS query for a high-entropy domain name",
+    "rule_groups": "windows, sysmon, sysmon_event_22",
+    "data_win_system_eventID": "22",
+    "data_win_system_computer": "WS-MKT-022.corp.example.com",
+    "data_win_eventdata_utcTime": "2026-03-10 13:57:43.066",
+    "data_win_eventdata_image": "C:\\Users\\j.doe\\AppData\\Local\\Programs\\notesync\\updater.exe",
+    "data_win_eventdata_user": "CORP\\j.doe",
+    "data_win_eventdata_processId": "11208",
+    "data_win_eventdata_queryName": "xk7qpl2vn9d.example.net",
+    "data_win_eventdata_queryStatus": "0",
+    "data_win_eventdata_queryResults": "::ffff:198.51.100.44;"
+  },
+  "expect": {
+    "verdict": "inconclusive",
+    "also_acceptable": ["needs_escalation"],
+    "severity": { "min": "low", "max": "medium" },
+    "required_iocs": [
+      { "type": "domain", "value": "xk7qpl2vn9d.example.net" }
+    ],
+    "forbidden_iocs": ["203.0.113.66", "xk7qpl2vn9d.example.com"],
+    "forbidden_patterns": ["\\b(USER|HOST|IP_INT|EMAIL|DOMAIN_INT|SID|MAC)_\\d+\\b"]
+  }
+}

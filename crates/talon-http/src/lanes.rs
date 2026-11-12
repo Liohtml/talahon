@@ -58,7 +58,7 @@ const MAX_LANE_KEY_CHARS: usize = 64;
 const _: () = assert!(
     USER_SESSION_KEY_PREFIX.len() + USER_KEY_ID_CHARS + 1 + USER_KEY_HASH_HEX <= MAX_LANE_KEY_CHARS
 );
-const _: () = assert!(USER_KEY_HASH_HEX % 2 == 0 && USER_KEY_HASH_HEX <= 64);
+const _: () = assert!(USER_KEY_HASH_HEX.is_multiple_of(2) && USER_KEY_HASH_HEX <= 64);
 /// Frames buffered per SSE writer before chunks are dropped.
 pub(crate) const WRITER_BUFFER: usize = 256;
 /// How often an unanswered writer waits for another turn before it is

@@ -48,8 +48,12 @@ fi
 
 # ── Install dependencies ──────────────────────────────────────────────────────
 echo "Installing mempalace and chromadb (this may take a minute)..."
+# Pinned upstream versions (shared with the agent image).
+# shellcheck source=../container/mcp-versions.env
+source "$SCRIPT_DIR/../container/mcp-versions.env"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet "chromadb>=0.5.0,<0.7" "pyyaml>=6.0" mempalace
+"$VENV_DIR/bin/pip" install --quiet \
+    "chromadb==${CHROMADB_VERSION}" "pyyaml==${PYYAML_VERSION}" "mempalace==${MEMPALACE_VERSION}"
 echo "Dependencies installed  ✓"
 
 # ── Palace data directory ─────────────────────────────────────────────────────

@@ -894,10 +894,10 @@ fn path_forms(path: &Path) -> Vec<PathBuf> {
     if path.is_absolute() {
         out.push(talon_core::paths::normalize_lexically(path));
     }
-    if let Ok(c) = fs::canonicalize(path) {
-        if !out.contains(&c) {
-            out.push(c);
-        }
+    if let Ok(c) = fs::canonicalize(path)
+        && !out.contains(&c)
+    {
+        out.push(c);
     }
     out
 }
@@ -1290,10 +1290,10 @@ fn shadow_project_env_files(
         .collect();
     names.sort();
     for name in names {
-        if let Some(secret) = resolve_secret_file(project, &name) {
-            if let Some(rel) = secret.visible_rel {
-                state.shadow(mounts, join_container(container_paths::PROJECT, &rel));
-            }
+        if let Some(secret) = resolve_secret_file(project, &name)
+            && let Some(rel) = secret.visible_rel
+        {
+            state.shadow(mounts, join_container(container_paths::PROJECT, &rel));
         }
     }
 }

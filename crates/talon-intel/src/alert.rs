@@ -53,12 +53,11 @@ fn lookup_in<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     }
     // Mixed shapes: nested prefix, flattened remainder (`data: {win_eventdata_image}`).
     for k in 1..segs.len() {
-        if let Some(prefix) = nested(root, &segs[..k]) {
-            if let Some(o) = prefix.as_object() {
-                if let Some(v) = get_ci(o, &segs[k..].join("_")) {
-                    return Some(v);
-                }
-            }
+        if let Some(prefix) = nested(root, &segs[..k])
+            && let Some(o) = prefix.as_object()
+            && let Some(v) = get_ci(o, &segs[k..].join("_"))
+        {
+            return Some(v);
         }
     }
     None
@@ -107,10 +106,10 @@ fn string_list(v: &Value, split_whitespace: bool) -> Vec<String> {
         Value::String(s) => {
             let t = s.trim();
             // Graylog sometimes stores arrays as JSON text.
-            if t.starts_with('[') {
-                if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(t) {
-                    return items.iter().filter_map(scalar_string).collect();
-                }
+            if t.starts_with('[')
+                && let Ok(Value::Array(items)) = serde_json::from_str::<Value>(t)
+            {
+                return items.iter().filter_map(scalar_string).collect();
             }
             t.split(|c: char| c == ',' || c == ';' || (split_whitespace && c.is_whitespace()))
                 .map(|p| p.trim().trim_matches(|c| c == '"' || c == '\'').to_string())

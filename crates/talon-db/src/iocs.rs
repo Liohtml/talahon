@@ -86,7 +86,7 @@ impl Db {
         value: &str,
         limit: usize,
     ) -> Result<Vec<IocSighting>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT ioc_type, value, source_ref, customer_code, seen_at
@@ -115,7 +115,7 @@ impl Db {
         value: &str,
         exclude_source_ref: Option<&str>,
     ) -> Result<u64> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let n: i64 = conn
                 .prepare_cached(
                     "SELECT COUNT(*) FROM ioc_sightings

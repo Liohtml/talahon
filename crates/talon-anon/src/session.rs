@@ -65,14 +65,14 @@ impl AnonSession {
         let _lock = store.lock();
         store.sync_into(self.anonymizer.map_mut());
         let out = f(&mut self.anonymizer);
-        if self.anonymizer.map().is_dirty() {
-            if let Err(e) = store.save(self.anonymizer.map_mut()) {
-                // Keep working in memory; warn on the first failure and then
-                // only occasionally.
-                let n = store.write_failures();
-                if n == 1 || n % 100 == 0 {
-                    tracing::warn!(error = %e, failures = n, "token map could not be persisted; keeping it in memory");
-                }
+        if self.anonymizer.map().is_dirty()
+            && let Err(e) = store.save(self.anonymizer.map_mut())
+        {
+            // Keep working in memory; warn on the first failure and then
+            // only occasionally.
+            let n = store.write_failures();
+            if n == 1 || n % 100 == 0 {
+                tracing::warn!(error = %e, failures = n, "token map could not be persisted; keeping it in memory");
             }
         }
         out
@@ -90,12 +90,12 @@ impl AnonSession {
 
     /// Persist the map now if it has unsaved changes.
     pub fn flush(&mut self) -> Result<()> {
-        if let Some(store) = self.store.as_mut() {
-            if self.anonymizer.map().is_dirty() {
-                let _lock = store.lock();
-                store.sync_into(self.anonymizer.map_mut());
-                store.save(self.anonymizer.map_mut())?;
-            }
+        if let Some(store) = self.store.as_mut()
+            && self.anonymizer.map().is_dirty()
+        {
+            let _lock = store.lock();
+            store.sync_into(self.anonymizer.map_mut());
+            store.save(self.anonymizer.map_mut())?;
         }
         Ok(())
     }

@@ -1,0 +1,46 @@
+# cargo-deny policy (CI: .github/workflows/ci.yml).
+#
+#   cargo deny check bans licenses sources   # blocking
+#   cargo deny check advisories              # reported, non-blocking
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+
+[licenses]
+version = 2
+# Permissive licenses only: Talon is MIT and links everything statically.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "Unlicense",
+    # webpki-roots (the Mozilla CA bundle as data).
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates depend on each other by path (plus a version for crates.io).
+allow-wildcard-paths = true
+deny = [
+    # TLS goes through rustls everywhere; never link the system OpenSSL.
+    { crate = "openssl-sys" },
+    { crate = "native-tls" },
+]
+
+[sources]
+# Everything comes from crates.io: no git dependencies, no other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

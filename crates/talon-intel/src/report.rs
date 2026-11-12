@@ -977,7 +977,7 @@ fn inline(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn sample() -> TriageReport {

@@ -629,18 +629,18 @@ impl Inner {
     async fn handle_text(&self, msg: &Message, text: String) {
         let bot_username = self.bot_username();
 
-        if let Some(cmd) = parse_command(&text) {
-            if BOT_COMMANDS.contains(&cmd.name.as_str()) {
-                let for_us = match (cmd.target, bot_username.as_deref()) {
-                    (None, _) => true,
-                    (Some(target), Some(me)) => target.eq_ignore_ascii_case(me),
-                    (Some(_), None) => false,
-                };
-                if for_us {
-                    self.answer_command(&cmd.name, msg).await;
-                }
-                return;
+        if let Some(cmd) = parse_command(&text)
+            && BOT_COMMANDS.contains(&cmd.name.as_str())
+        {
+            let for_us = match (cmd.target, bot_username.as_deref()) {
+                (None, _) => true,
+                (Some(target), Some(me)) => target.eq_ignore_ascii_case(me),
+                (Some(_), None) => false,
+            };
+            if for_us {
+                self.answer_command(&cmd.name, msg).await;
             }
+            return;
         }
 
         let chat_jid = format!("{TELEGRAM_JID_PREFIX}{}", msg.chat.id);

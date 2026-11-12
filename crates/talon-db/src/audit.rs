@@ -173,7 +173,7 @@ impl Db {
     /// Most recent first; optional `kind` prefix filter (e.g. `"ipc."`).
     /// The prefix is matched literally (case-sensitive, no wildcards).
     pub fn recent_audit(&self, limit: usize, kind_prefix: Option<&str>) -> Result<Vec<AuditEvent>> {
-        let rows = self.with_conn(|conn| {
+        let rows = self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT id, timestamp, kind, actor, target, outcome, details, prev_hash, hash
@@ -205,7 +205,7 @@ impl Db {
         let mut expected_prev = AUDIT_GENESIS_HASH.to_string();
         let mut last_id = i64::MIN;
         loop {
-            let batch = self.with_conn(|conn| {
+            let batch = self.with_read(|conn| {
                 let mut stmt = conn
                     .prepare_cached(
                         "SELECT id, timestamp, kind, actor, target, outcome, details, prev_hash,
@@ -241,7 +241,7 @@ impl Db {
     /// `(id, hash)` of the newest row, for anchoring the chain head outside
     /// the database (detects truncation of the tail).
     pub fn audit_chain_head(&self) -> Result<Option<(i64, String)>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             conn.prepare_cached("SELECT id, hash FROM audit_log ORDER BY id DESC LIMIT 1")
                 .db()?
                 .query_row([], |r| Ok((r.get::<_, i64>("id")?, col::text(r, "hash")?)))
@@ -252,7 +252,7 @@ impl Db {
 
     /// Number of rows in the audit log.
     pub fn audit_count(&self) -> Result<u64> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let n: i64 = conn
                 .prepare_cached("SELECT COUNT(*) FROM audit_log")
                 .db()?

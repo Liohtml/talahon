@@ -216,21 +216,21 @@ async fn execute_inner(
         .await;
     }
 
-    if input.is_scheduled_task {
-        if let Some(script) = input.script.as_deref().filter(|s| !s.trim().is_empty()) {
-            tracing::info!("running the task pre-flight script");
-            match script::run_task_script(script, &paths.group, &cancel).await {
-                Ok(r) if r.wake_agent => {
-                    tracing::info!("task script asked to wake the agent");
-                    first_prompt = prompt::script_prompt(r.data.as_ref(), &input.prompt);
-                }
-                Ok(_) => {
-                    tracing::info!("task script decided not to wake the agent");
-                    output.emit(&ContainerOutput::success(None, None));
-                    return Ok(());
-                }
-                Err(reason) => return Err(AgentError::TaskScript(reason)),
+    if input.is_scheduled_task
+        && let Some(script) = input.script.as_deref().filter(|s| !s.trim().is_empty())
+    {
+        tracing::info!("running the task pre-flight script");
+        match script::run_task_script(script, &paths.group, &cancel).await {
+            Ok(r) if r.wake_agent => {
+                tracing::info!("task script asked to wake the agent");
+                first_prompt = prompt::script_prompt(r.data.as_ref(), &input.prompt);
             }
+            Ok(_) => {
+                tracing::info!("task script decided not to wake the agent");
+                output.emit(&ContainerOutput::success(None, None));
+                return Ok(());
+            }
+            Err(reason) => return Err(AgentError::TaskScript(reason)),
         }
     }
 

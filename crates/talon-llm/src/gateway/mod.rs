@@ -1726,10 +1726,10 @@ impl UsageTap {
         match decoder.push(bytes) {
             Ok(events) => {
                 for ev in events {
-                    if ev.data.contains("\"usage\"") {
-                        if let Some(u) = usage_from_json(ev.data.as_bytes()) {
-                            self.usage = Some(u);
-                        }
+                    if ev.data.contains("\"usage\"")
+                        && let Some(u) = usage_from_json(ev.data.as_bytes())
+                    {
+                        self.usage = Some(u);
                     }
                 }
             }

@@ -31,12 +31,11 @@ pub fn chunk_text(text: &str, max_units: usize) -> Vec<&str> {
                 last_newline = Some((idx + ch.len_utf8(), units));
             }
         }
-        if cut < rest.len() {
-            if let Some((nl_end, nl_units)) = last_newline {
-                if nl_units >= max_units / 2 {
-                    cut = nl_end;
-                }
-            }
+        if cut < rest.len()
+            && let Some((nl_end, nl_units)) = last_newline
+            && nl_units >= max_units / 2
+        {
+            cut = nl_end;
         }
         let (head, tail) = rest.split_at(cut);
         chunks.push(head);
@@ -102,16 +101,17 @@ fn next_code(s: &str) -> Option<(usize, usize, bool)> {
     let mut from = 0;
     while let Some(rel) = s[from..].find('`') {
         let i = from + rel;
-        if s[i..].starts_with("```") {
-            if let Some(close) = s[i + 3..].find("```") {
-                return Some((i, i + 3 + close + 3, true));
-            }
+        if s[i..].starts_with("```")
+            && let Some(close) = s[i + 3..].find("```")
+        {
+            return Some((i, i + 3 + close + 3, true));
         }
         let after = &s[i + 1..];
-        if let Some(close) = after.find(['`', '\n']) {
-            if close > 0 && after.as_bytes()[close] == b'`' {
-                return Some((i, i + 1 + close + 1, false));
-            }
+        if let Some(close) = after.find(['`', '\n'])
+            && close > 0
+            && after.as_bytes()[close] == b'`'
+        {
+            return Some((i, i + 1 + close + 1, false));
         }
         from = i + 1;
     }
@@ -154,19 +154,20 @@ fn emphasis_to_html(c: &[char], out: &mut String) {
     let mut i = 0;
     while i < c.len() {
         let marker = c[i];
-        if matches!(marker, '*' | '_') && can_open(c, i) {
-            if let Some(j) = find_close(c, i) {
-                let tag = if marker == '*' { "b" } else { "i" };
-                out.push('<');
-                out.push_str(tag);
-                out.push('>');
-                emphasis_to_html(&c[i + 1..j], out);
-                out.push_str("</");
-                out.push_str(tag);
-                out.push('>');
-                i = j + 1;
-                continue;
-            }
+        if matches!(marker, '*' | '_')
+            && can_open(c, i)
+            && let Some(j) = find_close(c, i)
+        {
+            let tag = if marker == '*' { "b" } else { "i" };
+            out.push('<');
+            out.push_str(tag);
+            out.push('>');
+            emphasis_to_html(&c[i + 1..j], out);
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+            i = j + 1;
+            continue;
         }
         push_escaped_char(marker, out);
         i += 1;

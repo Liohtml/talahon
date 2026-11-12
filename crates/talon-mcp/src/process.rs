@@ -221,10 +221,10 @@ pub(crate) fn supervise(
 }
 
 fn hard_kill(child: &mut Child, pid: Option<u32>, group: bool) {
-    if let Some(pid) = pid {
-        if group {
-            send_signal(pid, true, Sig::Kill);
-        }
+    if let Some(pid) = pid
+        && group
+    {
+        send_signal(pid, true, Sig::Kill);
     }
     let _ = child.start_kill();
 }

@@ -229,10 +229,10 @@ pub fn validate_task_shape(task: &IpcTask) -> Result<(), String> {
             ..
         } => {
             check_task_id(task_id)?;
-            if let Some(p) = prompt {
-                if p.trim().is_empty() {
-                    return Err("`prompt` must not be empty".into());
-                }
+            if let Some(p) = prompt
+                && p.trim().is_empty()
+            {
+                return Err("`prompt` must not be empty".into());
             }
             if let Some(v) = schedule_value {
                 check_schedule_value(v)?;
@@ -254,12 +254,12 @@ pub fn validate_task_shape(task: &IpcTask) -> Result<(), String> {
                 return Err("`folder` must not be empty".into());
             }
             check_text("trigger", trigger, MAX_NAME_LEN)?;
-            if let Some(cfg) = container_config {
-                if cfg.additional_mounts.len() > MAX_ADDITIONAL_MOUNTS {
-                    return Err(format!(
-                        "`containerConfig.additionalMounts` exceeds {MAX_ADDITIONAL_MOUNTS} entries"
-                    ));
-                }
+            if let Some(cfg) = container_config
+                && cfg.additional_mounts.len() > MAX_ADDITIONAL_MOUNTS
+            {
+                return Err(format!(
+                    "`containerConfig.additionalMounts` exceeds {MAX_ADDITIONAL_MOUNTS} entries"
+                ));
             }
             Ok(())
         }

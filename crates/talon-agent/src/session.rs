@@ -253,10 +253,8 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 pub(crate) fn secure_private_dir(dir: &Path) -> std::io::Result<()> {
     ensure_private_dir(dir)?;
     let loose = fs::symlink_metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
-    if loose {
-        if let Err(e) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
-            tracing::debug!(dir = %dir.display(), error = %e, "cannot tighten a private directory");
-        }
+    if loose && let Err(e) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
+        tracing::debug!(dir = %dir.display(), error = %e, "cannot tighten a private directory");
     }
     Ok(())
 }
@@ -265,12 +263,12 @@ fn open_append(path: &Path) -> std::io::Result<fs::File> {
     if let Some(dir) = path.parent() {
         ensure_private_dir(dir)?;
     }
-    if let Ok(m) = fs::symlink_metadata(path) {
-        if !m.is_file() {
-            return Err(std::io::Error::other(
-                "session transcript is not a regular file",
-            ));
-        }
+    if let Ok(m) = fs::symlink_metadata(path)
+        && !m.is_file()
+    {
+        return Err(std::io::Error::other(
+            "session transcript is not a regular file",
+        ));
     }
     OpenOptions::new()
         .create(true)

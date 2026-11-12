@@ -633,10 +633,10 @@ pub(crate) async fn read_body_capped(
     resp: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, LlmError> {
-    if let Some(len) = resp.content_length() {
-        if usize::try_from(len).map_or(true, |l| l > limit) {
-            return Err(LlmError::ResponseTooLarge { limit });
-        }
+    if let Some(len) = resp.content_length()
+        && usize::try_from(len).map_or(true, |l| l > limit)
+    {
+        return Err(LlmError::ResponseTooLarge { limit });
     }
     let mut out = Vec::new();
     let mut stream = resp.bytes_stream();

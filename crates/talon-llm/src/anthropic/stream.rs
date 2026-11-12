@@ -105,10 +105,10 @@ impl Translator {
     /// A dangling partial SSE event.
     pub fn finish(&mut self) -> Result<Vec<u8>, LlmError> {
         let mut out = Vec::new();
-        if let Some(ev) = self.decoder.finish()? {
-            if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                self.event(&v, &mut out)?;
-            }
+        if let Some(ev) = self.decoder.finish()?
+            && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
+        {
+            self.event(&v, &mut out)?;
         }
         if !self.done {
             // Truncated upstream: tell the client it ended, without
@@ -144,10 +144,10 @@ impl Translator {
                 let block = v.get("content_block").cloned().unwrap_or(Value::Null);
                 let kind = match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
-                        if let Some(t) = block.get("text").and_then(Value::as_str) {
-                            if !t.is_empty() {
-                                self.emit_delta(json!({"content": t}), out);
-                            }
+                        if let Some(t) = block.get("text").and_then(Value::as_str)
+                            && !t.is_empty()
+                        {
+                            self.emit_delta(json!({"content": t}), out);
                         }
                         Block::Text
                     }

@@ -29,6 +29,7 @@ crates/
   talon-tools      built-in agent tools (bash, files, grep/glob, web_fetch, IPC task tools, todo)
   talon-intel      IOC extraction, MITRE ATT&CK mapping, triage scoring, correlation, report schema
   talon-anon       PII anonymizer + `talon-anon-proxy` MCP proxy binary
+  talon-mcp-opensearch  native read-only OpenSearch MCP server `talon-opensearch-mcp` (opt-in: TALON_OPENSEARCH_MCP=rust)
   talon-container  hardened docker/podman launcher, mounts, output-marker parser, snapshots, image files
   talon-scheduler  GroupQueue (per-lane serialization, global concurrency) + task scheduler loop
   talon-ipc        host-side IPC watcher (authorized, audited, hardened file handling)

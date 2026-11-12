@@ -82,10 +82,10 @@ impl AgentOutputHandler for ChatSink<'_> {
         if let Some(raw) = output.result.as_deref().filter(|r| !r.is_empty()) {
             let text = strip_internal_tags(raw);
             tracing::info!(group = %self.group_name, chars = raw.len(), "Agent output");
-            if !text.is_empty() {
-                if let Err(e) = self.host.send_outbound(self.jid, &text).await {
-                    tracing::warn!(chat_jid = %self.jid, error = %e, "failed to deliver agent output");
-                }
+            if !text.is_empty()
+                && let Err(e) = self.host.send_outbound(self.jid, &text).await
+            {
+                tracing::warn!(chat_jid = %self.jid, error = %e, "failed to deliver agent output");
             }
         }
         match output.status {
@@ -547,10 +547,10 @@ impl Orchestrator {
                     if let Err(e) = channel.set_typing(&jid_owned, true).await {
                         tracing::warn!(chat_jid = %jid_owned, error = %e, "Failed to set typing indicator");
                     }
-                    if lock_ledger(&ledger).signalled(&file) {
-                        if let Err(e) = channel.on_turn_complete(&jid_owned).await {
-                            tracing::debug!(chat_jid = %jid_owned, error = %e, "on_turn_complete failed");
-                        }
+                    if lock_ledger(&ledger).signalled(&file)
+                        && let Err(e) = channel.on_turn_complete(&jid_owned).await
+                    {
+                        tracing::debug!(chat_jid = %jid_owned, error = %e, "on_turn_complete failed");
                     }
                 });
                 return LaneRoute::Piped;

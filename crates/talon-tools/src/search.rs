@@ -114,7 +114,7 @@ fn walk_files(
             stats.hit_walk_limit = true;
             break;
         }
-        if stats.visited % 512 == 0 && cancel.is_cancelled() {
+        if stats.visited.is_multiple_of(512) && cancel.is_cancelled() {
             stats.cancelled = true;
             break;
         }

@@ -151,7 +151,7 @@ impl Db {
     /// All known chats, most recent activity first. The internal
     /// group-sync sentinel row is excluded. A NULL name reads as the JID.
     pub fn get_all_chats(&self) -> Result<Vec<ChatInfo>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT jid, name, last_message_time, channel, is_group
@@ -173,7 +173,7 @@ impl Db {
         if chat_jid == GROUP_SYNC_JID {
             return Ok(None);
         }
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT jid, name, last_message_time, channel, is_group
@@ -187,7 +187,7 @@ impl Db {
 
     /// Timestamp of the last group metadata sync.
     pub fn get_last_group_sync(&self) -> Result<Option<String>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached("SELECT last_message_time FROM chats WHERE jid = ?1")
                 .db()?;
@@ -294,7 +294,7 @@ impl Db {
         // The JID list is bound as one JSON array parameter, so the statement
         // text is constant (cacheable, no variable-count placeholders).
         let jids_json = serde_json::to_string(jids)?;
-        let messages = self.with_conn(|conn| {
+        let messages = self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     r"SELECT * FROM (
@@ -343,7 +343,7 @@ impl Db {
         bot_prefix: &str,
         limit: usize,
     ) -> Result<Vec<NewMessage>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     r"SELECT * FROM (
@@ -385,7 +385,7 @@ impl Db {
         chat_jid: &str,
         bot_prefix: &str,
     ) -> Result<Option<String>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     r"SELECT MAX(timestamp) AS ts FROM messages

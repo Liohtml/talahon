@@ -1200,3 +1200,142 @@ async fn dispatched_by_name() {
     assert_eq!(b.get("BACKEND"), Some("iptables"));
     assert!(out.lines.iter().any(|l| l == "# --- IPv4 (iptables) ---"));
 }
+
+// --- persistence ------------------------------------------------------------
+
+#[test]
+fn persist_unit_quotes_arguments_and_paths() {
+    let unit = persist_unit(
+        Path::new("/opt/my talon/bin/talon"),
+        Path::new("/srv/100%/talon"),
+        &[
+            "--apply".to_string(),
+            "--nft".to_string(),
+            "--allow".to_string(),
+            "[fd00::5]:443".to_string(),
+        ],
+    )
+    .unwrap();
+    assert!(unit.contains(
+        "ExecStart=\"/opt/my talon/bin/talon\" setup egress --apply --nft --allow [fd00::5]:443\n"
+    ));
+    assert!(unit.contains("WorkingDirectory=/srv/100%%/talon\n"));
+    assert!(unit.contains("Type=oneshot\n"));
+    assert!(unit.contains("After=docker.service\n"));
+    assert!(unit.contains("WantedBy=multi-user.target\n"));
+    // A line break in a path must not smuggle a directive into a root unit.
+    assert!(
+        persist_unit(
+            Path::new("/opt/talon\nExecStartPre=/bin/rm -rf /"),
+            Path::new("/srv/talon"),
+            &[]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn persist_needs_apply_and_install() {
+    let parse =
+        |args: &[&str]| EgressOptions::from_args(&StepArgs::new(args.iter().copied()), 3001);
+    assert!(parse(&["--apply", "--persist"]).unwrap().persist);
+    assert_eq!(
+        parse(&["--persist"]).unwrap_err().code,
+        "persist_requires_apply"
+    );
+    assert_eq!(
+        parse(&["--apply", "--uninstall", "--persist"])
+            .unwrap_err()
+            .code,
+        "persist_requires_apply"
+    );
+    // The boot unit re-applies; it must not rewrite itself.
+    let opts = parse(&["--apply", "--persist", "--allow", "10.0.0.5:9200"]).unwrap();
+    assert!(
+        !opts
+            .apply_args(Backend::Nft)
+            .contains(&"--persist".to_string())
+    );
+}
+
+fn nft_runner() -> Arc<MockRunner> {
+    let runner = Arc::new(MockRunner::new());
+    runner.install("nft");
+    runner.on("nft ", CommandOutput::ok(""));
+    runner
+}
+
+#[tokio::test]
+async fn persist_writes_and_enables_the_boot_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = nft_runner();
+    runner.on("systemctl ", CommandOutput::ok(""));
+    let mut c = ctx(dir.path(), runner.clone());
+    c.platform.uid = Some(0);
+    c.platform.has_systemd = true;
+    c.systemd_system_dir = dir.path().join("units");
+    let out = step(
+        &c,
+        &["--apply", "--persist", "--nft", "--allow", "10.0.0.5:9200"],
+    )
+    .await;
+    let b = out.block.unwrap();
+    assert_eq!(out.exit_code, 0, "{b:?}");
+    assert_eq!(b.get("PERSISTED"), Some("true"));
+    let unit = std::fs::read_to_string(c.systemd_system_dir.join(PERSIST_UNIT)).unwrap();
+    assert!(unit.contains(
+        "ExecStart=/opt/talon/bin/talon setup egress --apply --nft --gateway-port 3001 --allow 10.0.0.5/32:9200\n"
+    ), "{unit}");
+    let calls = runner.calls();
+    assert!(calls.contains(&"systemctl daemon-reload".to_string()));
+    assert!(calls.contains(&format!("systemctl enable {PERSIST_UNIT}")));
+
+    // Uninstalling removes the unit, or the next boot would re-install the rules.
+    let out = step(&c, &["--uninstall", "--apply", "--nft"]).await;
+    let b = out.block.unwrap();
+    assert_eq!(out.exit_code, 0, "{b:?}");
+    assert_eq!(b.get("PERSIST_UNIT_REMOVED"), Some("true"));
+    assert!(!c.systemd_system_dir.join(PERSIST_UNIT).exists());
+    assert!(
+        runner
+            .calls()
+            .contains(&format!("systemctl disable {PERSIST_UNIT}"))
+    );
+}
+
+#[tokio::test]
+async fn persist_failure_is_an_error_even_though_rules_are_active() {
+    let dir = tempfile::tempdir().unwrap();
+    // No systemd on this host.
+    let mut c = ctx(dir.path(), nft_runner());
+    c.platform.uid = Some(0);
+    let out = step(&c, &["--apply", "--persist", "--nft"]).await;
+    let b = out.block.unwrap();
+    assert_eq!(out.exit_code, 1);
+    assert_eq!(b.get("APPLIED"), Some("true"));
+    assert_eq!(b.get("PERSISTED"), Some("false"));
+    assert_eq!(b.get("ERROR"), Some("systemd_not_found"));
+    assert_eq!(b.status(), Some("failed"));
+
+    // systemd present, but enabling the unit fails.
+    let runner = nft_runner();
+    runner.on("systemctl enable", CommandOutput::failed(1, "denied"));
+    let mut c = ctx(dir.path(), runner);
+    c.platform.uid = Some(0);
+    c.platform.has_systemd = true;
+    let out = step(&c, &["--apply", "--persist", "--nft"]).await;
+    assert_eq!(out.exit_code, 1);
+    assert_eq!(out.block.unwrap().get("ERROR"), Some("unit_enable_failed"));
+}
+
+#[tokio::test]
+async fn apply_without_persist_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = ctx(dir.path(), nft_runner());
+    c.platform.uid = Some(0);
+    let out = step(&c, &["--apply", "--nft"]).await;
+    let b = out.block.unwrap();
+    assert_eq!(out.exit_code, 0, "{b:?}");
+    assert_eq!(b.get("PERSISTED"), Some("false"));
+    assert!(!c.systemd_system_dir.join(PERSIST_UNIT).exists());
+}

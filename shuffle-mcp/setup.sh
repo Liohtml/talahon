@@ -51,9 +51,12 @@ fi
 
 # ── Install shuffle-mcp-server ────────────────────────────────────────────────
 echo "Installing shuffle-mcp-server from GitHub..."
+# Pinned upstream versions (shared with the agent image).
+# shellcheck source=../container/mcp-versions.env
+source "$SCRIPT_DIR/../container/mcp-versions.env"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet \
-    "git+https://github.com/socfortress/shuffle-mcp-server.git"
+    "git+https://github.com/socfortress/shuffle-mcp-server.git@${SHUFFLE_MCP_REF}"
 echo "shuffle-mcp-server installed  ✓"
 
 # ── .env ─────────────────────────────────────────────────────────────────────

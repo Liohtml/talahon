@@ -59,6 +59,12 @@ pub struct SetupContext {
     /// [`SetupContext::new`] (deterministic), the host's files in
     /// [`SetupContext::detect`].
     pub resolv_conf_paths: Vec<PathBuf>,
+    /// Directory for system-wide systemd units written by root steps
+    /// (`egress --persist`). `/etc/systemd/system` in
+    /// [`SetupContext::detect`]; a directory below the project root in
+    /// [`SetupContext::new`], so a deterministic context never touches the
+    /// host's units.
+    pub systemd_system_dir: PathBuf,
 }
 
 impl std::fmt::Debug for SetupContext {
@@ -93,6 +99,7 @@ impl SetupContext {
             PathBuf::from("/run/systemd/resolve/resolv.conf"),
             PathBuf::from("/etc/resolv.conf"),
         ];
+        ctx.systemd_system_dir = PathBuf::from("/etc/systemd/system");
         if let Ok(exe) = std::env::current_exe() {
             ctx.talon_binary = exe;
         }
@@ -124,6 +131,7 @@ impl SetupContext {
             http_timeout: Duration::from_secs(10),
             service_settle: Duration::from_secs(3),
             resolv_conf_paths: Vec::new(),
+            systemd_system_dir: project_root.join("data").join("systemd-system"),
         }
     }
 

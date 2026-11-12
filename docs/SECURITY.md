@@ -121,8 +121,8 @@ findings, proofs of concept and their fixes are tracked in
 - The audit chain is unkeyed; an attacker with write access to the host
   database can truncate its tail. Anchor `audit_chain_head()` externally if
   required.
-- Egress firewall rules must be (re)applied by the operator and do not survive
-  a reboot by themselves.
+- Egress firewall rules are opt-in and must be applied by the operator; they
+  survive a reboot only when applied with `--persist` (systemd hosts).
 - There is no global fairness for vLLM capacity between lanes beyond the
   gateway's concurrency limits.
 

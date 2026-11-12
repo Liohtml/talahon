@@ -90,14 +90,14 @@ fn split_protected_regions(text: &str) -> Vec<Segment<'_>> {
     while i < n {
         if b[i] == b'`' {
             // Alternative 1: fenced block.
-            if text[i..].starts_with("```") {
-                if let Some(rel) = text[i + 3..].find("```") {
-                    let end = i + 3 + rel + 3;
-                    push_code(&mut segments, text, last, i, end);
-                    last = end;
-                    i = end;
-                    continue;
-                }
+            if text[i..].starts_with("```")
+                && let Some(rel) = text[i + 3..].find("```")
+            {
+                let end = i + 3 + rel + 3;
+                push_code(&mut segments, text, last, i, end);
+                last = end;
+                i = end;
+                continue;
             }
             // Alternative 2: inline code.
             let mut j = i + 1;
@@ -281,33 +281,35 @@ fn convert_links(s: &str, slack: bool) -> String {
     let mut last = 0;
     let mut i = 0;
     while i < n {
-        if b[i] == b'[' {
-            if let Some(close_rel) = s[i + 1..].find(']') {
-                let close = i + 1 + close_rel;
-                if close > i + 1 && close + 1 < n && b[close + 1] == b'(' {
-                    if let Some(paren_rel) = s[close + 2..].find(')') {
-                        let paren = close + 2 + paren_rel;
-                        if paren > close + 2 {
-                            let text = &s[i + 1..close];
-                            let url = &s[close + 2..paren];
-                            out.push_str(&s[last..i]);
-                            if slack {
-                                out.push('<');
-                                out.push_str(url);
-                                out.push('|');
-                                out.push_str(text);
-                                out.push('>');
-                            } else {
-                                out.push_str(text);
-                                out.push_str(" (");
-                                out.push_str(url);
-                                out.push(')');
-                            }
-                            i = paren + 1;
-                            last = i;
-                            continue;
-                        }
+        if b[i] == b'['
+            && let Some(close_rel) = s[i + 1..].find(']')
+        {
+            let close = i + 1 + close_rel;
+            if close > i + 1
+                && close + 1 < n
+                && b[close + 1] == b'('
+                && let Some(paren_rel) = s[close + 2..].find(')')
+            {
+                let paren = close + 2 + paren_rel;
+                if paren > close + 2 {
+                    let text = &s[i + 1..close];
+                    let url = &s[close + 2..paren];
+                    out.push_str(&s[last..i]);
+                    if slack {
+                        out.push('<');
+                        out.push_str(url);
+                        out.push('|');
+                        out.push_str(text);
+                        out.push('>');
+                    } else {
+                        out.push_str(text);
+                        out.push_str(" (");
+                        out.push_str(url);
+                        out.push(')');
                     }
+                    i = paren + 1;
+                    last = i;
+                    continue;
                 }
             }
         }
@@ -493,15 +495,15 @@ pub fn parse_signal_styles(raw: &str) -> SignalText {
 
         // Fenced code block ```[lang]\n...\n```
         if c == '`' && at(i + 1) == Some('`') && at(i + 2) == Some('`') {
-            if let Some(lang_nl) = find_char(&s, '\n', i + 3) {
-                if let Some(close_at) = find_seq(&s, &['\n', '`', '`', '`'], lang_nl) {
-                    out.push_styled(SignalStyle::Monospace, slice(&s, lang_nl + 1, close_at));
-                    i = match find_char(&s, '\n', close_at + 4) {
-                        Some(after) => after + 1,
-                        None => n,
-                    };
-                    continue;
-                }
+            if let Some(lang_nl) = find_char(&s, '\n', i + 3)
+                && let Some(close_at) = find_seq(&s, &['\n', '`', '`', '`'], lang_nl)
+            {
+                out.push_styled(SignalStyle::Monospace, slice(&s, lang_nl + 1, close_at));
+                i = match find_char(&s, '\n', close_at + 4) {
+                    Some(after) => after + 1,
+                    None => n,
+                };
+                continue;
             }
             // Malformed fence: copy literally.
             out.push(c);
@@ -513,62 +515,66 @@ pub fn parse_signal_styles(raw: &str) -> SignalText {
         if c == '`' {
             let end = find_char(&s, '`', i + 1);
             let nl = find_char(&s, '\n', i + 1);
-            if let Some(end) = end {
-                if nl.is_none_or(|nl| end < nl) {
-                    out.push_styled(SignalStyle::Monospace, slice(&s, i + 1, end));
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-
-        // Horizontal rule --- / *** / ___ (before emphasis: a `***` line
-        // would otherwise open bold that closes in the next line).
-        if i == 0 || s[i - 1] == '\n' {
-            if let Some(len) = horizontal_rule_len(&s, i) {
-                i += len;
-                continue;
-            }
-        }
-
-        // Bold **text**
-        if c == '*' && at(i + 1) == Some('*') && at(i + 2).is_some_and(|x| x != ' ') {
-            if let Some(end) = find_seq(&s, &['*', '*'], i + 2) {
-                if s[end - 1] != ' ' {
-                    out.push_styled(SignalStyle::Bold, slice(&s, i + 2, end));
-                    i = end + 2;
-                    continue;
-                }
-            }
-        }
-
-        // Strikethrough ~~text~~
-        if c == '~' && at(i + 1) == Some('~') && at(i + 2).is_some_and(|x| x != ' ') {
-            if let Some(end) = find_seq(&s, &['~', '~'], i + 2) {
-                out.push_styled(SignalStyle::Strikethrough, slice(&s, i + 2, end));
-                i = end + 2;
-                continue;
-            }
-        }
-
-        // Italic *text* (single star)
-        if c == '*' && at(i + 1).is_some_and(|x| x != '*' && x != ' ') {
-            if let Some(end) = find_closing_star(&s, i + 1) {
-                out.push_styled(SignalStyle::Italic, slice(&s, i + 1, end));
+            if let Some(end) = end
+                && nl.is_none_or(|nl| end < nl)
+            {
+                out.push_styled(SignalStyle::Monospace, slice(&s, i + 1, end));
                 i = end + 1;
                 continue;
             }
         }
 
+        // Horizontal rule --- / *** / ___ (before emphasis: a `***` line
+        // would otherwise open bold that closes in the next line).
+        if (i == 0 || s[i - 1] == '\n')
+            && let Some(len) = horizontal_rule_len(&s, i)
+        {
+            i += len;
+            continue;
+        }
+
+        // Bold **text**
+        if c == '*'
+            && at(i + 1) == Some('*')
+            && at(i + 2).is_some_and(|x| x != ' ')
+            && let Some(end) = find_seq(&s, &['*', '*'], i + 2)
+            && s[end - 1] != ' '
+        {
+            out.push_styled(SignalStyle::Bold, slice(&s, i + 2, end));
+            i = end + 2;
+            continue;
+        }
+
+        // Strikethrough ~~text~~
+        if c == '~'
+            && at(i + 1) == Some('~')
+            && at(i + 2).is_some_and(|x| x != ' ')
+            && let Some(end) = find_seq(&s, &['~', '~'], i + 2)
+        {
+            out.push_styled(SignalStyle::Strikethrough, slice(&s, i + 2, end));
+            i = end + 2;
+            continue;
+        }
+
+        // Italic *text* (single star)
+        if c == '*'
+            && at(i + 1).is_some_and(|x| x != '*' && x != ' ')
+            && let Some(end) = find_closing_star(&s, i + 1)
+        {
+            out.push_styled(SignalStyle::Italic, slice(&s, i + 1, end));
+            i = end + 1;
+            continue;
+        }
+
         // Italic _text_ (word boundaries only)
         if c == '_' && at(i + 1).is_some_and(|x| x != '_' && x != ' ') {
             let prev = if i > 0 { Some(s[i - 1]) } else { None };
-            if !is_js_word(prev) {
-                if let Some(end) = find_closing_underscore(&s, i + 1) {
-                    out.push_styled(SignalStyle::Italic, slice(&s, i + 1, end));
-                    i = end + 1;
-                    continue;
-                }
+            if !is_js_word(prev)
+                && let Some(end) = find_closing_underscore(&s, i + 1)
+            {
+                out.push_styled(SignalStyle::Italic, slice(&s, i + 1, end));
+                i = end + 1;
+                continue;
             }
         }
 
@@ -594,20 +600,18 @@ pub fn parse_signal_styles(raw: &str) -> SignalText {
         }
 
         // Links [text](url) -> text (url)
-        if c == '[' {
-            if let Some(close_bracket) = find_char(&s, ']', i + 1) {
-                if at(close_bracket + 1) == Some('(') {
-                    if let Some(close_paren) = find_char(&s, ')', close_bracket + 2) {
-                        out.push_all(slice(&s, i + 1, close_bracket));
-                        out.push(' ');
-                        out.push('(');
-                        out.push_all(slice(&s, close_bracket + 2, close_paren));
-                        out.push(')');
-                        i = close_paren + 1;
-                        continue;
-                    }
-                }
-            }
+        if c == '['
+            && let Some(close_bracket) = find_char(&s, ']', i + 1)
+            && at(close_bracket + 1) == Some('(')
+            && let Some(close_paren) = find_char(&s, ')', close_bracket + 2)
+        {
+            out.push_all(slice(&s, i + 1, close_bracket));
+            out.push(' ');
+            out.push('(');
+            out.push_all(slice(&s, close_bracket + 2, close_paren));
+            out.push(')');
+            i = close_paren + 1;
+            continue;
         }
 
         out.push(c);

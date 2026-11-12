@@ -123,10 +123,10 @@ impl IpcInbox {
                 Ok(None) => {}
                 Err(reason) => tracing::warn!(file = %name, %reason, "discarding IPC input file"),
             }
-            if let Err(e) = fs::remove_file(&path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(file = %name, error = %e, "cannot remove IPC input file");
-                }
+            if let Err(e) = fs::remove_file(&path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(file = %name, error = %e, "cannot remove IPC input file");
             }
         }
         out

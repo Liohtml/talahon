@@ -60,15 +60,15 @@ fn looks_like_secret_value(value: &str) -> bool {
 /// [`KNOWN_SECRET_KEYS`] from the process environment.
 pub fn collect_secrets(env: &EnvFile) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    if let Some(path) = env.path() {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            out.extend(
-                parse_env(&content)
-                    .into_iter()
-                    .filter(|(k, _)| is_secret_key(k))
-                    .map(|(_, v)| v),
-            );
-        }
+    if let Some(path) = env.path()
+        && let Ok(content) = std::fs::read_to_string(path)
+    {
+        out.extend(
+            parse_env(&content)
+                .into_iter()
+                .filter(|(k, _)| is_secret_key(k))
+                .map(|(_, v)| v),
+        );
     }
     for key in KNOWN_SECRET_KEYS {
         if let Some(v) = env.file_value(key) {

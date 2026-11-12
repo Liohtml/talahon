@@ -389,10 +389,10 @@ impl TaskOpLimiter {
             return;
         };
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(bucket) = state.buckets.get_mut(&key) {
-            if bucket.generation == generation {
-                bucket.used = bucket.used.saturating_sub(1);
-            }
+        if let Some(bucket) = state.buckets.get_mut(&key)
+            && bucket.generation == generation
+        {
+            bucket.used = bucket.used.saturating_sub(1);
         }
     }
 

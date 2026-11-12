@@ -1312,10 +1312,10 @@ async fn run_loop<H: OutputHandler>(
     }
 
     // Let the handler finish every accepted frame.
-    if let Some(output) = pending.take() {
-        if out_tx.send(output).await.is_err() {
-            tracing::error!(group = %ctx.group_name, container = %ctx.name, "output handler is gone; dropping frame");
-        }
+    if let Some(output) = pending.take()
+        && out_tx.send(output).await.is_err()
+    {
+        tracing::error!(group = %ctx.group_name, container = %ctx.name, "output handler is gone; dropping frame");
     }
     drop(out_tx);
     if let Err(err) = handler_task.await {

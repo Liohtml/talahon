@@ -32,6 +32,7 @@ talon-ipc = { workspace = true }
 talon-router = { workspace = true }
 talon-channels = { workspace = true }
 talon-http = { workspace = true }
+talon-intel = { workspace = true }
 talon-setup = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,11 +46,14 @@ futures = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
+# `talon eval run`: client of the CoPilot HTTP API.
+reqwest = { workspace = true }
 # Descriptor-relative, symlink-safe reads of agent-written files (MYTH-10).
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = { workspace = true }
 
 [lints]
 workspace = true

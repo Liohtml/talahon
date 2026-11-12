@@ -200,10 +200,10 @@ impl AgentOutputHandler for CommandHandler<'_> {
             self.had_error = true;
         }
         let text = result_to_text(output);
-        if !text.is_empty() {
-            if let Err(e) = self.deps.send_message(&text).await {
-                tracing::warn!(error = %e, "failed to deliver session command output");
-            }
+        if !text.is_empty()
+            && let Err(e) = self.deps.send_message(&text).await
+        {
+            tracing::warn!(error = %e, "failed to deliver session command output");
         }
     }
 }

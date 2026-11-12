@@ -13,8 +13,15 @@
 //!   releases.
 //! - WAL mode, `foreign_keys=ON`, `busy_timeout=5000`, prepared-statement
 //!   cache (`prepare_cached`).
-//! - [`Db`] is cheap to clone and `Send + Sync` (one connection behind a
-//!   mutex; a poisoned mutex surfaces as [`Error::Db`], never a panic).
+//! - [`Db`] is cheap to clone and `Send + Sync`. One connection behind a
+//!   mutex does every write and everything that runs inside a transaction
+//!   (a poisoned mutex surfaces as [`Error::Db`], never a panic). File-backed
+//!   WAL databases additionally get a small pool of `query_only` connections
+//!   ([`READ_POOL_SIZE`]) for the read-only queries, so lanes that read do
+//!   not queue behind each other or behind a commit. A read sees every write
+//!   that returned before it started (WAL readers see all committed data).
+//!   In-memory databases are private to their connection and keep using the
+//!   single connection for everything.
 //! - New tables: `audit_log` (append-only, **hash-chained**: each row stores
 //!   `prev_hash` and `hash = sha256_hex(prev_hash || canonical_json(event))`,
 //!   with [`Db::verify_audit_chain`]), `investigations`, `ioc_sightings`,
@@ -37,11 +44,12 @@
 #![warn(missing_docs)]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 
-use rusqlite::Connection;
 use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use talon_core::{Error, Result};
 
@@ -75,6 +83,11 @@ pub const DEFAULT_MESSAGE_LIMIT: usize = 200;
 
 /// `busy_timeout` applied to every connection.
 pub const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// Number of additional read-only connections a file-backed database opens
+/// for its read-only queries (see the crate docs). Zero for in-memory
+/// databases.
+pub const READ_POOL_SIZE: usize = 4;
 
 /// Capacity of the per-connection prepared-statement cache.
 const STATEMENT_CACHE_CAPACITY: usize = 64;
@@ -145,12 +158,25 @@ impl Default for DbOptions {
 /// Thread-safe SQLite handle.
 #[derive(Clone)]
 pub struct Db {
-    conn: Arc<Mutex<rusqlite::Connection>>,
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    /// The read-write connection: every write and every transaction.
+    conn: Mutex<Connection>,
+    /// `query_only` connections on the same file for read-only queries.
+    /// Empty when the database cannot be shared across connections
+    /// (in-memory) or is not in WAL mode; reads then use `conn`.
+    readers: Vec<Mutex<Connection>>,
+    /// Round-robin cursor into `readers`.
+    next_reader: AtomicUsize,
 }
 
 impl std::fmt::Debug for Db {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Db").finish_non_exhaustive()
+        f.debug_struct("Db")
+            .field("read_connections", &self.inner.readers.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -175,7 +201,8 @@ impl Db {
         if !existed {
             restrict_permissions(path);
         }
-        Self::init(conn, opts)
+        let db = Self::init(conn, opts)?;
+        Ok(db.with_read_pool(path))
     }
 
     /// Fresh in-memory database with the full schema (tests).
@@ -188,21 +215,92 @@ impl Db {
         configure_connection(&conn)?;
         schema::migrate(&mut conn, opts)?;
         Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            inner: Arc::new(Inner {
+                conn: Mutex::new(conn),
+                readers: Vec::new(),
+                next_reader: AtomicUsize::new(0),
+            }),
         })
+    }
+
+    /// Add the read-only connections when the database just opened at `path`
+    /// can be shared across connections. Never fails: without a pool reads
+    /// simply keep using the read-write connection.
+    fn with_read_pool(self, path: &Path) -> Self {
+        let readers = match self.with_conn(|conn| open_readers(conn, path)) {
+            Ok(readers) => readers,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "sqlite read pool unavailable; reads share the write connection"
+                );
+                return self;
+            }
+        };
+        if readers.is_empty() {
+            return self;
+        }
+        match Arc::try_unwrap(self.inner) {
+            Ok(inner) => Self {
+                inner: Arc::new(Inner { readers, ..inner }),
+            },
+            // Not reachable (the handle was created by the caller and never
+            // cloned); keep the handle as it is.
+            Err(inner) => Self { inner },
+        }
+    }
+
+    /// Number of read-only connections in use ([`READ_POOL_SIZE`] for a
+    /// file-backed WAL database, `0` when reads share the write connection).
+    pub fn read_connections(&self) -> usize {
+        self.inner.readers.len()
     }
 
     /// Lock the connection. A poisoned mutex is reported as [`Error::Db`].
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.conn
+        self.inner
+            .conn
             .lock()
             .map_err(|_| Error::Db("database mutex poisoned".to_string()))
     }
 
-    /// Run `f` with exclusive access to the connection.
+    /// Run `f` with exclusive access to the read-write connection.
     pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut guard = self.lock()?;
         f(&mut guard)
+    }
+
+    /// Run the read-only query `f`.
+    ///
+    /// Uses an idle connection of the read pool, so readers neither wait for
+    /// each other nor for a commit on the write connection. The connection
+    /// is in autocommit mode, so `f` starts a fresh WAL snapshot and sees
+    /// every write committed before it was called (read-your-writes, also
+    /// across threads). `f` must not write: the pool is `query_only`.
+    /// Anything that has to be atomic with a write belongs in
+    /// [`Db::with_tx`]. Without a pool this is [`Db::with_conn`].
+    pub(crate) fn with_read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let readers = &self.inner.readers;
+        if readers.is_empty() {
+            return self.with_conn(|conn| f(conn));
+        }
+        let start = self.inner.next_reader.fetch_add(1, Ordering::Relaxed) % readers.len();
+        // A poisoned reader is reused: a `query_only` connection holds no
+        // state a panicking query could have left half-written (its
+        // statement was reset when the panic unwound).
+        for offset in 0..readers.len() {
+            match readers[(start + offset) % readers.len()].try_lock() {
+                Ok(guard) => return f(&guard),
+                Err(TryLockError::Poisoned(poisoned)) => return f(&poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
+        // Every reader is busy: queue on one of them.
+        let guard = readers[start]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        f(&guard)
     }
 
     /// Run `f` inside a transaction, committing on `Ok` and rolling back on
@@ -238,6 +336,50 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     tracing::debug!(journal_mode = %mode, "sqlite journal mode");
     conn.pragma_update(None, "foreign_keys", "ON").db()?;
     Ok(())
+}
+
+/// Open the read pool for the database `main` has open at `path`.
+///
+/// Returns no connections when `main` is not a WAL database stored in a
+/// file: a private in-memory or temporary database exists only inside its
+/// own connection, and without WAL a reader would block on (and block) the
+/// writer instead of reading the last committed snapshot.
+fn open_readers(main: &Connection, path: &Path) -> Result<Vec<Mutex<Connection>>> {
+    let file: Option<String> = main
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |row| row.get(0),
+        )
+        .db()?;
+    let mode: String = main
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .db()?;
+    if file.is_none_or(|f| f.is_empty()) || !mode.eq_ignore_ascii_case("wal") {
+        return Ok(Vec::new());
+    }
+    (0..READ_POOL_SIZE)
+        .map(|_| open_reader(path).map(Mutex::new))
+        .collect()
+}
+
+/// One pooled read connection: the settings of the main connection that
+/// matter for reading, plus `query_only` (a write through it is an error).
+fn open_reader(path: &Path) -> Result<Connection> {
+    // Read-write at the file level (a WAL reader updates the shared-memory
+    // index and may have to run recovery), never creating the file.
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .db()?;
+    conn.busy_timeout(BUSY_TIMEOUT).db()?;
+    conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+    conn.pragma_update(None, "foreign_keys", "ON").db()?;
+    conn.pragma_update(None, "query_only", "ON").db()?;
+    Ok(conn)
 }
 
 #[cfg(unix)]
@@ -424,7 +566,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let clone = db.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = clone.conn.lock().unwrap();
+            let _guard = clone.inner.conn.lock().unwrap();
             panic!("poison the mutex");
         })
         .join();
@@ -483,6 +625,210 @@ mod tests {
                 Some("24")
             );
         }
+    }
+
+    fn file_db() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join(DB_FILE_NAME)).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn file_databases_get_a_read_pool_and_in_memory_ones_do_not() {
+        let (_dir, db) = file_db();
+        assert_eq!(db.read_connections(), READ_POOL_SIZE);
+        assert_eq!(db.clone().read_connections(), READ_POOL_SIZE);
+
+        // A private in-memory database exists only inside its connection.
+        for mem in [
+            Db::open_in_memory().unwrap(),
+            Db::open(Path::new(":memory:")).unwrap(),
+        ] {
+            assert_eq!(mem.read_connections(), 0);
+            mem.set_router_state("k", "v").unwrap();
+            assert_eq!(mem.get_router_state("k").unwrap().as_deref(), Some("v"));
+        }
+    }
+
+    #[test]
+    fn read_pool_connections_are_query_only_with_the_shared_settings() {
+        let (_dir, db) = file_db();
+        // Every pooled connection (round robin) refuses to write.
+        for _ in 0..READ_POOL_SIZE * 2 {
+            let (query_only, busy): (i64, i64) = db
+                .with_read(|c| {
+                    let q = c.query_row("PRAGMA query_only", [], |r| r.get(0)).db()?;
+                    let b = c.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).db()?;
+                    Ok((q, b))
+                })
+                .unwrap();
+            assert_eq!((query_only, busy), (1, 5000));
+            let write = db.with_read(|c| {
+                c.execute(
+                    "INSERT INTO router_state (key, value) VALUES ('k', 'v')",
+                    [],
+                )
+                .db()
+            });
+            assert!(matches!(write, Err(Error::Db(_))), "{write:?}");
+        }
+        assert_eq!(db.get_router_state("k").unwrap(), None);
+    }
+
+    #[test]
+    fn a_caller_reads_its_own_writes_through_the_pool() {
+        let (_dir, db) = file_db();
+        db.store_chat_metadata(&chat("c@g.us")).unwrap();
+        for i in 0..200 {
+            let v = i.to_string();
+            db.set_router_state("cursor", &v).unwrap();
+            assert_eq!(db.get_router_state("cursor").unwrap(), Some(v));
+
+            db.record_audit(&talon_core::audit::event(
+                "test.ryw",
+                "t",
+                None,
+                "info",
+                serde_json::json!(i),
+            ))
+            .unwrap();
+            assert_eq!(db.audit_count().unwrap(), i + 1);
+            assert_eq!(db.audit_chain_head().unwrap().map(|(id, _)| id), {
+                let newest = db.with_conn(|c| {
+                    c.query_row("SELECT MAX(id) FROM audit_log", [], |r| r.get(0))
+                        .db()
+                });
+                newest.unwrap()
+            });
+        }
+        assert_eq!(db.verify_audit_chain().unwrap(), None);
+    }
+
+    #[test]
+    fn a_write_is_visible_to_other_threads_as_soon_as_it_returns() {
+        let (_dir, db) = file_db();
+        let (tx, rx) = std::sync::mpsc::channel::<u64>();
+        // Several readers so that every pooled connection takes part.
+        let rx = Arc::new(Mutex::new(rx));
+        let readers: Vec<_> = (0..READ_POOL_SIZE + 2)
+            .map(|_| {
+                let (db, rx) = (db.clone(), Arc::clone(&rx));
+                std::thread::spawn(move || {
+                    loop {
+                        let Ok(written) = rx.lock().unwrap().recv() else {
+                            return;
+                        };
+                        // `written` was committed before it was sent.
+                        let seen: u64 = db
+                            .get_router_state("counter")
+                            .unwrap()
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        assert!(seen >= written, "stale read: {seen} < {written}");
+                        assert!(db.audit_count().unwrap() >= written);
+                    }
+                })
+            })
+            .collect();
+        for i in 1..=300u64 {
+            db.record_audit(&talon_core::audit::event(
+                "test.visible",
+                "t",
+                None,
+                "info",
+                serde_json::json!(i),
+            ))
+            .unwrap();
+            db.set_router_state("counter", &i.to_string()).unwrap();
+            tx.send(i).unwrap();
+        }
+        drop(tx);
+        for r in readers {
+            r.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn reads_do_not_wait_for_the_write_connection() {
+        let (_dir, db) = file_db();
+        db.set_router_state("k", "v").unwrap();
+        // Hold the write connection (as a slow commit would).
+        let guard = db.inner.conn.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn({
+            let db = db.clone();
+            move || tx.send(db.get_router_state("k").unwrap()).unwrap()
+        });
+        let got = rx.recv_timeout(Duration::from_secs(30));
+        drop(guard);
+        reader.join().unwrap();
+        assert_eq!(got.unwrap().as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn a_panic_in_a_pooled_read_does_not_break_later_reads() {
+        let (_dir, db) = file_db();
+        db.set_router_state("k", "v").unwrap();
+        for _ in 0..READ_POOL_SIZE {
+            let clone = db.clone();
+            let _ = std::thread::spawn(move || {
+                let _ = clone.with_read(|_| -> Result<()> { panic!("poison a reader") });
+            })
+            .join();
+        }
+        for _ in 0..READ_POOL_SIZE * 2 {
+            assert_eq!(db.get_router_state("k").unwrap().as_deref(), Some("v"));
+        }
+    }
+
+    /// Every read-only method goes through the `query_only` pool on a file
+    /// database: one that wrote would fail here.
+    #[test]
+    fn every_read_method_works_on_the_read_pool() {
+        let (_dir, db) = file_db();
+        db.store_chat_metadata(&chat("c@g.us")).unwrap();
+        let jids = vec!["c@g.us".to_string()];
+
+        db.recent_audit(10, Some("x.")).unwrap();
+        db.verify_audit_chain().unwrap();
+        db.audit_chain_head().unwrap();
+        db.audit_count().unwrap();
+
+        assert_eq!(db.get_all_chats().unwrap().len(), 1);
+        assert!(db.get_chat("c@g.us").unwrap().is_some());
+        db.get_last_group_sync().unwrap();
+        db.get_new_messages(&jids, "", "Talon").unwrap();
+        db.get_messages_since("c@g.us", "", "Talon", 10).unwrap();
+        db.get_last_bot_message_timestamp("c@g.us", "Talon")
+            .unwrap();
+
+        db.get_registered_group("c@g.us").unwrap();
+        db.get_all_registered_groups().unwrap();
+
+        db.get_investigation("i").unwrap();
+        db.list_investigations(10).unwrap();
+        db.latest_investigation_for_alert("a").unwrap();
+        db.investigation_status_counts().unwrap();
+
+        db.find_ioc_sightings("ipv4", "198.51.100.7", 10).unwrap();
+        db.count_ioc_sightings("ipv4", "198.51.100.7", None)
+            .unwrap();
+
+        db.get_router_state("k").unwrap();
+        db.get_session("s").unwrap();
+        db.get_session_provider("s").unwrap();
+        db.get_session_rows().unwrap();
+        db.get_all_sessions().unwrap();
+
+        db.get_task_by_id("t").unwrap();
+        db.get_tasks_for_group("g").unwrap();
+        db.get_tasks_for_jids(&jids).unwrap();
+        db.count_tasks_owned_by("o").unwrap();
+        db.get_all_tasks().unwrap();
+        db.get_task_owner("t").unwrap();
+        db.get_due_tasks("2024-01-01T00:00:00.000Z").unwrap();
+        db.get_task_run_logs("t", 10).unwrap();
     }
 
     #[test]

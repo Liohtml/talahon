@@ -10,7 +10,7 @@ Written in Rust · powered by your own vLLM · built to survive hostile input.
 [![CI](https://github.com/Liohtml/talahon/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/talahon/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/talahon?logo=rust&label=crates.io)](https://crates.io/crates/talahon)
 [![docs.rs](https://img.shields.io/docsrs/talahon?label=docs.rs)](https://docs.rs/talahon)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![LLM: vLLM](https://img.shields.io/badge/LLM-vLLM%20%C2%B7%20self--hosted-6E56CF)](docs/PROVIDER_SELECTION.md)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-2EA44F)](Cargo.toml)
 [![Security review](https://img.shields.io/badge/security-adversarially%20reviewed-0A7BBB)](docs/MYTHOS_REVIEW.md)
@@ -187,6 +187,7 @@ Each crate lives in `crates/talon-*` and is published on crates.io as
 | `talon-tools` | [`talahon-tools`](https://crates.io/crates/talahon-tools) | Built-in agent tools with path guard and SSRF-safe `web_fetch` |
 | `talon-intel` | [`talahon-intel`](https://crates.io/crates/talahon-intel) | IOC / MITRE / command-line / triage / correlation engine + report schema |
 | `talon-anon` | [`talahon-anon`](https://crates.io/crates/talahon-anon) | PII anonymizer and `talon-anon-proxy` |
+| `talon-mcp-opensearch` | [`talahon-mcp-opensearch`](https://crates.io/crates/talahon-mcp-opensearch) | Native read-only OpenSearch MCP server `talon-opensearch-mcp` (opt-in) |
 | `talon-security` | [`talahon-security`](https://crates.io/crates/talahon-security) | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
 | `talon-container` | [`talahon-container`](https://crates.io/crates/talahon-container) | Hardened docker/podman launcher, mounts, output parser |
 | `talon-net` | [`talahon-net`](https://crates.io/crates/talahon-net) | Hardened HTTP serving: header timeouts, connection caps |
@@ -221,6 +222,7 @@ reach.
 | Egress | `web_fetch` and webhooks check every hop against all special IPv4/IPv6 ranges, pin DNS to vetted addresses and refuse redirects to internal hosts |
 | HTTP API | Loopback by default, constant-time API key check, per-IP throttling, allowlist CORS, body limits, security headers; header-read timeouts and connection caps on every listener |
 | Memory | MemPalace data belongs to `mcp-palace`; agents can neither read nor plant files there, and host `/palace/*` calls run in a one-shot locked-down container |
+| Supply chain | Base images pinned by digest, every MCP server pinned to a commit SHA or exact version in [`container/mcp-versions.env`](container/mcp-versions.env), CI actions pinned by SHA; licenses, sources and banned crates enforced with `cargo deny`; the image is built and smoke-tested in CI |
 | Secrets in output | Logs and outbound messages pass through a redactor (bearer/JWT/vendor keys/PEM/basic auth + every configured secret value) |
 | Audit | Append-only SQLite audit log with a SHA-256 hash chain; `talon audit verify` detects tampering |
 
@@ -253,7 +255,7 @@ egress firewall and service installation, which a production setup needs.
 ### Prerequisites
 
 - Linux host (macOS works for development) with Docker or Podman
-- Rust 1.85+ (`rustup`) to build the host binary
+- Rust 1.89+ (`rustup`) to build the host binary
 - A **vLLM** server reachable from the host ([docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md))
 - OpenSearch/Wazuh SIEM and a [CoPilot](https://github.com/Liohtml/CoPilot) instance with its MySQL/MariaDB database
 
@@ -346,7 +348,7 @@ container they are readable only by that server's user.
 
 | Directory | Setup | Credentials |
 |---|---|---|
-| `siem/` | `bash siem/setup.sh` | `OPENSEARCH_HOSTS`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD` |
+| `siem/` | `bash siem/setup.sh` | `OPENSEARCH_HOSTS`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`; optional `TALON_OPENSEARCH_MCP=rust` |
 | `mysql/` | `bash mysql/setup.sh` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB` |
 | `copilot-mcp/` | `bash copilot-mcp/setup.sh` | `COPILOT_URL`, `COPILOT_USERNAME`, `COPILOT_PASSWORD` |
 | `wazuh-mcp/` | `bash wazuh-mcp/setup.sh` | `WAZUH_PROD_URL`, `WAZUH_PROD_USERNAME`, `WAZUH_PROD_PASSWORD` |
@@ -354,6 +356,15 @@ container they are readable only by that server's user.
 | `shuffle-mcp/` *(optional)* | `bash shuffle-mcp/setup.sh` | `SHUFFLE_URL`, `SHUFFLE_API_KEY` |
 | `cve-mcp/` *(optional)* | `bash cve-mcp/setup.sh` | `NVD_API_KEY`, optional VirusTotal/Shodan/AbuseIPDB/GreyNoise/urlscan keys |
 | `mempalace/` *(optional)* | `bash mempalace/setup.sh` | — (local ChromaDB + SQLite in `mempalace-data/`) |
+
+The versions of all MCP servers are pinned in
+[`container/mcp-versions.env`](container/mcp-versions.env), for the image and
+for the `setup.sh` scripts alike. To update one, review the upstream diff,
+change the pin and rebuild the image.
+
+`TALON_OPENSEARCH_MCP=rust` in `siem/.env` (opt-in) serves the SIEM tools from
+the native `talon-opensearch-mcp` binary (read-only, no Python cold start)
+instead of the Python `opensearch-mcp-server`, which stays the default.
 
 Services on the Talon host are reachable from containers as
 `host.docker.internal`. Which servers a group uses, and as which user, is
@@ -378,7 +389,9 @@ Without `--allow` the rules block private address ranges and keep internet
 egress (`--keep-internet` combines both).
 
 > [!NOTE]
-> The rules don't survive a reboot. Re-apply them from a root boot unit.
+> The rules don't survive a reboot on their own. Add `--persist` to the
+> `--apply` call (systemd hosts): it installs `talon-egress.service`, which
+> re-applies the same rules at every boot. `--uninstall --apply` removes it.
 
 ### 7. Register groups and install the service
 
@@ -418,9 +431,36 @@ interface if CoPilot runs on another host, and terminate TLS in front of it.
 | `talon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `egress`, `service`, `verify` |
 | `talon audit verify` | Recompute the audit hash chain (exit code 1 on tampering) |
 | `talon audit tail -n 50 --kind ipc.` | Recent audit events as JSON lines |
+| `talon eval score --reports <dir>` | Score saved verdicts against the golden set (offline) |
+| `talon eval run` | Investigate every golden case through a running Talon, then score |
 
 Logs: `RUST_LOG=info` (JSON with `TALON_LOG_FORMAT=json`); every line passes
 through the redactor.
+
+### Investigation quality (`talon eval`)
+
+[`evals/golden/`](evals/golden/README.md) holds synthetic alerts with a known
+expected outcome: verdict, severity range, indicators and ATT&CK techniques
+that must be reported, and content that must not appear (invented
+indicators, leaked anonymization tokens such as `USER_1`). Run it before and
+after a prompt, model or provider change.
+
+```bash
+# Offline: <dir>/<case id>.json is a verdict (TriageReport) or a
+# GET /investigations/{id} record.
+talon eval score --reports <dir> [--json] [--min-pass-rate 0.85]
+
+# Online: POST /investigate per case on a running Talon, wait, score.
+talon eval run --alert-map map.json --save-dir out/ [--url http://127.0.0.1:3100]
+```
+
+Both print a per-case table, the failed checks and a verdict confusion
+matrix (`--json` for the same as JSON), and exit `1` when the share of
+passing cases is below `--min-pass-rate` (default `1.0`), `2` on unusable
+input. `run` needs the cases' alerts seeded in the CoPilot stack the
+instance is connected to and performs real investigations with all their
+write-backs, so point it at a dedicated eval instance with
+`COPILOT_INVESTIGATION_DEDUP_MINUTES=0`; see the golden-set README.
 
 ### HTTP API
 
@@ -492,11 +532,29 @@ to crates.io with the same version.
 
 Talon 2.0 is an independent Rust rewrite, but it stands on the work of others:
 
-- **[Talon](https://github.com/taylorwalton/talon)** by [SOCFortress](https://www.socfortress.co) (Taylor Walton) — the original AI SOC analyst for CoPilot. Its investigation workflow, alert-type prompt templates, MCP server wrappers, anonymizing proxy and MemPalace integration are the foundation of this project.
+- **[Talon](https://github.com/taylorwalton/talon)** by [SOCFortress](https://www.socfortress.co) (Taylor Walton) — the original AI SOC analyst for CoPilot (no longer maintained). Its investigation workflow, alert-type prompt templates, MCP server wrappers, anonymizing proxy and MemPalace integration are the foundation of this project.
 - **[NanoClaw](https://github.com/qwibitai/nanoclaw)** and its contributors — the container-isolated agent framework the original Talon was built on: per-group lanes, IPC, scheduled tasks and group memory.
 - **[CoPilot](https://github.com/socfortress/CoPilot)** by SOCFortress — the SOC platform Talon works for, continued in Rust at [Liohtml/CoPilot](https://github.com/Liohtml/CoPilot).
 - **MCP servers** Talon's agent uses: SOCFortress' [copilot](https://github.com/socfortress/copilot-mcp-server), [Wazuh](https://github.com/socfortress/wazuh-mcp-server), [Velociraptor](https://github.com/socfortress/velociraptor-mcp-server) and [Shuffle](https://github.com/socfortress/shuffle-mcp-server) servers, [cve-mcp-server](https://github.com/mukul975/cve-mcp-server), [opensearch-mcp-server](https://pypi.org/project/opensearch-mcp-server/), [mysql-mcp-server](https://pypi.org/project/mysql-mcp-server/) and [MemPalace](https://pypi.org/project/mempalace/).
 - **[vLLM](https://github.com/vllm-project/vllm)**, **[Wazuh](https://wazuh.com)**, **[OpenSearch](https://opensearch.org)** and **[Velociraptor](https://docs.velociraptor.app)**, which do the heavy lifting underneath.
+
+### What the rewrite changed
+
+The original Talon is a Node.js/TypeScript fork of NanoClaw that drives the
+Claude Agent SDK; its repository is no longer maintained. Talon 2.0 keeps its
+investigation workflow and replaces the runtime:
+
+| | Original Talon | Talon 2.0 |
+|---|---|---|
+| Runtime | Node.js host, Claude Agent SDK in the container | One Rust workspace: host, in-container agent loop, LLM gateway, anonymizer |
+| Model | Claude by default, Ollama through the SDK | vLLM on your own GPUs by default, Anthropic optional — always behind the host gateway |
+| Model credentials | Credential proxy, with an env-var fallback into the container | Key never leaves the host; a per-run token over stdin |
+| Anonymizing proxy | Python | Rust, with more PII coverage (lists, nested and dotted fields, free text) |
+
+New in the rewrite: privilege separation inside the container (root supervisor
+without LLM, every MCP server as its own user), per-lane isolation, the
+deterministic IOC / ATT&CK / triage engine with schema-validated verdicts, the
+hash-chained audit log, and three rounds of adversarial review.
 
 ## 📄 License
 

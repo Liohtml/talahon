@@ -55,9 +55,12 @@ fi
 
 # ── Install velociraptor-mcp-server ───────────────────────────────────────────
 echo "Installing velociraptor-mcp-server from GitHub..."
+# Pinned upstream versions (shared with the agent image).
+# shellcheck source=../container/mcp-versions.env
+source "$SCRIPT_DIR/../container/mcp-versions.env"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet \
-    "git+https://github.com/socfortress/velociraptor-mcp-server.git"
+    "git+https://github.com/socfortress/velociraptor-mcp-server.git@${VELOCIRAPTOR_MCP_REF}"
 echo "velociraptor-mcp-server installed  ✓"
 
 # ── .env ─────────────────────────────────────────────────────────────────────

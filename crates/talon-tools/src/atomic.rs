@@ -27,11 +27,11 @@ fn write_then_rename(
     let result = (|| {
         // `create_new` = O_CREAT|O_EXCL: never follows a pre-planted symlink.
         let mut f = OpenOptions::new().write(true).create_new(true).open(tmp)?;
-        if let Some(src) = mode_from {
-            if let Ok(meta) = fs::metadata(src) {
-                // Best effort: keep the permissions of the file being replaced.
-                let _ = f.set_permissions(meta.permissions());
-            }
+        if let Some(src) = mode_from
+            && let Ok(meta) = fs::metadata(src)
+        {
+            // Best effort: keep the permissions of the file being replaced.
+            let _ = f.set_permissions(meta.permissions());
         }
         f.write_all(data)?;
         f.sync_all()?;

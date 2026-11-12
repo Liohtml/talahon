@@ -40,7 +40,7 @@ pub(crate) fn check_prompt_bytes(prompt: &str, max: Option<usize>) -> Result<(),
 
 fn describe(d: Duration) -> String {
     let secs = d.as_secs();
-    if secs >= 60 && secs % 60 == 0 && d.subsec_nanos() == 0 {
+    if secs >= 60 && secs.is_multiple_of(60) && d.subsec_nanos() == 0 {
         format!("{} min", secs / 60)
     } else if d.subsec_millis() == 0 {
         format!("{secs} s")

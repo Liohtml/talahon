@@ -239,13 +239,13 @@ impl TokenStore {
                 label: entry.label.clone(),
             };
         }
-        if let Some(bucket) = entry.bucket.as_mut() {
-            if let Err(retry_after) = bucket.take(now) {
-                return AuthDecision::RateLimited {
-                    label: entry.label.clone(),
-                    retry_after,
-                };
-            }
+        if let Some(bucket) = entry.bucket.as_mut()
+            && let Err(retry_after) = bucket.take(now)
+        {
+            return AuthDecision::RateLimited {
+                label: entry.label.clone(),
+                retry_after,
+            };
         }
         entry.in_flight.fetch_add(1, Ordering::AcqRel);
         AuthDecision::Allowed {
@@ -263,10 +263,11 @@ pub(crate) fn extract_token(
 ) -> Option<String> {
     if let Some(auth) = authorization {
         let auth = auth.trim();
-        if let Some((scheme, rest)) = auth.split_once(char::is_whitespace) {
-            if scheme.eq_ignore_ascii_case("bearer") && !rest.trim().is_empty() {
-                return Some(rest.trim().to_string());
-            }
+        if let Some((scheme, rest)) = auth.split_once(char::is_whitespace)
+            && scheme.eq_ignore_ascii_case("bearer")
+            && !rest.trim().is_empty()
+        {
+            return Some(rest.trim().to_string());
         }
     }
     x_api_key

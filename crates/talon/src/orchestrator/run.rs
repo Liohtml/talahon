@@ -152,10 +152,10 @@ impl Orchestrator {
     ) {
         // Main-ness comes from the registry only, never from `extra_jid`.
         let (mut jids, is_main) = lane_namespace(groups, ipc_key);
-        if let Some(jid) = extra_jid {
-            if !jids.iter().any(|j| j == jid) {
-                jids.push(jid.to_string());
-            }
+        if let Some(jid) = extra_jid
+            && !jids.iter().any(|j| j == jid)
+        {
+            jids.push(jid.to_string());
         }
         let tasks = self.snapshot_tasks(&snapshot_task_query(is_main, &jids));
         if let Err(e) = talon_container::write_lane_tasks_snapshot(
@@ -362,16 +362,16 @@ impl Orchestrator {
                         break;
                     }
                 };
-                if opts.manage_session {
-                    if let Some(id) = output.new_session_id.as_deref().filter(|s| !s.is_empty()) {
-                        self.persist_run_session(
-                            group,
-                            id,
-                            &fingerprint,
-                            output.usage.as_ref(),
-                            session_epoch,
-                        );
-                    }
+                if opts.manage_session
+                    && let Some(id) = output.new_session_id.as_deref().filter(|s| !s.is_empty())
+                {
+                    self.persist_run_session(
+                        group,
+                        id,
+                        &fingerprint,
+                        output.usage.as_ref(),
+                        session_epoch,
+                    );
                 }
                 if let Some(result) = output.result.as_ref().filter(|r| !r.is_empty()) {
                     last_result = Some(result.clone());

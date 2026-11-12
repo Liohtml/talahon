@@ -1288,27 +1288,26 @@ fn map_fields(f: &AlertFields, event: Option<u32>, sysmon: bool) -> Vec<MitreMap
             ),
         ));
     }
-    if matches!(ev, Some(17 | 18)) {
-        if let Some(p) = &f.pipe_name {
-            let l = p.to_ascii_lowercase();
-            let cs = ["\\msagent_", "\\postex_", "\\status_"];
-            if cs.iter().any(|n| l.contains(n)) || (l.contains("\\msse-") && l.ends_with("-server"))
-            {
-                out.push(MitreMapping::new(
-                    "T1071",
-                    Confidence::Medium,
-                    field,
-                    format!("named pipe {p} matches a default Cobalt Strike pipe pattern"),
-                ));
-            }
-            if l.contains("psexesvc") {
-                out.push(MitreMapping::new(
-                    "T1569.002",
-                    Confidence::Medium,
-                    field,
-                    "PsExec service pipe (PSEXESVC)",
-                ));
-            }
+    if matches!(ev, Some(17 | 18))
+        && let Some(p) = &f.pipe_name
+    {
+        let l = p.to_ascii_lowercase();
+        let cs = ["\\msagent_", "\\postex_", "\\status_"];
+        if cs.iter().any(|n| l.contains(n)) || (l.contains("\\msse-") && l.ends_with("-server")) {
+            out.push(MitreMapping::new(
+                "T1071",
+                Confidence::Medium,
+                field,
+                format!("named pipe {p} matches a default Cobalt Strike pipe pattern"),
+            ));
+        }
+        if l.contains("psexesvc") {
+            out.push(MitreMapping::new(
+                "T1569.002",
+                Confidence::Medium,
+                field,
+                "PsExec service pipe (PSEXESVC)",
+            ));
         }
     }
     out

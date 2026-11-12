@@ -2,7 +2,7 @@
 //! traffic of the agent containers.
 //!
 //! ```text
-//! talon setup egress [--apply] [--uninstall] [--allow <cidr[:port]>]...
+//! talon setup egress [--apply [--persist]] [--uninstall] [--allow <cidr[:port]>]...
 //!                    [--keep-internet] [--gateway-port N] [--nft|--iptables]
 //! ```
 //!
@@ -53,9 +53,10 @@
 //! one transaction; the iptables chains are flushed and rebuilt behind a
 //! temporary DROP for the bridge (fail closed while reloading — if a
 //! command fails, agents stay cut off until the step succeeds or
-//! `--uninstall` runs). Rules do not survive a reboot on their own: re-run
-//! `talon setup egress --apply` from a boot-time root unit, or persist them
-//! with the distribution's mechanism.
+//! `--uninstall` runs). Rules do not survive a reboot on their own:
+//! `--apply --persist` (systemd hosts) also installs the root oneshot unit
+//! [`PERSIST_UNIT`], which re-applies the same rules at every boot.
+//! `--uninstall --apply` removes that unit again.
 //!
 //! The generator ([`egress_plan`], [`render_script`]) is pure. Applying
 //! ([`apply_plan`]) goes through the [`CommandRunner`] with argv only —
@@ -69,9 +70,10 @@ use std::path::{Path, PathBuf};
 use talon_core::provider::effective_vllm;
 
 use super::StepArgs;
-use super::service::shell_quote;
+use super::service::{shell_quote, systemd_path_value, systemd_word};
 use crate::checks::vllm_api_key_set;
 use crate::context::{SETUP_LOG, SetupContext};
+use crate::fsutil::write_atomic;
 use crate::platform::Platform;
 use crate::runner::{CommandOutput, CommandRunner, CommandSpec};
 use crate::status::{StatusBlock, StepOutcome};
@@ -1002,12 +1004,12 @@ pub async fn apply_plan(
         }
         FirewallPlan::Iptables { sections } => {
             for section in sections {
-                if let Some(guard) = &section.guard {
-                    if !try_run(runner, guard, &mut report).await {
-                        tracing::warn!(section = %section.title, "firewall section skipped (guard failed)");
-                        report.skipped_sections.push(section.title.clone());
-                        continue;
-                    }
+                if let Some(guard) = &section.guard
+                    && !try_run(runner, guard, &mut report).await
+                {
+                    tracing::warn!(section = %section.title, "firewall section skipped (guard failed)");
+                    report.skipped_sections.push(section.title.clone());
+                    continue;
                 }
                 for step in &section.steps {
                     match step {
@@ -1050,10 +1052,11 @@ pub fn parse_resolv_conf(text: &str) -> Vec<IpAddr> {
         }
         let Some(value) = parts.next() else { continue };
         let value = value.split('%').next().unwrap_or(value);
-        if let Ok(ip) = value.parse::<IpAddr>() {
-            if !ip.is_loopback() && !out.contains(&ip) {
-                out.push(ip);
-            }
+        if let Ok(ip) = value.parse::<IpAddr>()
+            && !ip.is_loopback()
+            && !out.contains(&ip)
+        {
+            out.push(ip);
         }
     }
     out
@@ -1113,6 +1116,8 @@ pub struct EgressOptions {
     pub allow: Vec<AllowEntry>,
     /// `--keep-internet`: block-private mode even with `--allow`.
     pub keep_internet: bool,
+    /// `--persist`: with `--apply`, install the boot-time unit as well.
+    pub persist: bool,
 }
 
 /// An invalid argument (`ERROR` code + offending value).
@@ -1138,6 +1143,7 @@ impl EgressOptions {
             gateway_port: default_gateway_port,
             allow: Vec::new(),
             keep_internet: false,
+            persist: false,
         };
         let err = |code: &'static str, value: &str| ArgError {
             code,
@@ -1150,6 +1156,7 @@ impl EgressOptions {
                 "--apply" => opts.apply = true,
                 "--uninstall" => opts.action = EgressAction::Uninstall,
                 "--keep-internet" => opts.keep_internet = true,
+                "--persist" => opts.persist = true,
                 "--nft" | "--iptables" => {
                     let b = if arg == "--nft" {
                         Backend::Nft
@@ -1178,6 +1185,9 @@ impl EgressOptions {
                 other => return Err(err("unknown_argument", other)),
             }
             i += 1;
+        }
+        if opts.persist && (!opts.apply || opts.action == EgressAction::Uninstall) {
+            return Err(err("persist_requires_apply", "--persist"));
         }
         Ok(opts)
     }
@@ -1208,6 +1218,104 @@ impl EgressOptions {
 }
 
 // ---------------------------------------------------------------------------
+// Persistence across reboots
+// ---------------------------------------------------------------------------
+
+/// systemd unit (root, oneshot) that re-applies the rules at boot.
+pub const PERSIST_UNIT: &str = "talon-egress.service";
+
+/// Generate the boot-time unit: `<talon> setup egress <apply_args>` after
+/// Docker has created its chains.
+///
+/// # Errors
+/// Paths that cannot be represented safely in a unit file.
+pub fn persist_unit(
+    talon_binary: &Path,
+    project_root: &Path,
+    apply_args: &[String],
+) -> anyhow::Result<String> {
+    let utf8 = |p: &Path| {
+        p.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", p.display()))
+    };
+    let mut exec = vec![systemd_word(&utf8(talon_binary)?)?];
+    for word in ["setup", "egress"] {
+        exec.push(word.to_string());
+    }
+    for arg in apply_args {
+        exec.push(systemd_word(arg)?);
+    }
+    let lines = [
+        "# Written by `talon setup egress --apply --persist`; removed by".to_string(),
+        "# `talon setup egress --uninstall --apply`. Do not edit: re-run the step.".into(),
+        "[Unit]".into(),
+        "Description=Talon agent egress firewall".into(),
+        "After=docker.service".into(),
+        String::new(),
+        "[Service]".into(),
+        "Type=oneshot".into(),
+        "RemainAfterExit=yes".into(),
+        format!("ExecStart={}", exec.join(" ")),
+        format!(
+            "WorkingDirectory={}",
+            systemd_path_value(&utf8(project_root)?)?
+        ),
+        String::new(),
+        "[Install]".into(),
+        "WantedBy=multi-user.target".into(),
+        String::new(),
+    ];
+    Ok(lines.join("\n"))
+}
+
+/// Write and enable the boot-time unit. Returns the machine-readable reason
+/// when the rules were applied but could not be made persistent.
+async fn install_persist_unit(
+    ctx: &SetupContext,
+    apply_args: &[String],
+) -> Result<PathBuf, &'static str> {
+    if !ctx.platform.has_systemd {
+        return Err("systemd_not_found");
+    }
+    let unit = persist_unit(&ctx.talon_binary, &ctx.project_root, apply_args)
+        .map_err(|_| "unit_not_representable")?;
+    let path = ctx.systemd_system_dir.join(PERSIST_UNIT);
+    std::fs::create_dir_all(&ctx.systemd_system_dir).map_err(|_| "unit_write_failed")?;
+    write_atomic(&path, unit.as_bytes(), Some(0o644)).map_err(|_| "unit_write_failed")?;
+    let runner = ctx.runner.as_ref();
+    let _ = runner
+        .run(&CommandSpec::new("systemctl", ["daemon-reload"]))
+        .await;
+    if !runner
+        .run(&CommandSpec::new("systemctl", ["enable", PERSIST_UNIT]))
+        .await
+        .success()
+    {
+        return Err("unit_enable_failed");
+    }
+    Ok(path)
+}
+
+/// Disable and delete the boot-time unit, if one is installed. Returns
+/// whether a unit was removed.
+async fn remove_persist_unit(ctx: &SetupContext) -> std::io::Result<bool> {
+    let path = ctx.systemd_system_dir.join(PERSIST_UNIT);
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let runner = ctx.runner.as_ref();
+    let _ = runner
+        .run(&CommandSpec::new("systemctl", ["disable", PERSIST_UNIT]))
+        .await;
+    std::fs::remove_file(&path)?;
+    let _ = runner
+        .run(&CommandSpec::new("systemctl", ["daemon-reload"]))
+        .await;
+    Ok(true)
+}
+
+// ---------------------------------------------------------------------------
 // Step
 // ---------------------------------------------------------------------------
 
@@ -1233,8 +1341,8 @@ fn outcome(script: &str, block: StatusBlock, exit_code: i32) -> StepOutcome {
 
 /// Run the step.
 ///
-/// Arguments: `--apply`, `--uninstall`, `--allow <cidr[:port]>` (repeatable),
-/// `--keep-internet`, `--gateway-port N`, `--nft` | `--iptables`.
+/// Arguments: `--apply`, `--persist`, `--uninstall`, `--allow <cidr[:port]>`
+/// (repeatable), `--keep-internet`, `--gateway-port N`, `--nft` | `--iptables`.
 ///
 /// Exit codes: 0 printed / applied, 1 apply failed or needs root, 4 invalid
 /// arguments.
@@ -1380,9 +1488,40 @@ pub async fn run(args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOutc
             if !report.skipped_sections.is_empty() {
                 block.set("SKIPPED", report.skipped_sections.join(","));
             }
-            block.set("STATUS", "success");
+            let mut exit_code = 0;
+            if opts.action == EgressAction::Uninstall {
+                // A boot unit left behind would re-install the rules.
+                match remove_persist_unit(ctx).await {
+                    Ok(removed) => block.set("PERSIST_UNIT_REMOVED", removed),
+                    Err(e) => {
+                        tracing::error!(error = %e, "Removing the egress boot unit failed");
+                        block.set("ERROR", "persist_unit_not_removed");
+                        block.set("STATUS", "failed");
+                        block.set("LOG", SETUP_LOG);
+                        return Ok(outcome(&script, block, 1));
+                    }
+                }
+            } else if opts.persist {
+                match install_persist_unit(ctx, &opts.apply_args(backend)).await {
+                    Ok(path) => {
+                        block.set("PERSISTED", true);
+                        block.set("PERSIST_UNIT", path.display().to_string());
+                    }
+                    Err(reason) => {
+                        // The rules are active now, but will be gone after a
+                        // reboot: that is a failure the operator must see.
+                        tracing::error!(reason, "Egress rules applied but not persisted");
+                        block.set("PERSISTED", false);
+                        block.set("ERROR", reason);
+                        exit_code = 1;
+                    }
+                }
+            } else {
+                block.set("PERSISTED", false);
+            }
+            block.set("STATUS", if exit_code == 0 { "success" } else { "failed" });
             block.set("LOG", SETUP_LOG);
-            Ok(outcome(&script, block, 0))
+            Ok(outcome(&script, block, exit_code))
         }
         Err(e) => {
             tracing::error!(error = %e, "Applying the egress firewall failed");

@@ -622,10 +622,8 @@ impl TaskScheduler {
         {
             error!(task_id, error = %e, "failed to update task after run");
         }
-        if paused {
-            if let Err(e) = self.store.pause_task(&task.id).await {
-                error!(task_id, error = %e, "failed to pause task");
-            }
+        if paused && let Err(e) = self.store.pause_task(&task.id).await {
+            error!(task_id, error = %e, "failed to pause task");
         }
 
         let status = if error.is_some() {

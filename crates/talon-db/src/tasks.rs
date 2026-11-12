@@ -140,7 +140,7 @@ impl Db {
     /// One task by id. A row with an unknown `schedule_type` / `status`
     /// value is reported as [`Error::Db`].
     pub fn get_task_by_id(&self, id: &str) -> Result<Option<ScheduledTask>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql = format!("SELECT {TASK_COLUMNS} FROM scheduled_tasks WHERE id = ?1");
             let mut stmt = conn.prepare_cached(&sql).db()?;
             let mut rows = stmt.query_map([id], task_from_row).db()?;
@@ -157,7 +157,7 @@ impl Db {
 
     /// Tasks of one group, newest first. Corrupt rows are skipped.
     pub fn get_tasks_for_group(&self, group_folder: &str) -> Result<Vec<ScheduledTask>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql = format!(
                 "SELECT {TASK_COLUMNS} FROM scheduled_tasks WHERE group_folder = ?1 \
                  ORDER BY created_at DESC"
@@ -181,7 +181,7 @@ impl Db {
             return Ok(Vec::new());
         }
         let jids_json = serde_json::to_string(jids)?;
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql = format!(
                 "SELECT {TASK_COLUMNS} FROM scheduled_tasks \
                  WHERE chat_jid IN (SELECT value FROM json_each(?1)) \
@@ -199,7 +199,7 @@ impl Db {
     /// Orphaned owner records are ignored; host-owned tasks (no record) are
     /// never counted. Used for per-lane task quotas (N-3).
     pub fn count_tasks_owned_by(&self, owner: &str) -> Result<u64> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let n: i64 = conn
                 .prepare_cached(
                     "SELECT COUNT(*) FROM task_owners o
@@ -216,7 +216,7 @@ impl Db {
 
     /// All tasks, newest first. Corrupt rows are skipped.
     pub fn get_all_tasks(&self) -> Result<Vec<ScheduledTask>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql =
                 format!("SELECT {TASK_COLUMNS} FROM scheduled_tasks ORDER BY created_at DESC");
             let mut stmt = conn.prepare_cached(&sql).db()?;
@@ -337,7 +337,7 @@ impl Db {
     /// tasks, rows that predate ownership records) — or does not exist.
     /// Orphaned records (whose task is gone) are ignored.
     pub fn get_task_owner(&self, task_id: &str) -> Result<Option<String>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT o.owner FROM task_owners o
@@ -354,7 +354,7 @@ impl Db {
 
     /// Active tasks with `next_run <= now_iso`, oldest due first.
     pub fn get_due_tasks(&self, now_iso: &str) -> Result<Vec<ScheduledTask>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql = format!(
                 "SELECT {TASK_COLUMNS} FROM scheduled_tasks
                  WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?1
@@ -451,7 +451,7 @@ impl Db {
 
     /// Up to `limit` run logs of a task, most recent first.
     pub fn get_task_run_logs(&self, task_id: &str, limit: usize) -> Result<Vec<TaskRunLog>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT task_id, run_at, duration_ms, status, result, error

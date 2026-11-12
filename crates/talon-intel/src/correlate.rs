@@ -127,15 +127,15 @@ impl AlertNode {
 
     fn entities(&self, o: &CorrelationOptions) -> Vec<String> {
         let mut e = Vec::new();
-        if o.link_host {
-            if let Some(h) = &self.host {
-                e.push(format!("host:{h}"));
-            }
+        if o.link_host
+            && let Some(h) = &self.host
+        {
+            e.push(format!("host:{h}"));
         }
-        if o.link_user {
-            if let Some(u) = &self.user {
-                e.push(format!("user:{u}"));
-            }
+        if o.link_user
+            && let Some(u) = &self.user
+        {
+            e.push(format!("user:{u}"));
         }
         if o.link_ioc {
             e.extend(self.iocs.iter().map(|i| format!("ioc:{i}")));
@@ -269,10 +269,10 @@ pub fn correlate(nodes: &[AlertNode], opts: &CorrelationOptions) -> CorrelationR
             .collect();
         timed.sort_by_key(|&i| nodes[i].timestamp);
         for w in timed.windows(2) {
-            if let (Some(a), Some(b)) = (nodes[w[0]].timestamp, nodes[w[1]].timestamp) {
-                if b - a <= opts.window {
-                    dsu.union(w[0], w[1]);
-                }
+            if let (Some(a), Some(b)) = (nodes[w[0]].timestamp, nodes[w[1]].timestamp)
+                && b - a <= opts.window
+            {
+                dsu.union(w[0], w[1]);
             }
         }
         let untimed: Vec<usize> = members

@@ -1140,11 +1140,13 @@ fn mostly_printable(s: &str) -> bool {
 }
 
 fn bytes_to_text(b: &[u8]) -> Option<String> {
-    if b.len() >= 4 && b.len() % 2 == 0 {
+    if b.len() >= 4 && b.len().is_multiple_of(2) {
         let zero_high = b.iter().skip(1).step_by(2).filter(|&&x| x == 0).count();
         if zero_high * 10 >= (b.len() / 2) * 7 {
             let units: Vec<u16> = b
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             let s = String::from_utf16_lossy(&units);
@@ -1880,26 +1882,26 @@ fn process_findings(ctx: &ProcessContext<'_>, acc: &mut Acc) {
                 path,
             ));
         }
-        if name == "rundll32.exe" {
-            if let Some(cmd) = ctx.command_line {
-                let after = cmd
-                    .to_ascii_lowercase()
-                    .split_once("rundll32")
-                    .map(|(_, r)| {
-                        r.trim_start_matches(".exe")
-                            .trim_matches(['"', ' '])
-                            .to_string()
-                    })
-                    .unwrap_or_default();
-                if after.is_empty() {
-                    acc.add(finding(
-                        "rundll32_no_args",
-                        "rundll32 without arguments (typical of injected beacon processes)",
-                        35,
-                        &["T1218.011"],
-                        cmd,
-                    ));
-                }
+        if name == "rundll32.exe"
+            && let Some(cmd) = ctx.command_line
+        {
+            let after = cmd
+                .to_ascii_lowercase()
+                .split_once("rundll32")
+                .map(|(_, r)| {
+                    r.trim_start_matches(".exe")
+                        .trim_matches(['"', ' '])
+                        .to_string()
+                })
+                .unwrap_or_default();
+            if after.is_empty() {
+                acc.add(finding(
+                    "rundll32_no_args",
+                    "rundll32 without arguments (typical of injected beacon processes)",
+                    35,
+                    &["T1218.011"],
+                    cmd,
+                ));
             }
         }
     }
@@ -1916,7 +1918,9 @@ pub fn analyze_process(ctx: &ProcessContext<'_>) -> CommandLineAnalysis {
     process_findings(ctx, &mut acc);
     let mut a = finish(cmd, acc);
     if a.executable.is_none() {
-        a.executable = ctx.image.map(basename);
+        // An empty image (or one ending in a path separator) names no
+        // executable.
+        a.executable = ctx.image.map(basename).filter(|b| !b.is_empty());
     }
     a
 }
@@ -2352,3 +2356,7 @@ mod tests {
         assert_eq!(decode_base64_text("\u{e9}\u{e9}\u{e9}\u{e9}"), None);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod proptests;

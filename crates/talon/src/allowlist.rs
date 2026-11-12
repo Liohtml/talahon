@@ -78,10 +78,10 @@ impl AllowlistSource {
                     len: m.len(),
                 });
                 let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Some((cached, list)) = cache.as_ref() {
-                    if *cached == stamp {
-                        return Arc::clone(list);
-                    }
+                if let Some((cached, list)) = cache.as_ref()
+                    && *cached == stamp
+                {
+                    return Arc::clone(list);
                 }
                 let list = Arc::new(SenderAllowlist::load_with_policy(path, *required));
                 *cache = Some((stamp, Arc::clone(&list)));

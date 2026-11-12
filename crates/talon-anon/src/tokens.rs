@@ -4,9 +4,8 @@
 //! and are allocated per prefix from monotonically increasing counters, so a
 //! value keeps the same token for the whole session.
 //!
-//! The persisted JSON format is exactly the one written by the Python proxy
-//! (`siem/anon_proxy/anon_proxy.py`), so existing `session_tokens.json`
-//! files keep working in both directions:
+//! The persisted JSON format is exactly the one written by the former Python
+//! proxy, so `session_tokens.json` files written by it keep working:
 //!
 //! ```json
 //! {
@@ -268,11 +267,11 @@ impl TokenMap {
         self.by_folded.entry(fold(&original)).or_insert(idx);
         self.by_original.insert(original.clone(), idx);
         self.by_token.insert(token.clone(), idx);
-        if let Some((p, n)) = split_token(&token) {
-            if n > self.counter(p) {
-                let p = p.to_string();
-                self.set_counter(&p, n);
-            }
+        if let Some((p, n)) = split_token(&token)
+            && n > self.counter(p)
+        {
+            let p = p.to_string();
+            self.set_counter(&p, n);
         }
         self.entries.push(TokenEntry { original, token });
         self.dirty = true;
@@ -323,10 +322,10 @@ impl TokenMap {
         let skipped = total - map.len();
         if let Some(Value::Object(counters)) = obj.get("counters") {
             for (prefix, n) in counters {
-                if let Some(n) = n.as_u64() {
-                    if n > map.counter(prefix) {
-                        map.set_counter(prefix, n);
-                    }
+                if let Some(n) = n.as_u64()
+                    && n > map.counter(prefix)
+                {
+                    map.set_counter(prefix, n);
                 }
             }
         }
@@ -378,10 +377,11 @@ impl TokenMap {
 
     fn deanon_index(&self) -> Option<Arc<AhoCorasick>> {
         let mut guard = self.deanon.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(idx) = guard.as_ref() {
-            if idx.epoch == self.epoch && idx.len == self.entries.len() {
-                return Some(Arc::clone(&idx.ac));
-            }
+        if let Some(idx) = guard.as_ref()
+            && idx.epoch == self.epoch
+            && idx.len == self.entries.len()
+        {
+            return Some(Arc::clone(&idx.ac));
         }
         match AhoCorasick::new(self.entries.iter().map(|e| e.token.as_str())) {
             Ok(ac) => {

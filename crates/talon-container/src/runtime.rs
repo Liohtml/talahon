@@ -626,12 +626,11 @@ impl ContainerRuntime {
             return Ok(());
         }
         // Lost a creation race? Then the network exists now.
-        if out.stderr.to_ascii_lowercase().contains("already exists") {
-            if let Ok(again) = self.exec(&inspect, QUERY_TIMEOUT).await {
-                if again.success() {
-                    return Ok(());
-                }
-            }
+        if out.stderr.to_ascii_lowercase().contains("already exists")
+            && let Ok(again) = self.exec(&inspect, QUERY_TIMEOUT).await
+            && again.success()
+        {
+            return Ok(());
         }
         Err(Error::Container(format!(
             "{} network create {name} failed ({:?}): {}",
@@ -700,15 +699,13 @@ impl ContainerRuntime {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        if let Ok(out) = self.exec.run("ip", &args, QUERY_TIMEOUT).await {
-            if out.success() {
-                if let Some(ip) = parse_ip_addr_output(&out.stdout) {
-                    if is_bindable(ip) {
-                        tracing::debug!(%ip, "gateway bind address from docker0");
-                        return ip;
-                    }
-                }
-            }
+        if let Ok(out) = self.exec.run("ip", &args, QUERY_TIMEOUT).await
+            && out.success()
+            && let Some(ip) = parse_ip_addr_output(&out.stdout)
+            && is_bindable(ip)
+        {
+            tracing::debug!(%ip, "gateway bind address from docker0");
+            return ip;
         }
 
         tracing::warn!(
