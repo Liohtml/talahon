@@ -4,9 +4,9 @@
 # reach the model context window. Add new fields here and git pull to
 # distribute updates to all deployments.
 #
-# It is read by the Rust proxy (`talon-anon-proxy`, crates/talon-anon) and by
-# the legacy Python fallback (anon_proxy.py). The Python proxy ignores keys it
-# does not know, so everything marked "(Rust)" below is an optional extension.
+# It is read by the Rust proxy (`talon-anon-proxy`, crates/talon-anon).
+# Everything marked "(Rust)" below is an optional extension of the original
+# file format.
 #
 # Token format: <PREFIX>_<N>
 # Example: a user field containing "john.doe" becomes "USER_1" the first time

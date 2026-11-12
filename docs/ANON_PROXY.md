@@ -2,7 +2,7 @@
 
 This document explains the anonymizing OpenSearch MCP proxy — what problem it solves, how it works step by step, and how to extend it.
 
-Since Talon 2.0 the proxy is a Rust binary, **`talon-anon-proxy`** (crate `crates/talon-anon`). The original Python implementation (`siem/anon_proxy/anon_proxy.py`) remains as an opt-in fallback (`TALON_ANON_ALLOW_PYTHON=1`); both read the same `fields.yaml` and the same token-map format.
+Since Talon 2.0 the proxy is a Rust binary, **`talon-anon-proxy`** (crate `crates/talon-anon`). It reads the same `fields.yaml` and token-map format as the Python proxy it replaced. That Python implementation (and its `TALON_ANON_ALLOW_PYTHON=1` fallback) has been removed: without the binary the SIEM server refuses to start.
 
 ---
 
@@ -192,9 +192,8 @@ The token map holds the real values. It is written atomically (temp file + fsync
 | `TALON_ANON_MAP` set | that path |
 | Default (container) | `$HOME/session_tokens.json` — inside the agent container the supervisor gives each MCP server a private, writable tmpfs `HOME` (`/run/talon/home/<server>`, `0700`), readable only by `mcp-siem`, not by the agent |
 | Dev mode, `$HOME` not writable | `/workspace/group/session_tokens.json` (the pre-2.0 location) |
-| Python fallback | always `/workspace/group/session_tokens.json` |
 
-The format is unchanged from the Python proxy, so existing maps keep working in both directions:
+The format is unchanged from the former Python proxy, so maps written by it keep working:
 
 ```json
 {
@@ -234,7 +233,7 @@ talon-anon-proxy [--fields <fields.yaml>] --map <session_tokens.json> -- <upstre
   --check                      validate fields.yaml and the token map, then exit
 ```
 
-`siem/anon-opensearch-mcp.sh` (the MCP server command in `.mcp.json`) finds the binary (`$TALON_ANON_PROXY_BIN`, `PATH`, `/usr/local/bin`, `target/{release,debug}`), resolves the map path as above and runs `talon-anon-proxy --fields anon_proxy/fields.yaml --map … -- opensearch-mcp.sh`. Without the binary it refuses to start; `TALON_ANON_ALLOW_PYTHON=1` in the server's environment allows the legacy Python proxy, which misses PII the Rust proxy catches (list elements, nested and dotted field names, names in free text and preserved fields).
+`siem/anon-opensearch-mcp.sh` (the MCP server command in `.mcp.json`) finds the binary (`$TALON_ANON_PROXY_BIN`, `PATH`, `/usr/local/bin`, `target/{release,debug}`), resolves the map path as above and runs `talon-anon-proxy --fields anon_proxy/fields.yaml --map … -- opensearch-mcp.sh`. Without the binary it refuses to start.
 
 Protocol behaviour:
 - stdout carries only JSON-RPC; logs go to stderr (`TALON_ANON_LOG` / `RUST_LOG`, default `info`) and never contain real values — only counts, sizes, ids and method names.
@@ -257,7 +256,6 @@ siem/
   opensearch-mcp.sh          ← raw OpenSearch MCP server (used for non-sensitive queries)
   anon-opensearch-mcp.sh     ← anonymizing wrapper (use for all document/search queries)
   anon_proxy/
-    anon_proxy.py            ← legacy Python proxy (opt-in: TALON_ANON_ALLOW_PYTHON=1)
     fields.yaml              ← field definitions read at runtime (git-pullable)
 ```
 
@@ -329,7 +327,7 @@ verbatim_fields:
   - my_custom_external_ip_field
 ```
 
-Other optional keys (ignored by the Python fallback):
+Other optional keys:
 
 | Key | Default | Meaning |
 |---|---|---|

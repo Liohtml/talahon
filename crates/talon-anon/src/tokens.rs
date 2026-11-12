@@ -4,9 +4,8 @@
 //! and are allocated per prefix from monotonically increasing counters, so a
 //! value keeps the same token for the whole session.
 //!
-//! The persisted JSON format is exactly the one written by the Python proxy
-//! (`siem/anon_proxy/anon_proxy.py`), so existing `session_tokens.json`
-//! files keep working in both directions:
+//! The persisted JSON format is exactly the one written by the former Python
+//! proxy, so `session_tokens.json` files written by it keep working:
 //!
 //! ```json
 //! {
