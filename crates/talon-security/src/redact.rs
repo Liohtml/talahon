@@ -39,9 +39,12 @@ fn re(pattern: &str) -> Regex {
     Regex::new(&pattern.replace(r"\b", r"(?-u:\b)")).expect("static redaction regex")
 }
 
+/// A PEM private key: the whole block when its `-----END` line is present,
+/// else only the header (the key material after it is found by
+/// [`unterminated_pem_len`]).
 static PEM_PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|[A-Za-z0-9+/=\s:,-]*)",
+        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----)?",
     )
 });
 
@@ -51,13 +54,25 @@ static URL_CREDENTIALS: LazyLock<Regex> =
 static JWT: LazyLock<Regex> =
     LazyLock::new(|| re(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"));
 
+/// Scheme words of an `Authorization` header.
+const AUTH_SCHEMES: &str = "bearer|basic|token|digest|negotiate|ntlm|apikey";
+
+/// Whether `word` is one of [`AUTH_SCHEMES`].
+fn is_auth_scheme(word: &str) -> bool {
+    AUTH_SCHEMES
+        .split('|')
+        .any(|scheme| scheme.eq_ignore_ascii_case(word))
+}
+
 /// `Authorization: <scheme> <credential>` (header or JSON/quoted forms).
 /// The credential cannot start with `=`: in `Authorization: apikey = <value>`
-/// the `=` belongs to an `apikey = ...` assignment, not to a scheme.
+/// the `=` belongs to an `apikey = ...` assignment, not to a scheme. Repeated
+/// scheme words (`Authorization: Token Bearer <credential>`) belong to the
+/// prefix, so the first one cannot take the second as its credential.
 static AUTH_HEADER: LazyLock<Regex> = LazyLock::new(|| {
-    re(
-        r#"(?i)(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(bearer|basic|token|digest|negotiate|ntlm|apikey)\s+)([A-Za-z0-9\-._~+/][A-Za-z0-9\-._~+/=]*)"#,
-    )
+    re(&format!(
+        r#"(?i)(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?({AUTH_SCHEMES})\s+(?:(?:{AUTH_SCHEMES})\s+)*)([A-Za-z0-9\-._~+/][A-Za-z0-9\-._~+/=]*)"#
+    ))
 });
 
 /// Free-standing `Bearer <token>` (outside an Authorization header).
@@ -247,12 +262,14 @@ impl Redactor {
         }
 
         // 2. PEM private keys (multi-line).
-        apply(&mut out, &PEM_PRIVATE_KEY, |_| {
-            "[REDACTED:private_key]".to_string()
-        });
+        redact_pem(&mut out);
 
         // 3. Credentials embedded in URLs.
         apply(&mut out, &URL_CREDENTIALS, |c| {
+            // Already redacted by an earlier call: keep its label.
+            if c[3].starts_with("[REDACTED:") {
+                return c[0].to_string();
+            }
             format!("{}{}:[REDACTED:url_password]@", &c[1], &c[2])
         });
 
@@ -260,17 +277,22 @@ impl Redactor {
         apply(&mut out, &JWT, |_| "[REDACTED:jwt]".to_string());
 
         // 5. Authorization headers (any scheme).
-        apply(&mut out, &AUTH_HEADER, |c| {
-            format!("{}[REDACTED:{}]", &c[1], auth_kind(&c[2]))
+        apply_resuming(&mut out, &AUTH_HEADER, 3, |c, rest| {
+            // A lone scheme word is not a credential (it would also make a
+            // second pass redact differently from the first), and neither is
+            // the head of another credential.
+            if is_auth_scheme(&c[3]) || is_credential_head(&c[3], rest) {
+                return None;
+            }
+            Some(format!("{}[REDACTED:{}]", &c[1], auth_kind(&c[2])))
         });
 
         // 6. Free-standing bearer tokens.
-        apply(&mut out, &BEARER, |c| {
-            if looks_random(&c[2]) {
-                format!("{}[REDACTED:bearer]", &c[1])
-            } else {
-                c[0].to_string()
+        apply_resuming(&mut out, &BEARER, 2, |c, rest| {
+            if is_credential_head(&c[2], rest) || !looks_random(&c[2]) {
+                return None;
             }
+            Some(format!("{}[REDACTED:bearer]", &c[1]))
         });
 
         // 7. Free-standing basic credentials (must decode to `user:pass`).
@@ -368,6 +390,143 @@ where
     let replaced = pattern.replace_all(text.as_ref(), |c: &Captures<'_>| f(c));
     if let Cow::Owned(s) = replaced {
         *text = Cow::Owned(s);
+    }
+}
+
+/// Like [`apply`], but `f` also gets the text after the match, and a match
+/// it declines (`None`) is not stepped over: the search resumes at the start
+/// of capture group `resume`, the would-be credential, which may itself
+/// start a credential the pattern (or a later pass) has to see.
+fn apply_resuming<F>(text: &mut Cow<'_, str>, pattern: &Regex, resume: usize, f: F)
+where
+    F: Fn(&Captures<'_>, &str) -> Option<String>,
+{
+    if !pattern.is_match(text.as_ref()) {
+        return;
+    }
+    let src = text.as_ref();
+    let mut out = String::with_capacity(src.len());
+    // `src[..copied]` is in `out`; the search continues at `at >= copied`.
+    let (mut copied, mut at) = (0usize, 0usize);
+    while at <= src.len() {
+        let Some(c) = pattern.captures_at(src, at) else {
+            break;
+        };
+        let Some(whole) = c.get(0) else { break };
+        if let Some(replacement) = f(&c, &src[whole.end()..]) {
+            out.push_str(&src[copied..whole.start()]);
+            out.push_str(&replacement);
+            copied = whole.end();
+            at = whole.end();
+        } else {
+            // Past the start of this match, so the loop always ends.
+            let next = c.get(resume).map_or(whole.end(), |g| g.start());
+            at = next.max(whole.start() + 1);
+            while !src.is_char_boundary(at) {
+                at += 1;
+            }
+        }
+    }
+    if copied == 0 {
+        return;
+    }
+    out.push_str(&src[copied..]);
+    *text = Cow::Owned(out);
+}
+
+/// Whether a would-be credential, given the text after it, is really the
+/// head of another credential syntax: a sensitive assignment key or an
+/// `Authorization` header name, with its separator (`password: ...`,
+/// `AWS_SECRET_ACCESS_KEY=...`, `Authorization: ...`). Redacting it would
+/// hide that key from the pass that redacts its value. Anything else is a
+/// credential, whatever punctuation follows it.
+fn is_credential_head(candidate: &str, rest: &str) -> bool {
+    let name = candidate.trim_end_matches('=');
+    let separated = name.len() < candidate.len()
+        || rest.trim_start_matches([' ', '\t']).starts_with([':', '=']);
+    separated
+        && (NESTED_KEY.is_match(name)
+            || name.eq_ignore_ascii_case("authorization")
+            || name.eq_ignore_ascii_case("proxy-authorization"))
+}
+
+/// Replace PEM private keys. A block without its `-----END` line (a
+/// truncated log line) is redacted as far as the text after the header
+/// looks like key material.
+fn redact_pem(text: &mut Cow<'_, str>) {
+    if !PEM_PRIVATE_KEY.is_match(text.as_ref()) {
+        return;
+    }
+    let src = text.as_ref();
+    let mut out = String::with_capacity(src.len());
+    let mut copied = 0usize;
+    for m in PEM_PRIVATE_KEY.find_iter(src) {
+        if m.start() < copied {
+            // Inside the key material of the previous, unterminated block.
+            continue;
+        }
+        let terminated = m.as_str().len() > 11 && m.as_str()[11..].contains("-----END ");
+        let end = if terminated {
+            m.end()
+        } else {
+            m.end() + unterminated_pem_len(&src[m.end()..])
+        };
+        out.push_str(&src[copied..m.start()]);
+        out.push_str("[REDACTED:private_key]");
+        copied = end;
+    }
+    out.push_str(&src[copied..]);
+    *text = Cow::Owned(out);
+}
+
+/// Shortest base64 run that counts as key material when other text is
+/// glued to it (`MIIEvQIBADANBgkqhkiG9w0"}`).
+const MIN_GLUED_KEY_RUN: usize = 16;
+
+/// Length of the key material after a PEM header that has no end marker.
+///
+/// Whitespace-separated words are taken while they consist of base64
+/// characters only, plus the RFC 1421 header lines (`Proc-Type:`,
+/// `DEK-Info:`). The scan stops at the first word that is anything else
+/// and never inside one: taking the `api` of `api_key=<value>` or the
+/// `password` of `password: <value>` would leave a value no later pass
+/// recognises. Only a long base64 run is taken out of a longer word.
+fn unterminated_pem_len(rest: &str) -> usize {
+    let is_b64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    let mut end = 0usize;
+    let mut pos = 0usize;
+    loop {
+        let word_start = pos + rest[pos..].len() - rest[pos..].trim_start().len();
+        let word = rest[word_start..]
+            .split(char::is_whitespace)
+            .next()
+            .unwrap_or_default();
+        if word.is_empty() {
+            // Trailing whitespace belongs to the block.
+            return rest.len();
+        }
+        if word.starts_with("Proc-Type:") || word.starts_with("DEK-Info:") {
+            let line = rest[word_start..]
+                .find('\n')
+                .unwrap_or(rest.len() - word_start);
+            pos = word_start + line;
+            end = pos;
+            continue;
+        }
+        let run = word.find(|c| !is_b64(c)).unwrap_or(word.len());
+        if is_credential_head(&word[..run], &rest[word_start + run..]) {
+            // `password = <value>` after the header: not key material.
+            return end;
+        }
+        if run == word.len() {
+            pos = word_start + word.len();
+            end = pos;
+            continue;
+        }
+        if run >= MIN_GLUED_KEY_RUN {
+            end = word_start + run;
+        }
+        return end;
     }
 }
 
