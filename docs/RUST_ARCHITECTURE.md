@@ -1,11 +1,11 @@
-# Talon — Rust Architecture
+# Talahon — Rust Architecture
 
-Talon runs one host orchestrator and one hardened container per agent run,
+Talahon runs one host orchestrator and one hardened container per agent run,
 serves the CoPilot HTTP API, runs scheduled sweeps and talks to the SIEM and
 intel sources through MCP tool servers. Three design decisions shape it:
 
 1. **Rust end to end:** a Cargo workspace on the host *and* inside the
-   container, with a native agent loop in `talon-agent`.
+   container, with a native agent loop in `talahon-agent`.
 2. **Model provider:** **vLLM** (OpenAI-compatible `/v1/chat/completions` with
    tool calling and structured outputs). Containers never hold the vLLM API
    key: they talk to a host-side **LLM gateway** with a short-lived per-run
@@ -28,18 +28,18 @@ crates/
   talon-mcp        MCP JSON-RPC client/server, .mcp.json loader, Tool adapter, manager
   talon-tools      built-in agent tools (bash, files, grep/glob, web_fetch, IPC task tools, todo)
   talon-intel      IOC extraction, MITRE ATT&CK mapping, triage scoring, correlation, report schema
-  talon-anon       PII anonymizer + `talon-anon-proxy` MCP proxy binary
-  talon-mcp-opensearch  native read-only OpenSearch MCP server `talon-opensearch-mcp` (opt-in: TALON_OPENSEARCH_MCP=rust)
-  talon-mcp-mysql  native MySQL MCP server `talon-mysql-mcp` (opt-in: TALON_MYSQL_MCP=rust)
+  talon-anon       PII anonymizer + `talahon-anon-proxy` MCP proxy binary
+  talon-mcp-opensearch  native read-only OpenSearch MCP server `talahon-opensearch-mcp` (opt-in: TALAHON_OPENSEARCH_MCP=rust)
+  talon-mcp-mysql  native MySQL MCP server `talahon-mysql-mcp` (opt-in: TALAHON_MYSQL_MCP=rust)
   talon-container  hardened docker/podman launcher, mounts, output-marker parser, snapshots, image files
   talon-scheduler  GroupQueue (per-lane serialization, global concurrency) + task scheduler loop
   talon-ipc        host-side IPC watcher (authorized, audited, hardened file handling)
   talon-router     message formatting, Markdown->channel dialects, chunking, session commands
-  talon-setup      setup/verify/service-install logic used by `talon setup ...`
+  talon-setup      setup/verify/service-install logic used by `talahon setup ...`
   talon-channels   Telegram, outbound webhook, Emacs bridge
   talon-http       CoPilot HTTP API (investigations, SSE chat lanes, status, palace)
-  talon-agent      in-container runtime: `talon-agent supervise` (root) + `talon-agent run` (unprivileged)
-  talon            host binary: orchestrator + CLI
+  talon-agent      in-container runtime: `talahon-agent supervise` (root) + `talahon-agent run` (unprivileged)
+  talon            host binary `talahon` (+ deprecated alias `talon`): orchestrator + CLI
 ```
 
 Dependency rule: everything depends on `talon-core`. Other edges:
@@ -54,6 +54,30 @@ everything      <- talon (host)
 `talon-core`, and the **public signatures** already present in `talon-db`
 and `talon-security`, are a frozen contract. Implementations fill in the
 `todo!()` bodies; additions are fine, changes/removals are not.
+
+### Names: `talahon` outside, `talon` inside
+
+The product, its binaries (`talahon`, `talahon-agent`, `talahon-anon-proxy`,
+`talahon-opensearch-mcp`, `talahon-mysql-mcp`), its settings (`TALAHON_*`),
+service units (`talahon.service`, `com.talahon`, `talahon-egress.service`),
+the agent image (`talahon-agent`) and the configuration directory
+(`~/.config/talahon`) are called **Talahon**. The names used up to 2.x are
+aliases for one major version; `talon_core::env` (settings),
+`talon_core::paths::resolve_config_dir` (configuration directory),
+`talon_core::trigger` (default assistant name) and `talon-setup` (units)
+implement them once each. See "Upgrading from Talon 2.x" in the
+[README](../README.md).
+
+Internal identifiers intentionally stay `talon`, because other code, running
+installations or the CoPilot side depend on them: crate names and directories,
+the `talon-agents` network / `br-talon` bridge / `talon_egress` table /
+`TALON-EGRESS` chains, container names and labels, in-container paths
+(`/run/talon`, `/home/agent/.talon`), the output frame markers and setup
+status block headers, fence tags, audit event kinds and the audit HMAC
+domain, MCP `serverInfo` / `clientInfo` names and User-Agent strings, metric
+names, the HTTP API and webhook headers, and the on-disk instruction stubs.
+New settings must be read through `talon_core::env` so the alias applies.
+
 
 ---
 
@@ -99,9 +123,9 @@ Follow-ups and the end of a container:
   it drains `input/`.
 
 ### 3.2 Model access (vLLM via host gateway)
-- Host reads `TALON_VLLM_*` (see `talon_core::provider`) and the secret
-  `TALON_VLLM_API_KEY` (via `EnvFile::file_value`).
-- Host starts `talon_llm::gateway` on `TALON_LLM_GATEWAY_BIND:TALON_LLM_GATEWAY_PORT`
+- Host reads `TALAHON_VLLM_*` (see `talon_core::provider`) and the secret
+  `TALAHON_VLLM_API_KEY` (via `EnvFile::file_value`).
+- Host starts `talon_llm::gateway` on `TALAHON_LLM_GATEWAY_BIND:TALAHON_LLM_GATEWAY_PORT`
   (default `127.0.0.1:3001`; on Linux docker the host must bind the docker
   bridge address so `host.docker.internal` reaches it — `talon-container`
   exposes a helper that detects it).
@@ -122,33 +146,33 @@ docker run --rm -i --name talon-<folder>-<millis> --label talon.managed=true
   -e TZ=.. -e RUN_UID=.. -e RUN_GID=..           (no secrets in env)
   --add-host host.docker.internal:host-gateway   (Linux)
   --add-host <blocked>:127.0.0.1 ...
-  <mounts> talon-agent:latest
+  <mounts> talahon-agent:latest
 ```
 - Image users: `agent` (remapped to `RUN_UID/RUN_GID`), and one system user
   per isolated MCP: `mcp-siem`, `mcp-mysql`, `mcp-wazuh`, `mcp-copilot`,
   `mcp-shuffle`, `mcp-velociraptor`, `mcp-cve`, `mcp-palace`, plus
   `mcp-default` for servers without a `runAs`. No sudo in the image.
-- `/usr/local/bin/talon-entrypoint` (root): remap `agent` uid/gid, copy
+- `/usr/local/bin/talahon-entrypoint` (root): remap `agent` uid/gid, copy
   `/etc/mcp-staging/<id>.*` -> `/etc/mcp-secrets/<id>.*` (owner `mcp-<id>`,
-  0600), then `exec talon-agent supervise`. If not root: `exec talon-agent run`.
-- `talon-agent supervise` (root, tiny, no LLM logic): reads the whole
+  0600), then `exec talahon-agent supervise`. If not root: `exec talahon-agent run`.
+- `talahon-agent supervise` (root, tiny, no LLM logic): reads the whole
   `ContainerInput` from stdin, parses `/workspace/group/.mcp.json`, spawns each
   MCP server as its `runAs` user (`^mcp-[a-z0-9_-]{1,32}$`, must exist; else
   `mcp-default`) with a minimal env (PATH, LANG, TZ, HOME=/tmp + the server's
   `env`), exposes each server's stdio on a unix socket
   `/run/talon/mcp/<server>.sock` (dir 0750 root:agent, socket owned by
-  `agent`), then spawns `talon-agent run` as `agent` (RUN_UID/RUN_GID) with the
-  input on its stdin and `TALON_MCP_SOCKET_DIR=/run/talon/mcp`, relays its
+  `agent`), then spawns `talahon-agent run` as `agent` (RUN_UID/RUN_GID) with the
+  input on its stdin and `TALAHON_MCP_SOCKET_DIR=/run/talon/mcp`, relays its
   stdout/stderr, and tears everything down when it exits.
-- `talon-agent run`: connects to the sockets (or, without
-  `TALON_MCP_SOCKET_DIR`, spawns servers itself — degraded/dev mode).
+- `talahon-agent run`: connects to the sockets (or, without
+  `TALAHON_MCP_SOCKET_DIR`, spawns servers itself — degraded/dev mode).
 - MCP wrapper scripts (`siem/*.sh`, `mysql/*.sh`, `*-mcp/*.sh`,
   `mempalace/*.sh`) source `/etc/mcp-secrets/<id>.env` directly when running
   as `mcp-<id>` (no sudo), and fall back to the local `.env` in dev mode.
 - `.mcp.json` server entries gain an optional `"runAs": "mcp-siem"` field.
 
 ### 3.4 Untrusted data
-Everything that originates outside Talon (SIEM documents, alert fields, MCP
+Everything that originates outside Talahon (SIEM documents, alert fields, MCP
 tool results, fetched web pages, chat messages from non-main users) is
 untrusted. Tool results that carry such data are passed through
 `talon_security::injection::fence_untrusted(source, text)` before reaching
@@ -164,13 +188,13 @@ Kinds: `http.auth.failed`, `http.investigate`, `ipc.message.denied`,
 `gateway.request`, `injection.detected`, `egress.denied`, `tool.call`.
 
 The host sink (`talon_db::DbAuditSink`) appends to the hash-chained
-`audit_log` table. With `TALON_AUDIT_KEY` the host calls
+`audit_log` table. With `TALAHON_AUDIT_KEY` the host calls
 `Db::enable_keyed_audit` (rows are HMAC-SHA-256 under the key, and
 `store/audit.checkpoint` anchors the newest row against truncation); the
 database then appends two kinds on its own: `audit.chain.keyed` (first keyed
 row of a chain that has unkeyed rows) and `audit.checkpoint.anomaly`
 (checkpoint and table disagree). Verification is `Db::verify_audit`
-(`talon audit verify`); see [SECURITY.md](SECURITY.md#7-audit).
+(`talahon audit verify`); see [SECURITY.md](SECURITY.md#7-audit).
 
 ---
 

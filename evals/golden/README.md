@@ -1,6 +1,6 @@
 # Golden set
 
-Alerts with a known expected outcome. `talon eval` scores what an
+Alerts with a known expected outcome. `talahon eval` scores what an
 investigation produced for each of them, so a prompt, model or provider
 change can be checked for regressions in investigation quality.
 
@@ -60,7 +60,7 @@ contain; every extra required indicator makes the case more brittle.
 ## Offline scoring
 
 ```bash
-talon eval score --reports <dir> [--cases evals/golden] [--json] [--min-pass-rate 1.0]
+talahon eval score --reports <dir> [--cases evals/golden] [--json] [--min-pass-rate 1.0]
 ```
 
 `<dir>` holds one `<case id>.json` per case: either the structured verdict
@@ -72,22 +72,22 @@ as failed. Exit code `0` when the pass rate reaches `--min-pass-rate`
 ## Online runs
 
 ```bash
-talon eval run [--url http://127.0.0.1:3100] [--alert-map map.json] [--customer-code CODE]
+talahon eval run [--url http://127.0.0.1:3100] [--alert-map map.json] [--customer-code CODE]
                [--timeout-secs 900] [--poll-secs 5] [--save-dir out/] [--json] [--min-pass-rate 1.0]
 ```
 
-Submits each case to a running Talon through the CoPilot HTTP API
+Submits each case to a running Talahon through the CoPilot HTTP API
 (`POST /investigate`, then `GET /investigations/{id}` until the job is
-`completed` or `failed`), one case at a time, and scores the verdict Talon
+`completed` or `failed`), one case at a time, and scores the verdict Talahon
 recorded. The API key is `HTTP_API_KEY` from the project's `.env`.
 `--save-dir` keeps the investigation records in the layout
-`talon eval score --reports` reads.
+`talahon eval score --reports` reads.
 
 What you have to provide:
 
 - **The alerts must exist in the target stack.** `POST /investigate` takes an
   alert *reference*; the agent then loads the event from CoPilot's MySQL and
-  the SIEM itself. `talon eval run` does not seed anything. Index each
+  the SIEM itself. `talahon eval run` does not seed anything. Index each
   case's `alert` document into the eval stack's SIEM, create the matching
   CoPilot alert and asset rows (`index_name`, `index_id`), and pass the
   resulting ids with `--alert-map` (`{"<case id>": <alert id>}`) unless they
@@ -102,7 +102,7 @@ What you have to provide:
   overrides this).
 
 A case whose verdict does not arrive within `--timeout-secs` fails; its job
-keeps running in Talon (the API has no cancel).
+keeps running in Talahon (the API has no cancel).
 
 ## Adding a case
 

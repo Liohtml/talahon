@@ -2,7 +2,7 @@
 
 This document explains the anonymizing OpenSearch MCP proxy — what problem it solves, how it works step by step, and how to extend it.
 
-Since Talon 2.0 the proxy is a Rust binary, **`talon-anon-proxy`** (crate `crates/talon-anon`). It reads the same `fields.yaml` and token-map format as the Python proxy it replaced. That Python implementation (and its `TALON_ANON_ALLOW_PYTHON=1` fallback) has been removed: without the binary the SIEM server refuses to start.
+Since Talahon the proxy is a Rust binary, **`talahon-anon-proxy`** (crate `crates/talon-anon`). It reads the same `fields.yaml` and token-map format as the Python proxy it replaced. That Python implementation (and its `TALAHON_ANON_ALLOW_PYTHON=1` fallback) has been removed: without the binary the SIEM server refuses to start.
 
 ---
 
@@ -35,7 +35,7 @@ The anonymizing proxy intercepts those results before they reach the model and r
                          │ JSON-RPC request (stdin)
                          ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│            talon-anon-proxy  (runs in the container)             │
+│            talahon-anon-proxy  (runs in the container)             │
 │                                                                  │
 │  1. Tracks the request id → method (and aggregation fields)      │
 │  2. Replaces tokens in the arguments with the real values        │
@@ -51,7 +51,7 @@ The anonymizing proxy intercepts those results before they reach the model and r
                          │ raw document (child stdout)
                          ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│              talon-anon-proxy  (intercepts response)             │
+│              talahon-anon-proxy  (intercepts response)             │
 │                                                                  │
 │  4. Parses the result (JSON text, JSON embedded in text,         │
 │     structuredContent) and walks every field (two passes)        │
@@ -189,7 +189,7 @@ The token map holds the real values. It is written atomically (temp file + fsync
 
 | Situation | Location |
 |---|---|
-| `TALON_ANON_MAP` set | that path |
+| `TALAHON_ANON_MAP` set | that path |
 | Default (container) | `$HOME/session_tokens.json` — inside the agent container the supervisor gives each MCP server a private, writable tmpfs `HOME` (`/run/talon/home/<server>`, `0700`), readable only by `mcp-siem`, not by the agent |
 | Dev mode, `$HOME` not writable | `/workspace/group/session_tokens.json` (the pre-2.0 location) |
 
@@ -223,20 +223,20 @@ Robustness:
 ## Running the Proxy
 
 ```
-talon-anon-proxy [--fields <fields.yaml>] --map <session_tokens.json> -- <upstream command> [args...]
+talahon-anon-proxy [--fields <fields.yaml>] --map <session_tokens.json> -- <upstream command> [args...]
 
-  --fields <YAML>              field definitions (default: the copy embedded at build time; env TALON_ANON_FIELDS)
-  --map <FILE>                 token map (env TALON_ANON_MAP)
+  --fields <YAML>              field definitions (default: the copy embedded at build time; env TALAHON_ANON_FIELDS)
+  --map <FILE>                 token map (env TALAHON_ANON_MAP)
   --max-line-bytes <BYTES>     maximum JSON-RPC message size (default 32 MiB)
   --shutdown-grace-secs <SECS> wait for the upstream after the client disconnects (default 10)
   --no-deanonymize-arguments   forward tool arguments exactly as written by the model
   --check                      validate fields.yaml and the token map, then exit
 ```
 
-`siem/anon-opensearch-mcp.sh` (the MCP server command in `.mcp.json`) finds the binary (`$TALON_ANON_PROXY_BIN`, `PATH`, `/usr/local/bin`, `target/{release,debug}`), resolves the map path as above and runs `talon-anon-proxy --fields anon_proxy/fields.yaml --map … -- opensearch-mcp.sh`. Without the binary it refuses to start.
+`siem/anon-opensearch-mcp.sh` (the MCP server command in `.mcp.json`) finds the binary (`$TALAHON_ANON_PROXY_BIN`, `PATH`, `/usr/local/bin`, `target/{release,debug}`), resolves the map path as above and runs `talahon-anon-proxy --fields anon_proxy/fields.yaml --map … -- opensearch-mcp.sh`. Without the binary it refuses to start.
 
 Protocol behaviour:
-- stdout carries only JSON-RPC; logs go to stderr (`TALON_ANON_LOG` / `RUST_LOG`, default `info`) and never contain real values — only counts, sizes, ids and method names.
+- stdout carries only JSON-RPC; logs go to stderr (`TALAHON_ANON_LOG` / `RUST_LOG`, default `info`) and never contain real values — only counts, sizes, ids and method names.
 - `tools/list` results get the `deanonymize` tool appended (on the last page, once).
 - `tools/call` results are anonymized: `text` content (whole-text JSON, JSON embedded after a prefix such as `Search results: {…}`, or plain text), `resource` text and URIs, `structuredContent`, and any other member. Images/audio pass through.
 - Upstream error messages, responses to unknown ids, and server-initiated notifications/requests (logging, progress) are anonymized as well. `initialize`, `ping` and list results pass through unchanged.
@@ -250,7 +250,7 @@ Protocol behaviour:
 ## File Layout
 
 ```
-crates/talon-anon/           ← Rust proxy (library + talon-anon-proxy binary)
+crates/talon-anon/           ← Rust proxy (library + talahon-anon-proxy binary)
   fields.yaml                ← copy embedded into the binary at build time (must equal siem's)
 siem/
   opensearch-mcp.sh          ← raw OpenSearch MCP server (used for non-sensitive queries)
@@ -283,7 +283,7 @@ Field definitions live in `siem/anon_proxy/fields.yaml`. To add a new field:
 1. Open `siem/anon_proxy/fields.yaml`
 2. Find the right category (`user`, `hostname`, `email`, `domain`) or add a new one
 3. Add the field name in **underscore notation** (Wazuh/CoPilot convention)
-4. Validate: `talon-anon-proxy --fields siem/anon_proxy/fields.yaml --map /tmp/check.json --check`
+4. Validate: `talahon-anon-proxy --fields siem/anon_proxy/fields.yaml --map /tmp/check.json --check`
 5. Copy it over `crates/talon-anon/fields.yaml`, the default embedded into the binary (and the
    published crate); `cargo test -p talahon-anon` fails while the two differ
 6. Commit and push — other deployments run `git pull` to receive the update
