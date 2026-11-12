@@ -80,7 +80,9 @@ it is invisible to `docker inspect` and to tool subprocesses. The gateway:
 - pins the model to the configured allow-list (unknown model -> default),
 - clamps `max_tokens`, forces `n = 1`, strips server-side knobs such as
   `chat_template`, `logits_processors`, `best_of`, `vllm_xargs`,
-- rate-limits and concurrency-limits per token, caps body size,
+- rate-limits and concurrency-limits per token, caps the requests in flight
+  overall and per lane (see [Capacity between lanes](#capacity-between-lanes)),
+  caps body size,
 - counts usage per group and audits authentication failures.
 
 ## Settings
@@ -98,11 +100,59 @@ it is invisible to `docker inspect` and to tool subprocesses. The gateway:
 | `TALON_VLLM_API_KEY` | — | secret; read from `.env` only, held by the gateway |
 | `TALON_LLM_GATEWAY_PORT` | 3001 | gateway port |
 | `TALON_LLM_GATEWAY_BIND` | auto | override the auto-detected bind address |
+| `TALON_LLM_GATEWAY_RPM` | 120 | requests per minute per run token (`0` disables) |
+| `TALON_LLM_GATEWAY_MAX_CONCURRENT` | 32 | requests in flight across all runs, streams until they end; excess gets `503` + `Retry-After` (`0` disables) |
+| `TALON_LLM_GATEWAY_LANE_SHARE` | 75 | percent of `MAX_CONCURRENT` one lane may hold at a time; excess gets `429` + `Retry-After` (`0` or `100` disables) |
 | `TALON_BLOCKED_HOSTS` | — | hosts routed to 127.0.0.1 in every container |
 
 `TALON_PROVIDER` values other than `vllm` are ignored with a warning, and
 stored group configs that name another provider fall back to the `.env` vLLM
 defaults.
+
+## Capacity between lanes
+
+Every run has its own gateway token (at most 8 requests in flight, 120 per
+minute), and the gateway serves at most `TALON_LLM_GATEWAY_MAX_CONCURRENT`
+requests at a time. On their own these limits would let one lane — several
+runs sharing a lane key, an alert flood for one customer, or a compromised
+agent in a tight loop — hold every slot while interactive analysts and the
+investigation lane get `503`.
+
+The gateway therefore counts the requests in flight per **lane** (the token
+label, which is the lane's IPC key; all tokens of the lane count together)
+and limits one lane to a share of the global cap:
+
+```
+lane limit C = max(1, floor(MAX_CONCURRENT x LANE_SHARE / 100))     default: 24 of 32
+```
+
+- A request from a lane that already holds `C` slots is refused with `429`,
+  `Retry-After: 1` and `"reason": "lane_share_exceeded"` in the error body.
+  Nothing is queued; the agent's client retries with backoff.
+- Below its limit a lane uses free capacity like before; `503` still means
+  that all `MAX_CONCURRENT` slots are taken.
+- **Guarantee:** `k` other lanes together hold at most `k x C` slots, so a
+  lane is never refused for capacity while it holds fewer than
+  `MAX_CONCURRENT - k x C` slots. With the defaults one lane alone can never
+  take the last 8 slots — one run's worth — from the others. To be protected
+  against several saturating lanes at once, lower the share: with
+  `TALON_LLM_GATEWAY_LANE_SHARE=25` every lane keeps 8 slots against up to
+  three saturating lanes.
+- **Not covered:** more saturating lanes than the share allows for (with the
+  default, two lanes at their limit of 24 can fill all 32 slots); fairness of
+  tokens per second on the model server (a slot is a request, whatever its
+  size); and requests admitted before the limit applied (see the next point),
+  which finish normally.
+- The limit applies once the gateway has issued tokens for a second lane. A
+  deployment with a single lane keeps the whole cap, exactly as before. The
+  limit is also off when `MAX_CONCURRENT` is `0` or `1`, and with a share of
+  `0` or `100`.
+
+Operators see throttled lanes in the audit log (`gateway.request`, outcome
+`denied`, actor = lane, `reason: lane_share_exceeded` with `lane_in_flight`
+and `lane_limit`; rate-limited like all gateway denials), in the gateway's
+debug log, and in the gateway statistics (`lane_limited` overall and per
+label, `in_flight_by_lane`).
 
 ## Model selection
 

@@ -10,6 +10,8 @@
 //!                              │ talon-net: header-read timeout, connection caps
 //!                              │ token digest lookup + TTL
 //!                              │ per-token rate limit + in-flight cap (429)
+//!                              │ per-lane share of the global cap (429,
+//!                              │   lane = token label, all its tokens)
 //!                              │ global in-flight cap across tokens (503)
 //!                              │ body size (413) and JSON value budget
 //!                              │ parameter allowlist (unknown fields dropped,
@@ -29,6 +31,7 @@
 //! from the allowlisted fields (see [`CHAT_ALLOWED_FIELDS`] and
 //! [`TOKENIZE_ALLOWED_FIELDS`]).
 
+mod lanes;
 mod policy;
 mod schema;
 mod stats;
@@ -60,7 +63,6 @@ use talon_core::audit::{SharedAuditSink, event};
 use talon_core::protocol::LlmEndpoint;
 use talon_core::provider::DEFAULT_MAX_CONTEXT_TOKENS;
 use talon_core::types::{ProviderKind, VllmConfig};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
@@ -84,6 +86,7 @@ pub use stats::{GatewayStats, LabelStats, MAX_LABELS, OVERFLOW_LABEL};
 pub use talon_net::ServerLimits;
 pub use tokens::TOKEN_PREFIX;
 
+use lanes::{LaneGuard, LaneLimiter, Refusal};
 use policy::{CacheSaltKey, PolicyOutcome, RequestPolicy};
 use stats::StatsRecorder;
 use tokens::{AuthDecision, InFlightGuard, TokenStore, extract_token};
@@ -102,6 +105,11 @@ pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
 pub const DEFAULT_MAX_CONCURRENT_PER_TOKEN: u32 = 8;
 /// Default cap on simultaneous requests across all tokens.
 pub const DEFAULT_MAX_CONCURRENT_REQUESTS: u32 = 32;
+/// Default share (percent) of the global cap one lane may hold once the
+/// gateway serves more than one lane: 24 of the default 32 slots, so 8 —
+/// one run's worth ([`DEFAULT_MAX_CONCURRENT_PER_TOKEN`]) — always stay
+/// available to the other lanes.
+pub const DEFAULT_LANE_SHARE_PERCENT: u32 = 75;
 /// Default cap on open connections (see [`ServerLimits`]).
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 /// Default cap on open connections from one peer IP (one container
@@ -113,6 +121,8 @@ pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
 const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// `Retry-After` (seconds) when the global concurrency cap is reached.
 const OVERLOAD_RETRY_AFTER: &str = "2";
+/// `Retry-After` (seconds) when a lane holds its share of the global cap.
+const LANE_SHARE_RETRY_AFTER: &str = "1";
 /// A streamed response may outlive `request_timeout` by this much before
 /// its slots are reclaimed (covers a client that stopped reading).
 const STREAM_DEADLINE_SLACK: Duration = Duration::from_secs(30);
@@ -163,6 +173,18 @@ pub struct GatewayConfig {
     /// max_body_bytes`). Excess requests get `503` + `Retry-After`. `0`
     /// disables the cap.
     pub max_concurrent_requests: u32,
+    /// Share of `max_concurrent_requests`, in percent, that one lane (token
+    /// label, counted across all of the lane's tokens) may hold at a time:
+    /// the lane limit is `max(1, floor(max_concurrent_requests x
+    /// lane_share_percent / 100))`, see
+    /// [`GatewayConfig::max_concurrent_per_lane`]. A lane at its limit gets
+    /// `429` + `Retry-After` (audit reason `lane_share_exceeded`) while the
+    /// remaining slots stay available to other lanes, so one busy or
+    /// compromised lane cannot take the whole gateway. The limit applies
+    /// once the gateway has issued tokens for more than one label; a
+    /// single-lane deployment keeps the whole global cap. `0` or `>= 100`
+    /// disables it, and so does a global cap of `0` or `1`.
+    pub lane_share_percent: u32,
     /// Send a per-label `cache_salt` (derived from a random per-gateway
     /// secret) with every chat request, so lanes never share vLLM
     /// prefix-cache blocks — otherwise one lane could learn from response
@@ -217,6 +239,7 @@ impl fmt::Debug for GatewayConfig {
             .field("requests_per_minute", &self.requests_per_minute)
             .field("max_concurrent_per_token", &self.max_concurrent_per_token)
             .field("max_concurrent_requests", &self.max_concurrent_requests)
+            .field("lane_share_percent", &self.lane_share_percent)
             .field("cache_salt", &self.cache_salt)
             .field("server_limits", &self.server_limits)
             .field("request_timeout", &self.request_timeout)
@@ -226,7 +249,8 @@ impl fmt::Debug for GatewayConfig {
 
 impl GatewayConfig {
     /// Defaults: `127.0.0.1:3001`, 4 MiB bodies, 16384 output-token cap,
-    /// 120 requests/minute and 8 in flight per token, 32 in flight overall,
+    /// 120 requests/minute and 8 in flight per token, 32 in flight overall
+    /// (at most 75 % of them per lane once there are several lanes),
     /// per-label `cache_salt`, 256 connections (64 per IP), 600 s timeout.
     pub fn new(upstream_base_url: impl Into<String>, default_model: impl Into<String>) -> Self {
         Self {
@@ -242,6 +266,7 @@ impl GatewayConfig {
             requests_per_minute: DEFAULT_REQUESTS_PER_MINUTE,
             max_concurrent_per_token: DEFAULT_MAX_CONCURRENT_PER_TOKEN,
             max_concurrent_requests: DEFAULT_MAX_CONCURRENT_REQUESTS,
+            lane_share_percent: DEFAULT_LANE_SHARE_PERCENT,
             cache_salt: true,
             server_limits: default_server_limits(),
             request_timeout: crate::client::DEFAULT_REQUEST_TIMEOUT,
@@ -295,6 +320,15 @@ impl GatewayConfig {
             self.allowed_models.push(model);
         }
         self
+    }
+
+    /// The most requests one lane may have in flight once the gateway
+    /// serves more than one lane, derived from `max_concurrent_requests`
+    /// and `lane_share_percent`. `None` when lanes are bounded by the
+    /// global cap only (share `0` or `>= 100`, or a global cap of `0` or
+    /// `1`).
+    pub fn max_concurrent_per_lane(&self) -> Option<u32> {
+        lanes::lane_limit(self.max_concurrent_requests, self.lane_share_percent)
     }
 
     fn validate(&self) -> Result<(), LlmError> {
@@ -390,13 +424,10 @@ impl LlmGateway {
             max_output_tokens_cap: config.max_output_tokens_cap,
             cache_salt: config.cache_salt.then(CacheSaltKey::random),
         };
-        let global = (config.max_concurrent_requests > 0).then(|| {
-            Arc::new(Semaphore::new(
-                usize::try_from(config.max_concurrent_requests)
-                    .unwrap_or(usize::MAX)
-                    .min(Semaphore::MAX_PERMITS),
-            ))
-        });
+        let lanes = Arc::new(LaneLimiter::new(
+            config.max_concurrent_requests,
+            config.lane_share_percent,
+        ));
         let state = Arc::new(GatewayState {
             tokens: TokenStore::new(config.requests_per_minute, config.max_concurrent_per_token),
             stats: StatsRecorder::new(),
@@ -405,7 +436,7 @@ impl LlmGateway {
             upstream_auth,
             http,
             policy,
-            global,
+            lanes,
             kill: CancellationToken::new(),
             audit,
             config,
@@ -468,6 +499,7 @@ impl LlmGateway {
             upstream_kind = ?state.config.upstream_kind,
             default_model = %state.config.default_model,
             max_concurrent_requests = state.config.max_concurrent_requests,
+            max_concurrent_per_lane = ?state.config.max_concurrent_per_lane(),
             max_connections = state.config.server_limits.max_connections,
             cache_salt = state.config.cache_salt,
             "LLM gateway listening"
@@ -527,6 +559,8 @@ impl GatewayHandle {
     /// container timeout. Only the token's SHA-256 digest is stored.
     pub fn issue_token(&self, label: &str, ttl: Duration) -> String {
         let token = self.inner.state.tokens.issue(label, ttl);
+        // A second label makes the gateway shared: lane limits apply.
+        self.inner.state.lanes.observe(label);
         tracing::debug!(label, ttl_secs = ttl.as_secs(), "LLM gateway token issued");
         token
     }
@@ -549,12 +583,17 @@ impl GatewayHandle {
         self.inner.state.tokens.revoke_label(label)
     }
 
-    /// Counters and per-label usage.
+    /// Counters, per-label usage and the requests in flight per lane.
     pub fn stats(&self) -> GatewayStats {
-        self.inner
-            .state
-            .stats
-            .snapshot(self.inner.state.tokens.active())
+        let state = &self.inner.state;
+        let mut stats = state.stats.snapshot(state.tokens.active());
+        let (in_flight, by_lane) = state.lanes.in_flight();
+        stats.in_flight = u64::from(in_flight);
+        stats.in_flight_by_lane = by_lane
+            .into_iter()
+            .map(|(lane, n)| (lane, u64::from(n)))
+            .collect();
+        stats
     }
 
     /// The base URL a container uses: `http://<host>:<port>/v1`
@@ -627,8 +666,8 @@ struct GatewayState {
     tokens: TokenStore,
     stats: StatsRecorder,
     policy: RequestPolicy,
-    /// Global in-flight cap (`None` = disabled).
-    global: Option<Arc<Semaphore>>,
+    /// Global in-flight cap and the per-lane share of it.
+    lanes: Arc<LaneLimiter>,
     /// Cancelled at the end of `shutdown`: ends streams still running.
     kill: CancellationToken,
     audit: SharedAuditSink,
@@ -752,10 +791,11 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 }
 
 /// Slots a request holds while it runs: the token's in-flight slot and a
-/// global permit. Dropping it releases both.
+/// slot of the global cap, counted against the token's lane. Dropping it
+/// releases both.
 struct AdmissionGuard {
     _slot: InFlightGuard,
-    _permit: Option<OwnedSemaphorePermit>,
+    _lane: LaneGuard,
 }
 
 /// An authenticated request that got its slots.
@@ -764,8 +804,9 @@ struct Admission {
     guard: AdmissionGuard,
 }
 
-/// Authenticate, rate-limit, take the token's in-flight slot, then a global
-/// permit. Keep the returned guard alive until the response is done.
+/// Authenticate, rate-limit, take the token's in-flight slot, then a slot
+/// of the global cap within the lane's share of it. Keep the returned guard
+/// alive until the response is done.
 fn admit(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -773,36 +814,71 @@ fn admit(
     route: &str,
 ) -> Result<Admission, Box<Response>> {
     let (label, slot) = authenticate(state, headers, remote, route)?;
-    let permit = match &state.global {
-        None => None,
-        Some(sem) => match Arc::clone(sem).try_acquire_owned() {
-            Ok(p) => Some(p),
-            Err(_) => {
-                state.stats.overloaded();
-                tracing::debug!(label, route, "LLM gateway at its global concurrency cap");
-                state.audit_denial(
-                    "gateway.request",
-                    &label,
-                    route,
-                    json!({"reason": "overloaded", "remote": remote.ip().to_string()}),
-                );
-                let mut resp = error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "overloaded_error",
-                    "LLM gateway is at its concurrency limit; retry later",
-                );
-                resp.headers_mut()
-                    .insert(RETRY_AFTER, HeaderValue::from_static(OVERLOAD_RETRY_AFTER));
-                return Err(Box::new(resp));
-            }
-        },
+    let lane = match state.lanes.admit(&label) {
+        Ok(guard) => guard,
+        Err(Refusal::LaneShare { in_flight, limit }) => {
+            state.stats.lane_limited(&label);
+            tracing::debug!(
+                label,
+                route,
+                lane_in_flight = in_flight,
+                lane_limit = limit,
+                "LLM gateway lane at its share of the global concurrency cap"
+            );
+            state.audit_denial(
+                "gateway.request",
+                &label,
+                route,
+                json!({
+                    "reason": "lane_share_exceeded",
+                    "remote": remote.ip().to_string(),
+                    "lane_in_flight": in_flight,
+                    "lane_limit": limit,
+                }),
+            );
+            let body = json!({"error": {
+                "message": "this lane holds its share of the LLM gateway's concurrency; retry later",
+                "type": "rate_limit_error",
+                "code": StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                "reason": "lane_share_exceeded",
+            }});
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(CONTENT_TYPE, "application/json")],
+                body.to_string(),
+            )
+                .into_response();
+            resp.headers_mut().insert(
+                RETRY_AFTER,
+                HeaderValue::from_static(LANE_SHARE_RETRY_AFTER),
+            );
+            return Err(Box::new(resp));
+        }
+        Err(Refusal::Overloaded) => {
+            state.stats.overloaded();
+            tracing::debug!(label, route, "LLM gateway at its global concurrency cap");
+            state.audit_denial(
+                "gateway.request",
+                &label,
+                route,
+                json!({"reason": "overloaded", "remote": remote.ip().to_string()}),
+            );
+            let mut resp = error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                "LLM gateway is at its concurrency limit; retry later",
+            );
+            resp.headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static(OVERLOAD_RETRY_AFTER));
+            return Err(Box::new(resp));
+        }
     };
     state.stats.request(&label);
     Ok(Admission {
         label,
         guard: AdmissionGuard {
             _slot: slot,
-            _permit: permit,
+            _lane: lane,
         },
     })
 }
@@ -1868,22 +1944,32 @@ mod tests {
             assert_eq!(cfg.max_body_bytes, 4 * 1024 * 1024);
             assert_eq!(cfg.max_concurrent_requests, 32);
             assert_eq!(cfg.max_concurrent_per_token, 8);
+            assert_eq!(cfg.lane_share_percent, 75);
+            assert_eq!(cfg.max_concurrent_per_lane(), Some(24));
             assert!(cfg.cache_salt);
             assert_eq!(cfg.server_limits.max_connections, 256);
             assert_eq!(cfg.server_limits.max_connections_per_ip, 64);
             assert!(!cfg.server_limits.header_read_timeout.is_zero());
             let dbg = format!("{cfg:?}");
             assert!(dbg.contains("max_concurrent_requests: 32"), "{dbg}");
+            assert!(dbg.contains("lane_share_percent: 75"), "{dbg}");
         }
+        let mut cfg = GatewayConfig::new("http://x", "m");
+        cfg.lane_share_percent = 100;
+        assert_eq!(cfg.max_concurrent_per_lane(), None);
+        cfg.lane_share_percent = 25;
+        assert_eq!(cfg.max_concurrent_per_lane(), Some(8));
+        cfg.max_concurrent_requests = 0;
+        assert_eq!(cfg.max_concurrent_per_lane(), None);
     }
 
-    fn held_admission(store: &TokenStore, token: &str, sem: &Arc<Semaphore>) -> AdmissionGuard {
-        let AuthDecision::Allowed { guard, .. } = store.authorize(Some(token)) else {
+    fn held_admission(store: &TokenStore, token: &str, lanes: &Arc<LaneLimiter>) -> AdmissionGuard {
+        let AuthDecision::Allowed { guard, label } = store.authorize(Some(token)) else {
             panic!("token must be allowed");
         };
         AdmissionGuard {
             _slot: guard,
-            _permit: Some(Arc::clone(sem).try_acquire_owned().unwrap()),
+            _lane: lanes.admit(&label).unwrap(),
         }
     }
 
@@ -1893,17 +1979,18 @@ mod tests {
     async fn stream_watchdog_releases_slots_at_deadline_or_when_the_stream_ends() {
         let store = TokenStore::new(0, 1);
         let token = store.issue("lane", Duration::from_secs(60));
-        let sem = Arc::new(Semaphore::new(1));
+        let lanes = Arc::new(LaneLimiter::new(1, 75));
 
         let stop = CancellationToken::new();
-        let guard = held_admission(&store, &token, &sem);
+        let guard = held_admission(&store, &token, &lanes);
         spawn_stream_watchdog(
             guard,
             stop.clone(),
             Duration::from_millis(50),
             "lane".into(),
         );
-        assert_eq!(sem.available_permits(), 0);
+        assert_eq!(lanes.in_flight().0, 1);
+        assert_eq!(lanes.in_flight().1["lane"], 1);
         assert!(matches!(
             store.authorize(Some(&token)),
             AuthDecision::TooManyConcurrent { .. }
@@ -1912,12 +1999,12 @@ mod tests {
             .await
             .expect("deadline cancels the stream");
         for _ in 0..200 {
-            if sem.available_permits() == 1 {
+            if lanes.in_flight().0 == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(sem.available_permits(), 1);
+        assert_eq!(lanes.in_flight(), (0, Default::default()));
         assert!(matches!(
             store.authorize(Some(&token)),
             AuthDecision::Allowed { .. }
@@ -1926,7 +2013,7 @@ mod tests {
         // Normal end: the stream's drop guard cancels `stop` long before
         // the deadline.
         let stop = CancellationToken::new();
-        let guard = held_admission(&store, &token, &sem);
+        let guard = held_admission(&store, &token, &lanes);
         spawn_stream_watchdog(
             guard,
             stop.clone(),
@@ -1935,12 +2022,12 @@ mod tests {
         );
         drop(stop.clone().drop_guard());
         for _ in 0..200 {
-            if sem.available_permits() == 1 {
+            if lanes.in_flight().0 == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(sem.available_permits(), 1);
+        assert_eq!(lanes.in_flight(), (0, Default::default()));
     }
 
     #[test]

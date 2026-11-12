@@ -28,6 +28,9 @@ pub struct LabelStats {
     pub errors: u64,
     /// Requests refused by the per-token rate limit.
     pub rate_limited: u64,
+    /// Requests refused because the lane held its share of the global
+    /// concurrency cap.
+    pub lane_limited: u64,
     /// Summed prompt tokens.
     pub prompt_tokens: u64,
     /// Summed completion tokens.
@@ -51,6 +54,9 @@ pub struct GatewayStats {
     pub rate_limited: u64,
     /// Requests refused because the global concurrency cap was reached.
     pub overloaded: u64,
+    /// Requests refused because their lane held its share of the global
+    /// concurrency cap (per lane: [`LabelStats::lane_limited`]).
+    pub lane_limited: u64,
     /// Requests refused by policy (bad JSON, too large, ...).
     pub rejected: u64,
     /// Upstream connection failures / timeouts / upstream auth errors.
@@ -61,6 +67,10 @@ pub struct GatewayStats {
     pub active_tokens: usize,
     /// Per-label accounting.
     pub labels: BTreeMap<String, LabelStats>,
+    /// Requests in flight (streams count until they end).
+    pub in_flight: u64,
+    /// Requests in flight per lane (token label); only lanes that have one.
+    pub in_flight_by_lane: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Default)]
@@ -69,6 +79,7 @@ struct Inner {
     auth_failures: u64,
     rate_limited: u64,
     overloaded: u64,
+    lane_limited: u64,
     rejected: u64,
     upstream_errors: u64,
     dropped_fields: u64,
@@ -123,6 +134,12 @@ impl StatsRecorder {
         self.lock().overloaded += 1;
     }
 
+    pub(crate) fn lane_limited(&self, label: &str) {
+        let mut g = self.lock();
+        g.lane_limited += 1;
+        g.label(label).lane_limited += 1;
+    }
+
     pub(crate) fn dropped_fields(&self, label: &str, n: usize) {
         let n = u64::try_from(n).unwrap_or(u64::MAX);
         let mut g = self.lock();
@@ -169,11 +186,14 @@ impl StatsRecorder {
             auth_failures: g.auth_failures,
             rate_limited: g.rate_limited,
             overloaded: g.overloaded,
+            lane_limited: g.lane_limited,
             rejected: g.rejected,
             upstream_errors: g.upstream_errors,
             dropped_fields: g.dropped_fields,
             active_tokens,
             labels: g.labels.clone(),
+            in_flight: 0,
+            in_flight_by_lane: BTreeMap::new(),
         }
     }
 }
@@ -202,6 +222,7 @@ mod tests {
         s.upstream_error("a");
         s.rejected();
         s.overloaded();
+        s.lane_limited("b");
         s.dropped_fields("a", 3);
         let snap = s.snapshot(3);
         assert_eq!(snap.requests, 2);
@@ -220,6 +241,9 @@ mod tests {
         assert_eq!(a.errors, 1);
         assert_eq!(a.dropped_fields, 3);
         assert_eq!(snap.labels["b"].rate_limited, 1);
+        assert_eq!(snap.lane_limited, 1);
+        assert_eq!(snap.labels["b"].lane_limited, 1);
+        assert_eq!(snap.labels["a"].lane_limited, 0);
     }
 
     #[test]

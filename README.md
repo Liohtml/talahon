@@ -213,7 +213,7 @@ reach.
 | Layer | Defence |
 |---|---|
 | Prompt injection | Untrusted data is wrapped in randomly nonced `<untrusted_data>` envelopes the model is told never to obey; a ~75-rule EN/DE scanner (normalization, base64/exfil decoders, tuned to stay quiet on real SIEM telemetry) flags and audits high-risk content |
-| Model credentials | The vLLM key stays on the host gateway; each run gets a short-lived token (stored as SHA-256, revoked at the end) over stdin, never env. The gateway pins models, clamps tokens, forwards only allowlisted request fields, salts the prefix cache per lane and rate-limits per run and globally |
+| Model credentials | The vLLM key stays on the host gateway; each run gets a short-lived token (stored as SHA-256, revoked at the end) over stdin, never env. The gateway pins models, clamps tokens, forwards only allowlisted request fields, salts the prefix cache per lane, rate-limits per run and globally and caps the share of concurrency one lane may hold |
 | Container | `--cap-drop=ALL` (+ minimal supervisor caps), `no-new-privileges`, read-only rootfs + tmpfs, `--init`, pid/memory/cpu limits, no sudo or node in the image; read-only `CLAUDE.md`, `.mcp.json` and MCP dirs; mounts containing the project root, `store/`, `data/`, `groups/` or `.env` are refused; credential files in any mount are shadowed |
 | Privilege separation | The root supervisor starts each MCP server as its own `mcp-*` user with a private HOME; the agent runs unprivileged and can't read MCP secrets or their process environments |
 | Lane isolation | Every lane is its own principal: it can only message and schedule into itself, touch tasks it owns and never attach scripts; transcripts, reports and archives are per lane |

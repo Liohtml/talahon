@@ -166,6 +166,16 @@ pub fn gateway_config(
             ),
         }
     }
+    if let Some(raw) = config.env.get("TALON_LLM_GATEWAY_LANE_SHARE") {
+        match raw.trim().trim_end_matches('%').trim_end().parse::<u32>() {
+            Ok(percent) => gw.lane_share_percent = percent,
+            Err(_) => tracing::warn!(
+                value = %raw,
+                default = gw.lane_share_percent,
+                "TALON_LLM_GATEWAY_LANE_SHARE is not a percentage; using the default"
+            ),
+        }
+    }
     if let Some(raw) = config.env.get("TALON_LLM_GATEWAY_CACHE_SALT") {
         match parse_bool(&raw) {
             Some(on) => gw.cache_salt = on,
@@ -664,6 +674,7 @@ mod tests {
             "TALON_VLLM_BASE_URL",
             "TALON_VLLM_MODEL",
             "TALON_LLM_GATEWAY_MAX_CONCURRENT",
+            "TALON_LLM_GATEWAY_LANE_SHARE",
             "TALON_LLM_GATEWAY_CACHE_SALT",
         ]
         .iter()
@@ -674,6 +685,24 @@ mod tests {
         let bind: SocketAddr = "127.0.0.1:3999".parse().unwrap();
         let defaults = gateway_config(&cfg(base), &HashMap::new(), bind).unwrap();
         assert!(defaults.cache_salt);
+        assert_eq!(defaults.lane_share_percent, 75);
+        assert_eq!(defaults.max_concurrent_per_lane(), Some(24));
+        for (raw, percent, per_lane) in [
+            ("50", 50, Some(16)),
+            ("25%", 25, Some(8)),
+            ("100", 100, None),
+            ("0", 0, None),
+            ("half", 75, Some(24)),
+        ] {
+            let gw = gateway_config(
+                &cfg(&format!("{base}TALON_LLM_GATEWAY_LANE_SHARE={raw}\n")),
+                &HashMap::new(),
+                bind,
+            )
+            .unwrap();
+            assert_eq!(gw.lane_share_percent, percent, "{raw:?}");
+            assert_eq!(gw.max_concurrent_per_lane(), per_lane, "{raw:?}");
+        }
         let gw = gateway_config(
             &cfg(&format!(
                 "{base}TALON_LLM_GATEWAY_MAX_CONCURRENT=7\nTALON_LLM_GATEWAY_CACHE_SALT=false\n"

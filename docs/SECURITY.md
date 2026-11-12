@@ -63,6 +63,13 @@ containment is what protects the host, the credentials and other tenants.
   pinned, output tokens clamped, a per-lane `cache_salt` separates prefix
   caches; per-token and global concurrency/rate limits, body and JSON-size
   limits.
+- Requests in flight are counted per lane across all of the lane's tokens,
+  and one lane may hold at most `TALON_LLM_GATEWAY_LANE_SHARE` percent of the
+  global cap (default 75 %: 24 of 32). A flooding or compromised lane is
+  refused with `429` (audit reason `lane_share_exceeded`) while the remaining
+  slots stay available to the other lanes; see
+  [PROVIDER_SELECTION.md](PROVIDER_SELECTION.md#capacity-between-lanes) for
+  the exact guarantee.
 
 ### 4. Lanes and IPC
 - The principal for container → host requests is the lane's IPC namespace,
@@ -123,8 +130,13 @@ findings, proofs of concept and their fixes are tracked in
   required.
 - Egress firewall rules are opt-in and must be applied by the operator; they
   survive a reboot only when applied with `--persist` (systemd hosts).
-- There is no global fairness for vLLM capacity between lanes beyond the
-  gateway's concurrency limits.
+- Model capacity is shared between lanes by a per-lane ceiling on requests
+  in flight, not by a scheduler: one lane cannot take the whole gateway, but
+  several lanes saturating it at once (two at the default 75 % share) can
+  still fill it, and request slots do not account for how many tokens a
+  request makes the model server process. Lower
+  `TALON_LLM_GATEWAY_LANE_SHARE` if more lanes must be isolated from each
+  other.
 
 ## Reporting
 

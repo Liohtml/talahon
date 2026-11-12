@@ -70,8 +70,13 @@ Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
   confidentiality control against the model (`opensearch` raw server and
   `deanonymize` remain available).
 - The audit chain is unkeyed; anchor `audit_chain_head()` externally.
-- No fair-share scheduling of vLLM capacity between lanes beyond the
-  gateway's concurrency limits.
+- vLLM capacity between lanes: mitigated, not scheduled. The gateway counts
+  requests in flight per lane and caps one lane at
+  `TALON_LLM_GATEWAY_LANE_SHARE` percent of the global cap (default 75 %,
+  refusal `429` / audit reason `lane_share_exceeded`), so a single flooding or
+  compromised lane can no longer hold every slot. Residual: several lanes
+  saturating at once can still fill the gateway (two at the default share),
+  and slots are requests, not model-server tokens per second.
 - The main group is the root of trust inside Talon.
 - On deployments that ran before the read-only binds existed, reset
   `groups/*/prompts/` and `groups/copilot/notifications.md` from git: content

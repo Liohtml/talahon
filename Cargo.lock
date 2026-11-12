@@ -2018,6 +2018,7 @@ dependencies = [
  "futures",
  "hex",
  "http",
+ "proptest",
  "rand 0.8.8",
  "reqwest",
  "serde",

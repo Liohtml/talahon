@@ -1252,3 +1252,446 @@ async fn per_ip_connection_cap_closes_excess_connections() {
         .unwrap_or(0);
     assert_eq!(n, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Fair share of the global cap between lanes
+// ---------------------------------------------------------------------------
+
+/// A slow (non-streaming) upstream: every completion takes `delay`.
+async fn slow_upstream(delay: Duration) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(completion("slow"))
+                .set_delay(delay),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A gateway over `upstream` with a global cap and a lane share; the
+/// per-token limits are off so that only the caps under test apply.
+async fn start_shared(
+    upstream: String,
+    global: u32,
+    share: u32,
+    tweak: impl FnOnce(&mut GatewayConfig),
+) -> (GatewayHandle, MemoryAuditSink) {
+    let mut cfg = GatewayConfig::new(upstream, "qwen");
+    cfg.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+    cfg.max_concurrent_requests = global;
+    cfg.lane_share_percent = share;
+    cfg.max_concurrent_per_token = 0;
+    cfg.requests_per_minute = 0;
+    cfg.server_limits.shutdown_grace = Duration::from_millis(200);
+    tweak(&mut cfg);
+    let audit = MemoryAuditSink::default();
+    let gw = LlmGateway::start(cfg, Arc::new(audit.clone()))
+        .await
+        .unwrap();
+    (gw, audit)
+}
+
+fn lane_in_flight(gw: &GatewayHandle, lane: &str) -> u64 {
+    gw.stats().in_flight_by_lane.get(lane).copied().unwrap_or(0)
+}
+
+/// Fire `n` chat requests at once, alternating over `tokens`; returns the
+/// status codes.
+async fn burst(gw: &GatewayHandle, tokens: Vec<String>, n: usize) -> Vec<u16> {
+    let body = json!({"messages": []});
+    let sends = (0..n).map(|i| {
+        let token = &tokens[i % tokens.len()];
+        let body = &body;
+        async move { post_chat(gw, token, body).await.status().as_u16() }
+    });
+    futures::future::join_all(sends).await
+}
+
+fn count(statuses: &[u16], status: u16) -> usize {
+    statuses.iter().filter(|s| **s == status).count()
+}
+
+#[tokio::test]
+async fn a_saturating_lane_cannot_push_another_lane_into_a_refusal() {
+    let server = slow_upstream(Duration::from_millis(1500)).await;
+    // 4 slots, 75 % per lane: a lane holds at most 3, one stays reserved.
+    let (gw, audit) = start_shared(server.uri(), 4, 75, |_| {}).await;
+    // The flooding lane has two runs (tokens); the limit spans both.
+    let f1 = gw.issue_token("flood", Duration::from_secs(60));
+    let f2 = gw.issue_token("flood", Duration::from_secs(60));
+    let analyst = gw.issue_token("analyst", Duration::from_secs(60));
+    let body = json!({"messages": []});
+
+    let flood = {
+        let gw = gw.clone();
+        tokio::spawn(async move { burst(&gw, vec![f1, f2], 10).await })
+    };
+    eventually(|| lane_in_flight(&gw, "flood") == 3 && gw.stats().lane_limited == 7).await;
+    // The gateway is contended, and the other lane is still served.
+    let r = post_chat(&gw, &analyst, &body).await;
+    assert_eq!(r.status(), 200, "the reserved slot belongs to other lanes");
+
+    let statuses = flood.await.unwrap();
+    assert_eq!(count(&statuses, 200), 3, "{statuses:?}");
+    assert_eq!(count(&statuses, 429), 7, "{statuses:?}");
+    let stats = gw.stats();
+    assert_eq!(stats.lane_limited, 7);
+    assert_eq!(stats.labels["flood"].lane_limited, 7);
+    assert_eq!(stats.labels["analyst"].lane_limited, 0);
+    assert_eq!(stats.overloaded, 0, "nobody hit the global cap");
+    assert_eq!(stats.rate_limited, 0, "counted apart from the rate limit");
+    assert_eq!(stats.in_flight, 0);
+    assert!(stats.in_flight_by_lane.is_empty());
+
+    // The refusal names its cause in the audit record (actor = lane).
+    let events = audit.snapshot();
+    let denied: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "gateway.request" && e.details["reason"] == "lane_share_exceeded")
+        .collect();
+    assert_eq!(denied.len(), 7);
+    for e in &denied {
+        assert_eq!(e.actor, "flood");
+        assert_eq!(e.outcome, "denied");
+        assert_eq!(e.details["lane_in_flight"], 3);
+        assert_eq!(e.details["lane_limit"], 3);
+        assert_eq!(e.details["remote"], "127.0.0.1");
+    }
+}
+
+#[tokio::test]
+async fn lane_share_refusal_is_a_429_with_a_reason_and_its_audit_is_rate_limited() {
+    let upstream = hanging_sse_upstream().await;
+    let (gw, audit) = start_shared(upstream, 2, 50, |_| {}).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let b = gw.issue_token("b", Duration::from_secs(60));
+    let stream_body = json!({"messages": [], "stream": true});
+
+    // A streamed response holds the lane's slot until the stream ends.
+    let mut held = post_chat(&gw, &a, &stream_body).await;
+    assert_eq!(held.status(), 200);
+    assert!(held.chunk().await.unwrap().is_some());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(lane_in_flight(&gw, "a"), 1, "slot held while streaming");
+
+    let r = post_chat(&gw, &a, &stream_body).await;
+    assert_eq!(r.status(), 429);
+    assert_eq!(r.headers()["retry-after"], "1");
+    let err: Value = r.json().await.unwrap();
+    assert_eq!(err["error"]["type"], "rate_limit_error");
+    assert_eq!(err["error"]["reason"], "lane_share_exceeded");
+    assert_eq!(err["error"]["code"], 429);
+    // Every route is covered, not only chat.
+    let r = http()
+        .get(url(&gw, "/v1/models"))
+        .bearer_auth(&a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+
+    // A hostile lane hammering its limit cannot swamp the audit log.
+    for _ in 0..80 {
+        assert_eq!(post_chat(&gw, &a, &stream_body).await.status(), 429);
+    }
+    assert_eq!(gw.stats().labels["a"].lane_limited, 82);
+    let audited = audit
+        .snapshot()
+        .iter()
+        .filter(|e| e.details["reason"] == "lane_share_exceeded")
+        .count();
+    assert!(
+        (1..=60).contains(&audited),
+        "{audited} audit records for 82 refusals"
+    );
+
+    // The other lane still gets the remaining slot; a second request of
+    // it is refused for the lane's own limit.
+    let mut other = post_chat(&gw, &b, &stream_body).await;
+    assert_eq!(other.status(), 200);
+    assert!(other.chunk().await.unwrap().is_some());
+    assert_eq!(post_chat(&gw, &b, &stream_body).await.status(), 429);
+    assert_eq!(gw.stats().overloaded, 0);
+    assert_eq!(gw.stats().in_flight, 2);
+
+    // The client hanging up mid-stream gives the slot back.
+    drop(held);
+    eventually(|| lane_in_flight(&gw, "a") == 0).await;
+    let mut again = post_chat(&gw, &a, &stream_body).await;
+    assert_eq!(again.status(), 200);
+    assert!(again.chunk().await.unwrap().is_some());
+    drop(again);
+    drop(other);
+    eventually(|| gw.stats().in_flight == 0).await;
+}
+
+#[tokio::test]
+async fn a_lone_lane_keeps_the_whole_cap_until_a_second_lane_exists() {
+    let server = slow_upstream(Duration::from_millis(800)).await;
+    let (gw, audit) = start_shared(server.uri(), 4, 75, |_| {}).await;
+    let s1 = gw.issue_token("solo", Duration::from_secs(60));
+    let s2 = gw.issue_token("solo", Duration::from_secs(60));
+
+    // Single-lane deployment: exactly the behaviour without lane shares.
+    let statuses = burst(&gw, vec![s1.clone(), s2.clone()], 6).await;
+    assert_eq!(count(&statuses, 200), 4, "{statuses:?}");
+    assert_eq!(count(&statuses, 503), 2, "{statuses:?}");
+    assert_eq!(gw.stats().lane_limited, 0);
+    assert_eq!(gw.stats().overloaded, 2);
+
+    // A token for a second lane makes the gateway shared — before that
+    // lane sent anything.
+    let _other = gw.issue_token("other", Duration::from_secs(60));
+    let statuses = burst(&gw, vec![s1.clone(), s2.clone()], 6).await;
+    assert_eq!(count(&statuses, 200), 3, "{statuses:?}");
+    assert_eq!(count(&statuses, 429), 3, "{statuses:?}");
+    assert_eq!(gw.stats().lane_limited, 3);
+    assert_eq!(gw.stats().overloaded, 2, "unchanged");
+    assert!(
+        audit
+            .snapshot()
+            .iter()
+            .any(|e| e.actor == "solo" && e.details["reason"] == "lane_share_exceeded")
+    );
+}
+
+#[tokio::test]
+async fn a_share_of_100_percent_disables_the_lane_limit() {
+    let server = slow_upstream(Duration::from_millis(1000)).await;
+    let (gw, _audit) = start_shared(server.uri(), 4, 100, |_| {}).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let b = gw.issue_token("b", Duration::from_secs(60));
+    let flood = {
+        let gw = gw.clone();
+        tokio::spawn(async move { burst(&gw, vec![a], 4).await })
+    };
+    eventually(|| lane_in_flight(&gw, "a") == 4).await;
+    // The behaviour before lane shares: one lane starves the other.
+    let r = post_chat(&gw, &b, &json!({"messages": []})).await;
+    assert_eq!(r.status(), 503);
+    assert_eq!(flood.await.unwrap(), vec![200; 4]);
+    assert_eq!(gw.stats().lane_limited, 0);
+}
+
+#[tokio::test]
+async fn many_lanes_share_the_cap_and_none_exceeds_its_limit() {
+    let server = slow_upstream(Duration::from_millis(1200)).await;
+    // 6 slots, 34 % -> 2 per lane; 5 lanes ask for 4 each.
+    let (gw, _audit) = start_shared(server.uri(), 6, 34, |_| {}).await;
+    let lanes: Vec<String> = (0..5).map(|i| format!("lane-{i}")).collect();
+    let tokens: Vec<String> = lanes
+        .iter()
+        .map(|l| gw.issue_token(l, Duration::from_secs(60)))
+        .collect();
+    let waves = tokens.iter().map(|t| burst(&gw, vec![t.clone()], 4));
+    let sampler = async {
+        // While the wave runs, no lane is ever seen above its limit.
+        let mut peak = 0;
+        for _ in 0..40 {
+            let stats = gw.stats();
+            assert!(stats.in_flight <= 6, "{stats:?}");
+            for (lane, n) in &stats.in_flight_by_lane {
+                assert!(*n <= 2, "{lane} holds {n}");
+            }
+            peak = peak.max(stats.in_flight);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        peak
+    };
+    let (results, peak) = tokio::join!(futures::future::join_all(waves), sampler);
+    assert_eq!(peak, 6, "the cap is used in full");
+    let mut served = 0;
+    for (lane, statuses) in lanes.iter().zip(&results) {
+        let ok = count(statuses, 200);
+        assert!(ok <= 2, "{lane}: {statuses:?}");
+        assert_eq!(
+            ok + count(statuses, 429) + count(statuses, 503),
+            4,
+            "{lane}: {statuses:?}"
+        );
+        served += ok;
+    }
+    assert_eq!(served, 6, "{results:?}");
+    let stats = gw.stats();
+    assert_eq!(stats.lane_limited + stats.overloaded, 14);
+    assert_eq!(stats.in_flight, 0);
+
+    // k = 2 other lanes hold at most 2 x 2 slots, so a third lane always
+    // gets its 2 (6 - 2 x 2), whatever the two do.
+    let hogs = {
+        let gw = gw.clone();
+        let (t0, t1) = (tokens[0].clone(), tokens[1].clone());
+        tokio::spawn(async move { tokio::join!(burst(&gw, vec![t0], 5), burst(&gw, vec![t1], 5)) })
+    };
+    eventually(|| gw.stats().in_flight == 4).await;
+    let third = burst(&gw, vec![tokens[2].clone()], 2).await;
+    assert_eq!(third, vec![200, 200]);
+    let (h0, h1) = hogs.await.unwrap();
+    assert_eq!(count(&h0, 200), 2);
+    assert_eq!(count(&h1, 200), 2);
+}
+
+#[tokio::test]
+async fn lane_slots_are_released_on_every_exit_path() {
+    // Upstream error status.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&server)
+        .await;
+    let (gw, _audit) = start_shared(server.uri(), 2, 50, |_| {}).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let _b = gw.issue_token("b", Duration::from_secs(60));
+    let body = json!({"messages": []});
+    for _ in 0..5 {
+        assert_eq!(post_chat(&gw, &a, &body).await.status(), 500);
+    }
+    // Refused by policy before the upstream is contacted.
+    for _ in 0..5 {
+        let r = http()
+            .post(url(&gw, "/v1/chat/completions"))
+            .bearer_auth(&a)
+            .header("content-type", "application/json")
+            .body("{not json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+    }
+    assert_eq!(gw.stats().in_flight, 0);
+    assert_eq!(gw.stats().lane_limited, 0, "sequential requests fit in 1");
+
+    // Upstream unreachable.
+    let port = closed_port().await;
+    let (gw, _audit) = start_shared(format!("http://127.0.0.1:{port}"), 2, 50, |_| {}).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let _b = gw.issue_token("b", Duration::from_secs(60));
+    for _ in 0..5 {
+        assert_eq!(post_chat(&gw, &a, &body).await.status(), 502);
+    }
+    assert_eq!(gw.stats().in_flight, 0);
+    assert_eq!(gw.stats().lane_limited, 0);
+
+    // Upstream timeout.
+    let server = slow_upstream(Duration::from_secs(20)).await;
+    let (gw, _audit) = start_shared(server.uri(), 2, 50, |c| {
+        c.request_timeout = Duration::from_millis(150);
+    })
+    .await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let _b = gw.issue_token("b", Duration::from_secs(60));
+    for _ in 0..3 {
+        assert_eq!(post_chat(&gw, &a, &body).await.status(), 504);
+    }
+    assert_eq!(gw.stats().in_flight, 0);
+    assert_eq!(gw.stats().lane_limited, 0);
+
+    // The client gives up while the gateway waits for the upstream.
+    let server = slow_upstream(Duration::from_secs(20)).await;
+    let (gw, _audit) = start_shared(server.uri(), 2, 50, |_| {}).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let _b = gw.issue_token("b", Duration::from_secs(60));
+    let impatient = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(600))
+        .build()
+        .unwrap();
+    let pending = impatient
+        .post(url(&gw, "/v1/chat/completions"))
+        .bearer_auth(&a)
+        .json(&body)
+        .send();
+    let (r, ()) = tokio::join!(pending, async {
+        eventually(|| lane_in_flight(&gw, "a") == 1).await;
+    });
+    assert!(r.unwrap_err().is_timeout());
+    eventually(|| gw.stats().in_flight == 0).await;
+    assert!(gw.stats().in_flight_by_lane.is_empty());
+
+    // A stream that ends normally.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(tool_call_stream(), "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+    let (gw, _audit) = start_shared(server.uri(), 2, 50, |_| {}).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let _b = gw.issue_token("b", Duration::from_secs(60));
+    for _ in 0..5 {
+        let r = post_chat(&gw, &a, &json!({"messages": [], "stream": true})).await;
+        assert_eq!(r.status(), 200);
+        r.text().await.unwrap();
+        eventually(|| gw.stats().in_flight == 0).await;
+    }
+    assert_eq!(gw.stats().lane_limited, 0);
+}
+
+#[tokio::test]
+async fn shutdown_returns_the_lane_slots_of_streams_still_open() {
+    let upstream = hanging_sse_upstream().await;
+    let (gw, _audit) = start_shared(upstream, 2, 50, |_| {}).await;
+    let a = gw.issue_token("a", Duration::from_secs(60));
+    let _b = gw.issue_token("b", Duration::from_secs(60));
+    let stream_body = json!({"messages": [], "stream": true});
+    let mut held = post_chat(&gw, &a, &stream_body).await;
+    assert!(held.chunk().await.unwrap().is_some());
+    assert_eq!(lane_in_flight(&gw, "a"), 1);
+    // The stream's stop token is cancelled (as at the per-stream
+    // deadline): the slot comes back although the client never hung up.
+    gw.shutdown().await;
+    eventually(|| gw.stats().in_flight == 0).await;
+    drop(held);
+}
+
+#[tokio::test]
+async fn revoking_a_token_neither_frees_nor_evades_its_lanes_share() {
+    let upstream = hanging_sse_upstream().await;
+    let (gw, _audit) = start_shared(upstream, 4, 75, |_| {}).await;
+    let t1 = gw.issue_token("r", Duration::from_secs(60));
+    let other = gw.issue_token("other", Duration::from_secs(60));
+    let stream_body = json!({"messages": [], "stream": true});
+    let mut streams = Vec::new();
+    for _ in 0..3 {
+        let mut s = post_chat(&gw, &t1, &stream_body).await;
+        assert_eq!(s.status(), 200);
+        assert!(s.chunk().await.unwrap().is_some());
+        streams.push(s);
+    }
+    assert_eq!(lane_in_flight(&gw, "r"), 3);
+
+    // Revoked mid-flight: the token is dead, its open streams still count.
+    assert!(gw.revoke(&t1));
+    assert_eq!(post_chat(&gw, &t1, &stream_body).await.status(), 401);
+    assert_eq!(lane_in_flight(&gw, "r"), 3);
+    // A fresh token for the same lane inherits the lane's count.
+    let t2 = gw.issue_token("r", Duration::from_secs(60));
+    let r = post_chat(&gw, &t2, &stream_body).await;
+    assert_eq!(r.status(), 429);
+    let err: Value = r.json().await.unwrap();
+    assert_eq!(err["error"]["reason"], "lane_share_exceeded");
+    // ... and so does `revoke_label`.
+    assert_eq!(gw.revoke_label("r"), 1);
+    assert_eq!(lane_in_flight(&gw, "r"), 3);
+    // The other lane is unaffected throughout.
+    let mut o = post_chat(&gw, &other, &stream_body).await;
+    assert_eq!(o.status(), 200);
+    assert!(o.chunk().await.unwrap().is_some());
+    drop(o);
+
+    // The slots come back when the streams end.
+    streams.clear();
+    eventually(|| gw.stats().in_flight == 0).await;
+    let t3 = gw.issue_token("r", Duration::from_secs(60));
+    let mut s = post_chat(&gw, &t3, &stream_body).await;
+    assert_eq!(s.status(), 200);
+    assert!(s.chunk().await.unwrap().is_some());
+    assert_eq!(lane_in_flight(&gw, "r"), 1);
+}
