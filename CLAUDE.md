@@ -19,7 +19,7 @@ One host process (`talon`) receives alerts and chat through channels (CoPilot HT
 | `crates/talon-intel/` | IOC / MITRE / triage / report engine and intel tools |
 | `crates/talon-http/` | CoPilot HTTP API channel (its contract is pinned on the CoPilot side in [Liohtml/CoPilot](https://github.com/Liohtml/CoPilot) `crates/copilot-talon/src/contract.rs`; change both together) |
 | `container/` | Agent image (`Dockerfile`, `entrypoint.sh`, `build.sh`) |
-| `groups/{name}/CLAUDE.md` | Per-group agent instructions and memory |
+| `groups/{name}/AGENT.md` | Per-group agent instructions (trusted, read-only in containers; a legacy `CLAUDE.md` is still read). Agent notes live in `MEMORY.md` |
 | `groups/copilot/prompts/` | Alert-type investigation templates |
 | `siem/`, `mysql/`, `*-mcp/`, `mempalace/` | MCP server wrappers (+ gitignored `.env` credentials) |
 

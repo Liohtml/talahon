@@ -2,7 +2,7 @@
 //!
 //! A *lane* is one addressable conversation: a JID with its own agent
 //! session, IPC namespace, queue slot and outbound writer. Several lanes may
-//! share a group folder (same CLAUDE.md, prompts and mounts) — that is how
+//! share a group folder (same AGENT.md, prompts and mounts) — that is how
 //! the CoPilot channel runs chat and alert investigations as separate
 //! conversations without duplicating group content on disk.
 

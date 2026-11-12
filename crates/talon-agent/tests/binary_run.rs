@@ -74,7 +74,7 @@ impl Workspace {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
         std::fs::write(
-            root.join("group/CLAUDE.md"),
+            root.join("group/AGENT.md"),
             "# Test group\nAlways be brief.",
         )
         .unwrap();

@@ -20,7 +20,7 @@ Those are operator tasks on the host (`talon setup <step>`, `.env`,
 | Container path | Host path | Access |
 |---|---|---|
 | `/workspace/project` | project root (`.env` files and MCP credentials shadowed) | read-only |
-| `/workspace/group` | `groups/main/` | read-write (`CLAUDE.md`, `.mcp.json` read-only) |
+| `/workspace/group` | `groups/main/` | read-write (`AGENT.md`, `.mcp.json` read-only) |
 | `/workspace/global` | `groups/global/` | read-only |
 | `/workspace/ipc` | this lane's IPC directory | read-write |
 
@@ -55,7 +55,7 @@ echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).jso
    `requiresTrigger`.
 4. Folder names are channel-prefixed, lowercase, with hyphens:
    Telegram "SOC Team" → `telegram_soc-team`.
-5. The group folder is created automatically. Its `CLAUDE.md` is maintained by
+5. The group folder is created automatically. Its `AGENT.md` is maintained by
    the operator on the host; tell the operator what it should contain.
 
 Removing a group, extra mounts and per-group container settings are operator
@@ -96,7 +96,7 @@ numbers).
 
 ## Global instructions
 
-`groups/global/CLAUDE.md` is shared by every group and read-only inside
+`groups/global/AGENT.md` is shared by every group and read-only inside
 containers. When asked to "remember something globally", tell the operator
 exactly what to add on the host.
 

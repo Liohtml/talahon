@@ -22,7 +22,7 @@
 //! - [`model`]    — model settings + request builders over `ChatBackend`
 //! - [`session`]  — JSONL transcripts under `<state>/sessions/<uuid>.jsonl`
 //! - [`ipc`]      — follow-up input files and the `_close` sentinel
-//! - [`prompt`]   — system prompt (byte-stable, read-only `CLAUDE.md`) and
+//! - [`prompt`]   — system prompt (byte-stable, read-only `AGENT.md`) and
 //!   turn messages (fenced `MEMORY.md`, run notes)
 //! - [`tools`]    — tool registry, parallel execution, truncation, loop guard,
 //!   untrusted-output fencing

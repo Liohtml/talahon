@@ -15,6 +15,7 @@
 pub mod auth;
 pub mod egress;
 pub mod injection;
+pub mod instructions;
 pub mod ipc_authz;
 pub mod mounts;
 pub mod redact;

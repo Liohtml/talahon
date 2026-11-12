@@ -10,7 +10,7 @@
 //!
 //! Messages are appended as they happen; compaction rewrites the file
 //! atomically (temp file + rename). The system prompt is never stored — it is
-//! rebuilt on every run so `CLAUDE.md` edits take effect. Ids must be
+//! rebuilt on every run so `AGENT.md` edits take effect. Ids must be
 //! canonical hyphenated UUIDs, so an id can never traverse out of the
 //! sessions directory. Loading tolerates a torn last line and repairs
 //! tool-call/result pairing (see [`sanitize_history`]).

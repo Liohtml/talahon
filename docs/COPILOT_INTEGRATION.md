@@ -60,7 +60,7 @@ This document describes the architecture for integrating the Talon AI analyst wi
 │    Runs full investigation per alert                │
 │                                                     │
 │  Copilot container agent                            │
-│    groups/copilot/CLAUDE.md   ← investigation flow  │
+│    groups/copilot/AGENT.md    ← investigation flow  │
 │    groups/copilot/prompts/    ← per-alert templates │
 └─────────────────────────────────────────────────────┘
 ```
@@ -126,7 +126,7 @@ Both paths feed the same investigation workflow and write back through the same 
 
 ## Investigation Workflow (Agent-Side)
 
-The copilot agent follows these steps for every alert, defined in `groups/copilot/CLAUDE.md`:
+The copilot agent follows these steps for every alert, defined in `groups/copilot/AGENT.md`:
 
 1. **Pull alert from MySQL** — `incident_management_alert` + `incident_management_asset`
 2. **Fetch raw SIEM event + index mapping** — `get_document` and `get_index` in parallel. The mapping confirms exact field names and types before any search query is built.
@@ -517,7 +517,7 @@ Talon is the sole owner of MemPalace — every palace interaction from CoPilot g
 
 **MemPalace room taxonomy for reviews**
 
-Reuse the existing taxonomy from `groups/copilot/CLAUDE.md` — no new rooms needed for teach-the-palace. One new room for tracking review signals themselves:
+Reuse the existing taxonomy from `groups/copilot/AGENT.md` — no new rooms needed for teach-the-palace. One new room for tracking review signals themselves:
 
 | Wing | Room | What goes here |
 |---|---|---|
@@ -554,7 +554,7 @@ Reviews can generate lessons fast. Two guards keep the palace useful:
 | # | Item | Owner | Status |
 |---|------|-------|--------|
 | 1 | Alert-type prompt templates (`sysmon_event_1.txt`) | Talon | ✅ Done |
-| 2 | Investigation workflow + index mapping step (CLAUDE.md) | Talon | ✅ Done |
+| 2 | Investigation workflow + index mapping step (AGENT.md) | Talon | ✅ Done |
 | 3 | Upgraded scheduled task (full investigation per alert) | Talon | ✅ Done |
 | 4 | MySQL schema: `ai_analyst_job/report/ioc` tables | CoPilot | ✅ Done |
 | 5 | CoPilot write-back REST API endpoints | CoPilot | ✅ Done |

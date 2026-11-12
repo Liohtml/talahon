@@ -63,6 +63,11 @@ Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
 | N-9 | Fixed — unlimited-depth scan, git-config credentials, extended credential names |
 | N-10 | Fixed — MCP commands under agent-writable project dirs refused |
 
+Later change: the instructions file of MYTH-09 was renamed from `CLAUDE.md`
+to `AGENT.md`, with `CLAUDE.md` still read as a fallback. Both names are
+read-only binds of one source on every run, so the second name does not
+reopen the finding; see [SECURITY.md](SECURITY.md#boundaries).
+
 ### Accepted residual risks
 - Prompt injection is inherent; containment (per-lane isolation, privilege
   separation, egress firewall) is the control. `talon setup egress --apply`

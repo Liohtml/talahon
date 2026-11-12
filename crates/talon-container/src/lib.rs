@@ -11,7 +11,7 @@
 //!   with `.env*` shadowed, sessions at `/home/agent/.talon`, IPC, allowlisted
 //!   extras refused near host secrets and scanned for credential files,
 //!   per-MCP secret staging + shadowing by canonical host path, read-only
-//!   `.mcp.json`, `CLAUDE.md` and `prompts/`, symlinked lane directories
+//!   `.mcp.json`, `AGENT.md` (or the legacy `CLAUDE.md`) and `prompts/`, symlinked lane directories
 //!   refused).
 //! - [`palace`]: the hardened one-shot `run` for host-side MemPalace calls.
 //! - [`args`]: the hardened `run` argument vector of §3.3 (capabilities,
@@ -45,8 +45,9 @@ pub mod snapshot;
 
 pub use args::{ResourceLimits, RunAs, build_run_args, container_name};
 pub use mounts::{
-    GROUP_INSTRUCTIONS_FILE, GROUP_MEMORY_FILE, GROUP_PROMPTS_DIR, ISOLATED_MCPS, MountLayout,
-    MountOptions, MountRequest, SecretScanLimits, VolumeMount, build_mounts,
+    GROUP_INSTRUCTIONS_FILE, GROUP_LEGACY_INSTRUCTIONS_FILE, GROUP_MEMORY_FILE, GROUP_PROMPTS_DIR,
+    ISOLATED_MCPS, MountLayout, MountOptions, MountRequest, SecretScanLimits, VolumeMount,
+    build_mounts,
 };
 pub use palace::{MCP_PALACE_GID, MCP_PALACE_UID, PalaceRunSpec, build_palace_run_args};
 pub use parser::{OutputParser, ParseEvent};

@@ -11,7 +11,7 @@
 //! | `vllm`        | `CHECK_VLLM`        | `GET <base>/v1/models`, model served                 |
 //! | `container`   | `SETUP_CONTAINER`   | build + smoke-test the agent image                   |
 //! | `groups`      | `SYNC_GROUPS`       | chat discovery report, `--list`                      |
-//! | `register`    | `REGISTER_CHANNEL`  | register a chat, create its folder / `CLAUDE.md`     |
+//! | `register`    | `REGISTER_CHANNEL`  | register a chat, create its folder / `AGENT.md`      |
 //! | `mounts`      | `CONFIGURE_MOUNTS`  | write the mount allowlist                            |
 //! | `egress`      | `SETUP_EGRESS`      | firewall for the agent bridge (print / `--apply`)    |
 //! | `service`     | `SETUP_SERVICE`     | systemd (hardened) / launchd / nohup                 |

@@ -1,5 +1,5 @@
 //! Step `register`: register a chat (JID) as
-//! a group, create its folder and `CLAUDE.md`, and optionally rename the
+//! a group, create its folder and `AGENT.md`, and optionally rename the
 //! assistant.
 //!
 //! Arguments: `--jid`, `--name`, `--trigger`, `--folder` (required),
@@ -9,10 +9,16 @@
 //! Hardening: every input is validated (no
 //! control characters, bounded lengths, quote-free assistant name), the
 //! group folder is resolved traversal-safe, re-registering keeps an existing
-//! group's container config and lane settings, and `CLAUDE.md` files are
+//! group's container config and lane settings, and instruction files are
 //! never written through symlinks (group folders are agent-writable).
+//!
+//! Instructions live in `AGENT.md`; a folder that still has the legacy
+//! `CLAUDE.md` keeps it (same precedence as for a run, see
+//! `talon_security::instructions`): no `AGENT.md` is created next to it and
+//! the assistant is renamed in the file that is in use.
 
 use std::io;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -20,16 +26,14 @@ use regex::{NoExpand, Regex};
 use talon_core::paths::{group_folder_path, is_valid_group_folder};
 use talon_core::time::now_iso;
 use talon_core::types::RegisteredGroup;
+use talon_security::instructions::{self, AGENT_INSTRUCTIONS_FILE, InstructionFiles};
 
 use super::StepArgs;
 use crate::context::{SETUP_LOG, SetupContext};
-use crate::fsutil::{
-    exists_nofollow, file_mode, is_real_dir, is_regular_file_nofollow, read_env_value,
-    upsert_env_line, write_atomic,
-};
+use crate::fsutil::{file_mode, is_real_dir, read_env_value, upsert_env_line, write_atomic};
 use crate::status::{StatusBlock, StepOutcome};
 
-/// The assistant name the shipped `CLAUDE.md` templates use.
+/// The assistant name the shipped `AGENT.md` templates use.
 pub const DEFAULT_ASSISTANT_NAME: &str = "Talon";
 
 const MAX_JID_LEN: usize = 256;
@@ -54,7 +58,7 @@ pub struct RegisterRequest {
     pub requires_trigger: bool,
     /// Register as the main control group.
     pub is_main: bool,
-    /// Assistant name to apply to `CLAUDE.md` files and `.env`; empty
+    /// Assistant name to apply to the instruction files and `.env`; empty
     /// keeps the current one.
     pub assistant_name: String,
 }
@@ -147,10 +151,13 @@ fn failed(error: &str) -> StepOutcome {
     )
 }
 
-/// Create `groups/<folder>/logs` and, if the folder has no `CLAUDE.md`
-/// yet, copy the main (`groups/main`) or global (`groups/global`) template.
-/// An existing `CLAUDE.md` (or anything at that path, including a symlink)
-/// is never overwritten. Returns whether a template was copied.
+/// Create `groups/<folder>/logs` and, if the folder has neither an
+/// `AGENT.md` nor a legacy `CLAUDE.md` yet, copy the main (`groups/main`)
+/// or global (`groups/global`) template to `AGENT.md`. The template is the
+/// folder's `AGENT.md`, or its `CLAUDE.md` while `AGENT.md` has no content.
+/// An existing file of either name (or anything at those paths, including
+/// a symlink) is never overwritten, and no `AGENT.md` is put next to an
+/// existing `CLAUDE.md`. Returns whether a template was copied.
 ///
 /// # Errors
 /// Invalid folder names and I/O errors.
@@ -162,20 +169,34 @@ pub fn prepare_group_folder(
     let group_dir = group_folder_path(groups_dir, folder)?;
     std::fs::create_dir_all(group_dir.join("logs"))
         .with_context(|| format!("creating {}", group_dir.display()))?;
-    let dest = group_dir.join("CLAUDE.md");
-    if exists_nofollow(&dest) {
+    let dir = instructions::open_dir(&group_dir)
+        .with_context(|| format!("opening {}", group_dir.display()))?;
+    let existing = InstructionFiles::inspect_at(dir.as_fd())
+        .with_context(|| format!("inspecting the instructions in {}", group_dir.display()))?;
+    if !existing.is_vacant() {
         return Ok(false);
     }
-    let template = groups_dir
-        .join(if is_main { "main" } else { "global" })
-        .join("CLAUDE.md");
-    if !is_regular_file_nofollow(&template) {
+    let template_dir = groups_dir.join(if is_main { "main" } else { "global" });
+    if !is_real_dir(&template_dir) {
         return Ok(false);
     }
+    // No template when either name there is a symlink or another
+    // non-regular entry (`groups/main` is writable by the main agent).
+    let Ok(Ok(Some(name))) = InstructionFiles::inspect(&template_dir).map(|f| f.source()) else {
+        return Ok(false);
+    };
+    let template = template_dir.join(name);
     let content =
         std::fs::read(&template).with_context(|| format!("reading {}", template.display()))?;
-    write_atomic(&dest, &content, file_mode(&template))?;
-    tracing::info!(file = %dest.display(), template = %template.display(), "Created CLAUDE.md from template");
+    let dest = group_dir.join(AGENT_INSTRUCTIONS_FILE);
+    // `O_CREAT | O_EXCL | O_NOFOLLOW`: an entry that appeared meanwhile is
+    // kept, never replaced or written through.
+    match instructions::create_new_at(dir.as_fd(), AGENT_INSTRUCTIONS_FILE, &content) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("creating {}", dest.display())),
+    }
+    tracing::info!(file = %dest.display(), template = %template.display(), "Created AGENT.md from template");
     Ok(true)
 }
 
@@ -196,8 +217,11 @@ pub fn rename_assistant(content: &str, old_name: &str, new_name: &str) -> String
     )
 }
 
-/// Apply [`rename_assistant`] to `groups/*/CLAUDE.md`, skipping symlinked
-/// folders and files. Returns the files changed.
+/// Apply [`rename_assistant`] to the instructions of every group folder:
+/// `groups/*/AGENT.md`, or the legacy `groups/*/CLAUDE.md` where that is
+/// still the file in use. Symlinked folders are skipped, and so is a folder
+/// in which either name is a symlink or another non-regular entry. Returns
+/// the files changed.
 ///
 /// # Errors
 /// I/O errors reading the groups directory or writing a file.
@@ -218,15 +242,15 @@ pub fn apply_assistant_name(
         if !is_real_dir(&dir) {
             continue;
         }
-        let md = dir.join("CLAUDE.md");
-        if !is_regular_file_nofollow(&md) {
+        let Ok(Ok(Some(name))) = InstructionFiles::inspect(&dir).map(|f| f.source()) else {
             continue;
-        }
+        };
+        let md = dir.join(name);
         let content = std::fs::read_to_string(&md)?;
         let updated = rename_assistant(&content, old_name, new_name);
         if updated != content {
             write_atomic(&md, updated.as_bytes(), file_mode(&md))?;
-            tracing::info!(file = %md.display(), "Updated CLAUDE.md");
+            tracing::info!(file = %md.display(), "Updated the assistant name");
             changed.push(md);
         }
     }
@@ -484,10 +508,12 @@ mod tests {
         std::fs::create_dir_all(groups.join("main")).unwrap();
         std::fs::create_dir_all(groups.join("global")).unwrap();
         std::fs::write(
-            groups.join("main/CLAUDE.md"),
+            groups.join("main/AGENT.md"),
             "# Talon\n\nYou are Talon, a personal assistant.\n\n## Admin Context\n\nThis is the **main channel**.",
         )
         .unwrap();
+        // The global template is still under the legacy name on purpose:
+        // every test that copies it covers the fallback.
         std::fs::write(
             groups.join("global/CLAUDE.md"),
             "# Talon\n\nYou are Talon, a personal assistant.",
@@ -504,7 +530,10 @@ mod tests {
     }
 
     fn read(f: &Fixture, folder: &str) -> String {
-        std::fs::read_to_string(f.groups.join(folder).join("CLAUDE.md")).unwrap()
+        let dir = f.groups.join(folder);
+        std::fs::read_to_string(dir.join("AGENT.md"))
+            .or_else(|_| std::fs::read_to_string(dir.join("CLAUDE.md")))
+            .unwrap()
     }
 
     #[test]
@@ -585,11 +614,11 @@ mod tests {
     }
 
     #[test]
-    fn never_overwrites_existing_claude_md() {
+    fn never_overwrites_existing_agent_md() {
         let f = fixture();
         simulate(&f, "slack_main", true, "Talon");
         std::fs::write(
-            f.groups.join("slack_main/CLAUDE.md"),
+            f.groups.join("slack_main/AGENT.md"),
             "# Gambi\n\nCustom persona with workspace rules and family context.",
         )
         .unwrap();
@@ -604,7 +633,7 @@ mod tests {
         let f = fixture();
         simulate(&f, "whatsapp_casa", false, "Talon");
         std::fs::write(
-            f.groups.join("whatsapp_casa/CLAUDE.md"),
+            f.groups.join("whatsapp_casa/AGENT.md"),
             "# Casa\n\nFamily group with PARA system, task management, shopping lists.",
         )
         .unwrap();
@@ -620,7 +649,7 @@ mod tests {
         simulate(&f, "whatsapp_main", true, "Talon");
         simulate(&f, "discord_main", false, "Talon");
         std::fs::write(
-            f.groups.join("discord_main/CLAUDE.md"),
+            f.groups.join("discord_main/AGENT.md"),
             "# Gambi HQ — Research Assistant\n\nResearch workflows for Laura and Ethan.",
         )
         .unwrap();
@@ -633,31 +662,118 @@ mod tests {
     fn missing_templates_are_fine() {
         let f = fixture();
         std::fs::remove_file(f.groups.join("global/CLAUDE.md")).unwrap();
-        std::fs::remove_file(f.groups.join("main/CLAUDE.md")).unwrap();
+        std::fs::remove_file(f.groups.join("main/AGENT.md")).unwrap();
         simulate(&f, "discord_general", false, "Talon");
+        assert!(!f.groups.join("discord_general/AGENT.md").exists());
         assert!(!f.groups.join("discord_general/CLAUDE.md").exists());
     }
 
+    /// A folder from before the rename keeps its `CLAUDE.md`: no `AGENT.md`
+    /// is created next to it (it would take precedence over the operator's
+    /// file), and the assistant is renamed where the instructions are.
     #[test]
-    fn symlinked_claude_md_is_neither_followed_nor_replaced() {
+    fn legacy_claude_md_is_kept_and_renamed_in_place() {
         let f = fixture();
-        let outside = f.groups.parent().unwrap().join("authorized_keys");
-        std::fs::write(&outside, "You are Talon ssh-ed25519 AAAA").unwrap();
-        std::fs::create_dir_all(f.groups.join("evil")).unwrap();
-        std::os::unix::fs::symlink(&outside, f.groups.join("evil/CLAUDE.md")).unwrap();
-        // Template copy must not write through the (dangling or not) link.
-        simulate(&f, "evil", false, "Talon");
+        let dir = f.groups.join("telegram_old");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "# Talon\n\nYou are Talon. Custom.").unwrap();
+        assert!(!prepare_group_folder(&f.groups, "telegram_old", false).unwrap());
+        assert!(!prepare_group_folder(&f.groups, "telegram_old", true).unwrap());
+        assert!(!dir.join("AGENT.md").exists());
+
+        let changed = apply_assistant_name(&f.groups, "Talon", "Nova").unwrap();
+        assert!(changed.contains(&dir.join("CLAUDE.md")));
+        assert!(changed.contains(&f.groups.join("global/CLAUDE.md")));
+        assert!(changed.contains(&f.groups.join("main/AGENT.md")));
+        assert_eq!(changed.len(), 3);
         assert_eq!(
-            std::fs::read_to_string(&outside).unwrap(),
-            "You are Talon ssh-ed25519 AAAA"
+            std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap(),
+            "# Nova\n\nYou are Nova. Custom."
         );
-        // Renaming skips the symlink too.
-        simulate(&f, "other", false, "Nova");
+        assert!(!dir.join("AGENT.md").exists());
+
+        // After the first run the host has put a mount-point stub at
+        // AGENT.md: it is neither a template target nor renamed, and the
+        // CLAUDE.md next to it stays the file in use.
+        std::fs::write(dir.join("AGENT.md"), instructions::AGENT_MOUNT_STUB).unwrap();
+        assert!(!prepare_group_folder(&f.groups, "telegram_old", false).unwrap());
+        let changed = apply_assistant_name(&f.groups, "Nova", "Atlas").unwrap();
+        assert!(changed.contains(&dir.join("CLAUDE.md")));
+        assert!(!changed.contains(&dir.join("AGENT.md")));
         assert_eq!(
-            std::fs::read_to_string(&outside).unwrap(),
-            "You are Talon ssh-ed25519 AAAA"
+            std::fs::read_to_string(dir.join("AGENT.md")).unwrap(),
+            instructions::AGENT_MOUNT_STUB
         );
-        assert!(read(&f, "other").contains("You are Nova"));
+
+        // Both names with content: AGENT.md is the one in use.
+        std::fs::write(dir.join("AGENT.md"), "You are Atlas. New.").unwrap();
+        let changed = apply_assistant_name(&f.groups, "Atlas", "Luna").unwrap();
+        assert!(changed.contains(&dir.join("AGENT.md")));
+        assert!(!changed.contains(&dir.join("CLAUDE.md")));
+        assert!(
+            std::fs::read_to_string(dir.join("CLAUDE.md"))
+                .unwrap()
+                .contains("You are Atlas")
+        );
+    }
+
+    /// The template folder follows the same precedence, and the mount-point
+    /// stub of a legacy template folder is never copied.
+    #[test]
+    fn template_precedence_agent_md_then_legacy() {
+        let f = fixture();
+        // global: CLAUDE.md only (fixture).
+        simulate(&f, "a", false, "Talon");
+        assert!(read(&f, "a").contains("You are Talon, a personal assistant."));
+        std::fs::write(
+            f.groups.join("global/AGENT.md"),
+            instructions::AGENT_MOUNT_STUB,
+        )
+        .unwrap();
+        simulate(&f, "b", false, "Talon");
+        assert_eq!(read(&f, "b"), read(&f, "a"));
+        std::fs::write(f.groups.join("global/AGENT.md"), "new global").unwrap();
+        simulate(&f, "c", false, "Talon");
+        assert_eq!(read(&f, "c"), "new global");
+    }
+
+    #[test]
+    fn symlinked_instructions_are_neither_followed_nor_replaced() {
+        for (planted, other) in [("CLAUDE.md", "AGENT.md"), ("AGENT.md", "CLAUDE.md")] {
+            let f = fixture();
+            let outside = f.groups.parent().unwrap().join("authorized_keys");
+            std::fs::write(&outside, "You are Talon ssh-ed25519 AAAA").unwrap();
+            std::fs::create_dir_all(f.groups.join("evil")).unwrap();
+            std::os::unix::fs::symlink(&outside, f.groups.join("evil").join(planted)).unwrap();
+            // Template copy must not write through the (dangling or not)
+            // link, nor create the other name next to it.
+            simulate(&f, "evil", false, "Talon");
+            assert_eq!(
+                std::fs::read_to_string(&outside).unwrap(),
+                "You are Talon ssh-ed25519 AAAA"
+            );
+            assert!(std::fs::symlink_metadata(f.groups.join("evil").join(other)).is_err());
+            // Renaming skips the symlink too, even when the other name is a
+            // regular file with content.
+            std::fs::write(f.groups.join("evil").join(other), "You are Talon.").unwrap();
+            simulate(&f, "other", false, "Nova");
+            assert_eq!(
+                std::fs::read_to_string(&outside).unwrap(),
+                "You are Talon ssh-ed25519 AAAA"
+            );
+            assert_eq!(
+                std::fs::read_to_string(f.groups.join("evil").join(other)).unwrap(),
+                "You are Talon."
+            );
+            assert!(read(&f, "other").contains("You are Nova"));
+        }
+        // A symlinked template is not copied, whichever name it has.
+        let f = fixture();
+        let secret = f.groups.parent().unwrap().join("secret");
+        std::fs::write(&secret, "TOP-SECRET").unwrap();
+        std::os::unix::fs::symlink(&secret, f.groups.join("global/AGENT.md")).unwrap();
+        simulate(&f, "t", false, "Talon");
+        assert!(!f.groups.join("t/AGENT.md").exists());
     }
 
     // --- end to end (with the real talon-db) ---------------------------------
@@ -684,7 +800,7 @@ mod tests {
         assert_eq!(b.get("CHANNEL"), Some("telegram"));
         assert_eq!(b.get("UPDATED_EXISTING"), Some("false"));
         assert!(
-            std::fs::read_to_string(root.join("groups/soc-team/CLAUDE.md"))
+            std::fs::read_to_string(root.join("groups/soc-team/AGENT.md"))
                 .unwrap()
                 .contains("You are Nova")
         );
@@ -711,7 +827,7 @@ mod tests {
         assert_eq!(b.get("UPDATED_EXISTING"), Some("true"));
         assert_eq!(b.get("ASSISTANT_NAME"), Some("Nova"));
         assert_eq!(b.get("NAME_UPDATED"), Some("false"));
-        let md = root.join("groups/soc-team/CLAUDE.md");
+        let md = root.join("groups/soc-team/AGENT.md");
         assert!(
             std::fs::read_to_string(&md)
                 .unwrap()

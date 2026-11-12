@@ -8,7 +8,7 @@ Templates are **modular**: drop a new `.txt` file in here and the agent picks it
 
 ## How the agent selects a template
 
-Template selection happens in **Step 2.5** of the investigation workflow (see [../CLAUDE.md](../CLAUDE.md)). Selection is fully dynamic — there is no hardcoded map of alert types to filenames.
+Template selection happens in **Step 2.5** of the investigation workflow (see [../AGENT.md](../AGENT.md)). Selection is fully dynamic — there is no hardcoded map of alert types to filenames.
 
 ```
                                  ┌──────────────────────────┐
@@ -36,7 +36,7 @@ Template selection happens in **Step 2.5** of the investigation workflow (see [.
                                  ┌──────────────────────────┐
                                  │  4. Default generic      │
                                  │     Steps 3–6 in         │
-                                 │     CLAUDE.md            │
+                                 │     AGENT.md             │
                                  └──────────────────────────┘
 ```
 
@@ -60,7 +60,7 @@ If no hint matches, the agent matches against:
 
 ### Step 4 — Default path
 
-If nothing matches, the agent falls through to the generic investigation steps in [../CLAUDE.md](../CLAUDE.md) (IOC extraction → threat intel → correlation → report).
+If nothing matches, the agent falls through to the generic investigation steps in [../AGENT.md](../AGENT.md) (IOC extraction → threat intel → correlation → report).
 
 ---
 
@@ -120,7 +120,7 @@ author: ...
 
 ### What makes a good template
 
-- **Be specific to the alert type.** Reference the exact fields that matter (`data_win_eventdata_parentImage`, `data_win_eventdata_hashes`, etc.). Generic guidance already lives in [../CLAUDE.md](../CLAUDE.md).
+- **Be specific to the alert type.** Reference the exact fields that matter (`data_win_eventdata_parentImage`, `data_win_eventdata_hashes`, etc.). Generic guidance already lives in [../AGENT.md](../AGENT.md).
 - **Order steps from cheap to expensive.** Inspect the event first, extract IOCs next, then reach for external threat intel.
 - **Call out the "why".** Explain what an unusual value means (e.g. "a `parentImage` of `winword.exe` spawning `powershell.exe` is a classic macro-driven execution chain").
 - **Recommend follow-up actions.** If Velociraptor artifacts, Wazuh rule lookups, or SCA checks would sharpen the verdict, name them.

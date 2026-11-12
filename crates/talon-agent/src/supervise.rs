@@ -20,6 +20,10 @@
 //!    `PYTHONSAFEPATH=1`, `PYTHONDONTWRITEBYTECODE=1`, in its own process
 //!    group, with the **command's directory** as cwd (never the
 //!    agent-writable group folder: Python puts the cwd on `sys.path`).
+//!    Before any of that, the group's instruction files (`AGENT.md` and
+//!    the legacy `CLAUDE.md`, the trusted system prompt) must both be
+//!    read-only mount points of this container
+//!    ([`check_instruction_mounts`]); otherwise the run is refused.
 //! 4. Expose each server on `/run/talon/mcp/<server>.sock` (dir 0750
 //!    `root:<agent gid>`, socket 0600 owned by the agent): accept exactly
 //!    one connection (peer uid checked), unlink the path, then relay bytes
@@ -360,6 +364,39 @@ impl CommandPolicy {
         }
         Ok(command)
     }
+}
+
+/// The group files whose content is trusted as instructions must be the
+/// host's read-only binds (MYTH-09).
+///
+/// The agent reads `<group>/AGENT.md` into its system prompt. The folder
+/// around it is writable by every run of the group, so the file is only
+/// trustworthy while it is its own read-only mount in **this** container.
+/// The legacy name `CLAUDE.md` must be one as well: the host falls back to
+/// it for installations from before the rename, and it would trust
+/// whichever of the two names an agent managed to create. The host binds
+/// both on every run; if either is missing here (an older host with a
+/// newer image, a hand-written `docker run`), nothing proves where the
+/// instructions come from and the run is refused.
+///
+/// # Errors
+/// A text naming the first file that is not a read-only mount point.
+pub fn check_instruction_mounts(mounts: &MountTable, group_dir: &Path) -> Result<(), String> {
+    let group = std::fs::canonicalize(group_dir).unwrap_or_else(|_| group_dir.to_path_buf());
+    for name in talon_security::instructions::INSTRUCTION_FILE_NAMES {
+        let path = group.join(name);
+        if !mounts.is_read_only_mount_point(&path) {
+            return Err(format!(
+                "{} is not a read-only mount of this container, so the group instructions could \
+                 have been written by an agent; refusing to run. The Talon host binds AGENT.md \
+                 and CLAUDE.md read-only on every run: the host and the agent image are probably \
+                 from different versions (upgrade the host, or rebuild the image with \
+                 ./container/build.sh)",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Decide whether and how to launch `name` (pure apart from resolving the
@@ -745,6 +782,10 @@ pub async fn supervise_main(cfg: SuperviseConfig) -> i32 {
         );
         MountTable::default()
     });
+    // The system prompt must come from the host's read-only binds.
+    if let Err(e) = check_instruction_mounts(&mounts, &cfg.run.paths.group) {
+        return fail(e);
+    }
     let policy = CommandPolicy::container(mounts);
     let dirs_ready = prepare_dir(&cfg.socket_dir, 0o750, 0, ids.gid)
         .and_then(|()| prepare_dir(&cfg.home_root, 0o711, 0, 0));
@@ -1261,6 +1302,53 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
         assert!(mounts.is_read_only(Path::new("/workspace/project/mysql")));
         assert!(mounts.is_read_only(Path::new("/usr/bin/python3")));
         assert!(!mounts.is_read_only(Path::new("/workspace/group/evil.sh")));
+    }
+
+    #[test]
+    fn instruction_files_must_be_read_only_mount_points() {
+        let tmp = tempfile::tempdir().unwrap();
+        let group = std::fs::canonicalize(tmp.path()).unwrap();
+        let g = group.display();
+        let table = |rest: &str| {
+            MountTable::parse(&format!(
+                "1 0 0:1 / / ro - overlay o rw\n2 1 8:1 /g {g} rw - ext4 d rw\n{rest}"
+            ))
+        };
+        let bind = |id: u32, name: &str, opts: &str| {
+            format!("{id} 2 8:1 /g/src {g}/{name} {opts},relatime - ext4 d rw\n")
+        };
+        // What the host sets up: both names are read-only binds.
+        let both = table(&(bind(3, "AGENT.md", "ro") + &bind(4, "CLAUDE.md", "ro")));
+        assert_eq!(check_instruction_mounts(&both, &group), Ok(()));
+        // The path the supervisor was given may be a symlink to the folder.
+        let link = group.with_extension("link");
+        std::os::unix::fs::symlink(&group, &link).unwrap();
+        assert_eq!(check_instruction_mounts(&both, &link), Ok(()));
+        std::fs::remove_file(&link).unwrap();
+
+        // An older host: only CLAUDE.md is bound, so an agent could have
+        // written the AGENT.md the runtime reads.
+        let old_host = table(&bind(3, "CLAUDE.md", "ro"));
+        let err = check_instruction_mounts(&old_host, &group).unwrap_err();
+        assert!(err.contains("AGENT.md is not a read-only mount"), "{err}");
+        assert!(err.contains("different versions"), "{err}");
+        // Only AGENT.md bound: the legacy name could be planted for the
+        // host's fallback.
+        let err = check_instruction_mounts(&table(&bind(3, "AGENT.md", "ro")), &group).unwrap_err();
+        assert!(err.contains("CLAUDE.md is not a read-only mount"), "{err}");
+        // Writable binds, no binds, a read-only folder without file binds,
+        // no table at all.
+        for bad in [
+            table(&(bind(3, "AGENT.md", "rw") + &bind(4, "CLAUDE.md", "ro"))),
+            table(&(bind(3, "AGENT.md", "ro") + &bind(4, "CLAUDE.md", "rw"))),
+            table(""),
+            MountTable::parse(&format!(
+                "1 0 0:1 / / ro - overlay o rw\n2 1 8:1 /g {g} ro - ext4 d rw\n"
+            )),
+            MountTable::default(),
+        ] {
+            assert!(check_instruction_mounts(&bad, &group).is_err());
+        }
     }
 
     #[test]

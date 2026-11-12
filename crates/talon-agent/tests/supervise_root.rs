@@ -144,8 +144,9 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
     std::fs::write(
         root.join("mountinfo"),
         format!(
-            "1 0 0:1 / / ro,relatime - overlay overlay rw\n2 1 0:2 / /proc rw,nosuid - proc proc rw\n3 1 8:1 /x {} rw,relatime - ext4 /dev/sda1 rw\n",
-            env_bin.display()
+            "1 0 0:1 / / ro,relatime - overlay overlay rw\n2 1 0:2 / /proc rw,nosuid - proc proc rw\n3 1 8:1 /x {} rw,relatime - ext4 /dev/sda1 rw\n4 1 8:1 /g {group} rw,relatime - ext4 /dev/sda1 rw\n5 4 8:1 /g/AGENT.md {group}/AGENT.md ro,relatime - ext4 /dev/sda1 rw\n6 4 8:1 /g/AGENT.md {group}/CLAUDE.md ro,relatime - ext4 /dev/sda1 rw\n",
+            env_bin.display(),
+            group = std::fs::canonicalize(root.join("group")).unwrap().display()
         ),
     )
     .unwrap();
@@ -307,4 +308,103 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
     );
     assert!(tool_msg.contains("safepath=1"), "{tool_msg}");
     assert!(tool_msg.contains("cwd=/usr/bin"), "{tool_msg}");
+}
+
+/// MYTH-09: without the host's read-only binds over `AGENT.md` and
+/// `CLAUDE.md`, an agent could have written the instructions the runtime
+/// is about to trust. The supervisor refuses before anything is spawned.
+#[tokio::test]
+async fn supervisor_refuses_instructions_that_are_not_read_only_binds() {
+    if !rustix::process::geteuid().is_root() {
+        eprintln!("skipping: needs root");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root: PathBuf = dir.path().to_path_buf();
+    mkdir(&root, 0o755);
+    for sub in ["group", "ipc", "ipc/input", "state"] {
+        mkdir(&root.join(sub), 0o777);
+    }
+    // Planted in the writable group folder, as an agent of an earlier run
+    // could have done.
+    std::fs::write(root.join("group/AGENT.md"), "PLANTED RULES").unwrap();
+    std::fs::write(root.join("passwd"), "root:x:0:0:root:/root:/bin/bash\n").unwrap();
+    let group = std::fs::canonicalize(root.join("group")).unwrap();
+    // Shaped like a container started by a host from before the rename:
+    // only CLAUDE.md is bound.
+    std::fs::write(
+        root.join("mountinfo"),
+        format!(
+            "1 0 0:1 / / ro,relatime - overlay overlay rw\n4 1 8:1 /g {g} rw,relatime - ext4 /dev/sda1 rw\n5 4 8:1 /g/CLAUDE.md {g}/CLAUDE.md ro,relatime - ext4 /dev/sda1 rw\n",
+            g = group.display()
+        ),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_talon-agent"))
+        .arg("supervise")
+        .arg("--group-dir")
+        .arg(root.join("group"))
+        .arg("--ipc-dir")
+        .arg(root.join("ipc"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .arg("--socket-dir")
+        .arg(root.join("run/mcp"))
+        .arg("--mcp-home-root")
+        .arg(root.join("run/home"))
+        .arg("--passwd-file")
+        .arg(root.join("passwd"))
+        .arg("--mountinfo-file")
+        .arg(root.join("mountinfo"))
+        .env("RUN_UID", NOBODY.to_string())
+        .env("RUN_GID", NOBODY.to_string())
+        .env_remove("TALON_MCP_SOCKET_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let input = json!({
+        "prompt": "hello",
+        "groupFolder": "testgroup",
+        "chatJid": "tg:1",
+        "isMain": false,
+        "llm": {
+            "baseUrl": "http://127.0.0.1:9/v1",
+            "token": "tlgw-root-test-token-abcdef0123",
+            "model": "m",
+            "maxContextTokens": 32768
+        }
+    });
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(&serde_json::to_vec(&input).unwrap())
+        .await
+        .unwrap();
+    drop(stdin);
+
+    let out = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .expect("supervisor did not exit")
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let body = stdout
+        .split(OUTPUT_START_MARKER)
+        .nth(1)
+        .and_then(|rest| rest.split(OUTPUT_END_MARKER).next())
+        .expect("an error frame");
+    let frame: ContainerOutput = serde_json::from_str(body.trim()).unwrap();
+    assert_eq!(frame.status, OutputStatus::Error, "{frame:?}");
+    let error = frame.error.unwrap_or_default();
+    assert!(
+        error.contains("AGENT.md is not a read-only mount"),
+        "{error}"
+    );
+    assert!(error.contains("refusing to run"), "{error}");
+    // The agent was never started.
+    assert!(!root.join("state/sessions").exists());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("agent started"));
 }

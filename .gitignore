@@ -3,7 +3,8 @@ store/
 data/
 logs/
 
-# Groups - only track base structure and specific CLAUDE.md files
+# Groups - only track base structure and specific AGENT.md files (the
+# CLAUDE.md next to them is the legacy name: a mount-point stub at runtime)
 groups/*
 !groups/main/
 !groups/global/
@@ -11,10 +12,10 @@ groups/*
 groups/main/*
 groups/global/*
 groups/copilot/*
-!groups/main/CLAUDE.md
+!groups/main/AGENT.md
 !groups/main/.mcp.json
-!groups/global/CLAUDE.md
-!groups/copilot/CLAUDE.md
+!groups/global/AGENT.md
+!groups/copilot/AGENT.md
 !groups/copilot/.mcp.json
 !groups/copilot/notifications.md
 !groups/copilot/prompts/

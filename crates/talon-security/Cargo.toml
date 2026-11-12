@@ -31,6 +31,9 @@ rand = { workspace = true }
 url = { workspace = true }
 ipnet = { workspace = true }
 tokio = { workspace = true }
+# O_NOFOLLOW | O_NONBLOCK opens of the group instruction files (agent-writable
+# folders): no `unsafe`, no libc FFI in our code.
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

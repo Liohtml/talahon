@@ -150,7 +150,7 @@ pub fn investigation_prompt(req: &InvestigationRequest, job_id: &str) -> String 
         .unwrap_or_default();
 
     format!(
-        r#"You are running a targeted SOC investigation triggered by CoPilot. Follow the full investigation workflow from CLAUDE.md.
+        r#"You are running a targeted SOC investigation triggered by CoPilot. Follow the full investigation workflow from AGENT.md.
 
 Alert to investigate:
 - alert_id: {alert_id}
@@ -172,8 +172,8 @@ Steps:
      WHERE a.id = {alert_id} AND a.customer_code = "{customer_code}";
 
    Treat the returned (index_name, index_id) as the authoritative pointer to the raw event for every subsequent SIEM lookup. The 'source' column ("wazuh", "office365", "misp", …) tells you which OpenSearch index family the event lives in. If the row is missing, ast.index_name is empty, or the source is unrecognised, mark the job 'failed' with a descriptive error_message rather than guessing from timestamps.
-3. Follow Step 0.5 (MemPalace prior context for the asset, customer and IOCs) and Steps 2–6 from CLAUDE.md exactly (fetch raw event + index mapping, detect alert type, load template, extract IOCs, threat intel, SIEM correlation).
-{step_override_instruction}3b. Complete Step 5.5 from CLAUDE.md: call score_alert, verify every claim against the evidence you collected, then call submit_triage_report with report_id="{job_id}". Use the severity_assessment label and the Markdown it returns for step 4a. Talon records this structured verdict on the investigation.
+3. Follow Step 0.5 (MemPalace prior context for the asset, customer and IOCs) and Steps 2–6 from AGENT.md exactly (fetch raw event + index mapping, detect alert type, load template, extract IOCs, threat intel, SIEM correlation).
+{step_override_instruction}3b. Complete Step 5.5 from AGENT.md: call score_alert, verify every claim against the evidence you collected, then call submit_triage_report with report_id="{job_id}". Use the severity_assessment label and the Markdown it returns for step 4a. Talon records this structured verdict on the investigation.
 4. Write back to CoPilot — call these three tools in order. The four body fields on SubmitAiAnalystReportTool (severity_assessment, summary, report_markdown, recommended_actions) carry the entire human-readable investigation output; a call missing any of them persists a blank row that surfaces as an empty report in CoPilot. Pass all of them every time, even on trivial false positives.
 
    a. mcp__copilot__SubmitAiAnalystReportTool — returns report_id:
@@ -189,7 +189,7 @@ Steps:
 
    c. Only after 4a succeeded: mcp__copilot__UpdateAiAnalystJobTool(job_id="{job_id}", status="completed", template_used=<template key or null>). If 4a failed, set status="failed" with error_message instead: a job marked completed without a report is never investigated again.
 
-5. Write the eval JSON to /home/agent/.talon/evals/{alert_id}-{job_id}.json as instructed in CLAUDE.md Step 6 (create the directory if needed). That directory is private to this investigation lane; never write evals under /workspace/group.
+5. Write the eval JSON to /home/agent/.talon/evals/{alert_id}-{job_id}.json as instructed in AGENT.md Step 6 (create the directory if needed). That directory is private to this investigation lane; never write evals under /workspace/group.
 6. Send the full investigation report via send_message."#
     )
 }

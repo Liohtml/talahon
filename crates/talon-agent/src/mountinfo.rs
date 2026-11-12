@@ -6,6 +6,12 @@
 //! (and its directory) must sit on a filesystem that is mounted read-only
 //! **in this container** ([`MountTable::is_read_only`]).
 //!
+//! The same table tells the supervisor whether the group's instruction
+//! files (`AGENT.md` and the legacy `CLAUDE.md`, the trusted system prompt)
+//! are the host's read-only binds ([`MountTable::is_read_only_mount_point`]):
+//! the group folder around them is writable, so a file that is not its own
+//! read-only mount could have been written by an agent.
+//!
 //! Which mount decides for a path:
 //! - the **longest-prefix** mount point (component-wise, so
 //!   `/workspace/project2` never matches `/workspace/project`); among
@@ -134,6 +140,25 @@ impl MountTable {
             _ => false,
         }
     }
+
+    /// Is the absolute, canonical `path` **itself** the mount point of a
+    /// read-only mount (a read-only file bind over a writable directory)?
+    /// Unlike [`Self::is_read_only`], a read-only parent does not count:
+    /// the deciding mounts must both be mounted exactly at `path`.
+    pub fn is_read_only_mount_point(&self, path: &Path) -> bool {
+        if !path.is_absolute() {
+            return false;
+        }
+        match (self.longest_prefix_mount(path), self.visible_mount(path)) {
+            (Some(longest), Some(visible)) => {
+                longest.read_only
+                    && visible.read_only
+                    && longest.mount_point == path
+                    && visible.mount_point == path
+            }
+            _ => false,
+        }
+    }
 }
 
 /// `36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue`
@@ -194,7 +219,7 @@ mod tests {
 1200 1180 8:1 /srv/talon /workspace/project ro,relatime - ext4 /dev/sda1 rw
 1201 1200 8:1 /dev/null /workspace/project/.env ro,relatime - devtmpfs udev rw
 1202 1180 8:1 /srv/talon/groups/main /workspace/group rw,relatime - ext4 /dev/sda1 rw
-1203 1202 8:1 /srv/talon/groups/main/CLAUDE.md /workspace/group/CLAUDE.md ro,relatime - ext4 /dev/sda1 rw
+1203 1202 8:1 /srv/talon/groups/main/AGENT.md /workspace/group/AGENT.md ro,relatime - ext4 /dev/sda1 rw
 1204 1180 8:1 /srv/extra/siem /workspace/extra/siem ro,relatime - ext4 /dev/sda1 rw
 1205 1180 8:1 /srv/extra/scratch /workspace/extra/scratch rw,relatime - ext4 /dev/sda1 rw
 1206 1180 8:1 /srv/my\\040dir /workspace/extra/my\\040dir ro,relatime shared:5 master:7 - ext4 /dev/sda1 rw
@@ -250,6 +275,48 @@ mod tests {
         assert!(!ro(&sibling, "relative/path"));
         // No table, no read-only.
         assert!(!ro(&MountTable::default(), "/usr/bin/python3"));
+    }
+
+    #[test]
+    fn read_only_mount_points_are_exact() {
+        let t = MountTable::parse(CONTAINER);
+        let mp = |p: &str| t.is_read_only_mount_point(Path::new(p));
+        // The read-only file bind over the writable group folder.
+        assert!(mp("/workspace/group/AGENT.md"));
+        // Not bound: a plain file of the writable folder.
+        assert!(!mp("/workspace/group/CLAUDE.md"));
+        assert!(!mp("/workspace/group/MEMORY.md"));
+        // Inside a read-only mount, but not a mount point itself.
+        assert!(ro(&t, "/workspace/extra/siem/AGENT.md"));
+        assert!(!mp("/workspace/extra/siem/AGENT.md"));
+        assert!(mp("/workspace/extra/siem"));
+        assert!(!mp("/workspace/group"));
+        assert!(!mp("workspace/group/AGENT.md"));
+        assert!(!MountTable::default().is_read_only_mount_point(Path::new("/x")));
+
+        // A writable bind at the path, a writable mount stacked on the
+        // read-only one, and a read-only bind hidden by a later mount over
+        // the folder all fail closed.
+        let base = "1 0 0:1 / / ro - x a ro\n2 1 0:2 / /workspace/group rw - x b rw\n";
+        let table = |rest: &str| MountTable::parse(&format!("{base}{rest}"));
+        let p = Path::new("/workspace/group/AGENT.md");
+        assert!(
+            table("3 2 0:2 /a /workspace/group/AGENT.md ro - x b rw\n").is_read_only_mount_point(p)
+        );
+        assert!(
+            !table("3 2 0:2 /a /workspace/group/AGENT.md rw - x b rw\n")
+                .is_read_only_mount_point(p)
+        );
+        assert!(
+            !table(
+                "3 2 0:2 /a /workspace/group/AGENT.md ro - x b rw\n4 3 0:2 /b /workspace/group/AGENT.md rw - x b rw\n"
+            )
+            .is_read_only_mount_point(p)
+        );
+        let hidden = MountTable::parse(
+            "1 0 0:1 / / ro - x a ro\n3 1 0:2 /a /workspace/group/AGENT.md ro - x b rw\n4 1 0:3 / /workspace/group rw - x c rw\n",
+        );
+        assert!(!hidden.is_read_only_mount_point(p));
     }
 
     #[test]

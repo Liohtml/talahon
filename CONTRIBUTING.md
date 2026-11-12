@@ -23,7 +23,7 @@ security-first lens.
 - Anonymizer improvements (`talon-anon`, `siem/anon_proxy/fields.yaml` and its
   embedded copy `crates/talon-anon/fields.yaml`)
 - New investigation templates in `groups/copilot/prompts/` (no code needed)
-- Investigation workflow improvements in `groups/copilot/CLAUDE.md`
+- Investigation workflow improvements in `groups/copilot/AGENT.md`
 - New channels or MCP integrations that follow the existing security contracts
 - Documentation fixes
 

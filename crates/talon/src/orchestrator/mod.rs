@@ -48,14 +48,17 @@ use crate::agent::{ContainerLauncher, LlmAccess};
 use crate::allowlist::AllowlistSource;
 use crate::output_limits::OutputLimits;
 use crate::safe_fs;
+use talon_security::instructions::{AGENT_INSTRUCTIONS_FILE, InstructionFiles};
 
 /// Router-state key of the global "seen" cursor.
 pub const LAST_TIMESTAMP_KEY: &str = "last_timestamp";
 /// Router-state key of the per-lane agent cursors (JSON object).
 pub const LAST_AGENT_TIMESTAMP_KEY: &str = "last_agent_timestamp";
-/// Per-group memory file bootstrapped from the `main` / `global` template.
-const CLAUDE_MD: &str = "CLAUDE.md";
-/// Largest `CLAUDE.md` template the host copies.
+/// Per-group instructions file bootstrapped from the `main` / `global`
+/// template (`AGENT.md`; a template folder may still hold the legacy
+/// `CLAUDE.md`).
+const AGENT_MD: &str = AGENT_INSTRUCTIONS_FILE;
+/// Largest instructions template the host copies.
 const MAX_TEMPLATE_BYTES: u64 = 256 * 1024;
 
 /// Tunables that are not part of `TalonConfig`.
@@ -470,7 +473,7 @@ impl Orchestrator {
     /// - `persist`: write to `registered_groups`; when another JID already
     ///   owns the folder (lanes sharing a folder, e.g. `http:copilot:*`) the
     ///   lane stays in memory.
-    /// - `create_template`: create `logs/` and copy the `CLAUDE.md` template
+    /// - `create_template`: create `logs/` and copy the `AGENT.md` template
     ///   (used for IPC registrations).
     pub(crate) fn register_group_inner(
         &self,
@@ -520,7 +523,7 @@ impl Orchestrator {
     }
 
     /// Create `groups/<folder>/logs` and, with `create_template`, bootstrap
-    /// `CLAUDE.md`. Group folders are agent-writable, so everything below
+    /// `AGENT.md`. Group folders are agent-writable, so everything below
     /// `groups/` is handled descriptor-relatively without following
     /// symlinks (MYTH-10): a planted `groups/<folder>` or `logs` symlink is
     /// refused instead of redirecting the host's writes.
@@ -543,26 +546,31 @@ impl Orchestrator {
             tracing::warn!(folder = %group.folder, error = %e, "cannot create group logs folder");
         }
         if create_template {
-            self.install_claude_md(groups.as_fd(), dir.as_fd(), group);
+            self.install_instructions(groups.as_fd(), dir.as_fd(), group);
         }
     }
 
-    /// Copy the `CLAUDE.md` template into a new group folder. Never follows or replaces an existing entry (the folder is
-    /// agent-writable, so a planted symlink must not redirect the write:
-    /// the file is created with `O_CREAT | O_EXCL | O_NOFOLLOW`), and the
-    /// template itself (`groups/main` is writable by the main agent) is
-    /// read only when it is a regular, size-capped file.
-    fn install_claude_md(
+    /// Copy the instructions template into a new group folder as
+    /// `AGENT.md`, only when the folder has neither `AGENT.md` nor the
+    /// legacy `CLAUDE.md` in any form: an installation that still uses
+    /// `CLAUDE.md` never gets an `AGENT.md` put next to it (it would take
+    /// precedence), and nothing is ever replaced. Never follows an existing
+    /// entry (the folder is agent-writable, so a planted symlink must not
+    /// redirect the write: the file is created with
+    /// `O_CREAT | O_EXCL | O_NOFOLLOW`), and the template itself
+    /// (`groups/main` is writable by the main agent) is read only when it
+    /// is a regular, size-capped file.
+    fn install_instructions(
         &self,
         groups: BorrowedFd<'_>,
         dir: BorrowedFd<'_>,
         group: &RegisteredGroup,
     ) {
-        match safe_fs::entry_exists_at(dir, CLAUDE_MD) {
-            Ok(false) => {}
-            Ok(true) => return,
+        match InstructionFiles::inspect_at(dir) {
+            Ok(files) if files.is_vacant() => {}
+            Ok(_) => return,
             Err(e) => {
-                tracing::warn!(folder = %group.folder, error = %e, "cannot inspect CLAUDE.md");
+                tracing::warn!(folder = %group.folder, error = %e, "cannot inspect the group instructions");
                 return;
             }
         }
@@ -586,12 +594,12 @@ impl Orchestrator {
                 + if content.ends_with('\n') { "\n" } else { "" };
             content = content.replace("You are Talon", &format!("You are {name}"));
         }
-        match safe_fs::create_new_at(dir, CLAUDE_MD, content.as_bytes()) {
-            Ok(()) => tracing::info!(folder = %group.folder, "Created CLAUDE.md from template"),
+        match safe_fs::create_new_at(dir, AGENT_MD, content.as_bytes()) {
+            Ok(()) => tracing::info!(folder = %group.folder, "Created AGENT.md from template"),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                tracing::debug!(folder = %group.folder, "CLAUDE.md appeared concurrently; kept");
+                tracing::debug!(folder = %group.folder, "AGENT.md appeared concurrently; kept");
             }
-            Err(e) => tracing::warn!(folder = %group.folder, error = %e, "cannot create CLAUDE.md"),
+            Err(e) => tracing::warn!(folder = %group.folder, error = %e, "cannot create AGENT.md"),
         }
     }
 
@@ -618,23 +626,38 @@ impl Orchestrator {
     }
 }
 
-/// Read `groups/<template_folder>/CLAUDE.md`: neither the folder nor the
-/// file may be a symlink, the file must be a regular, size-capped UTF-8
-/// file (a FIFO cannot block the open). Missing templates are silent.
+/// Read the instructions of `groups/<template_folder>`: its `AGENT.md`, or
+/// its legacy `CLAUDE.md` while `AGENT.md` has no content (the same
+/// precedence as for a run in that folder). Neither the folder nor the file
+/// may be a symlink, the file must be a regular, size-capped UTF-8 file (a
+/// FIFO cannot block the open), and a symlink or other non-regular entry
+/// under **either** name means no template. Missing templates are silent.
 fn read_template(groups: BorrowedFd<'_>, template_folder: &str) -> Option<String> {
     let folder = match safe_fs::open_dir_at(groups, template_folder) {
         Ok(fd) => fd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
-            tracing::warn!(template = template_folder, error = %e, "unsafe CLAUDE.md template folder; not copied");
+            tracing::warn!(template = template_folder, error = %e, "unsafe instructions template folder; not copied");
             return None;
         }
     };
-    let file = match safe_fs::open_regular_at(folder.as_fd(), CLAUDE_MD, MAX_TEMPLATE_BYTES) {
+    let name = match InstructionFiles::inspect_at(folder.as_fd()).map(|f| f.source()) {
+        Ok(Ok(Some(name))) => name,
+        Ok(Ok(None)) => return None,
+        Ok(Err(found)) => {
+            tracing::warn!(template = template_folder, reason = %found, "unsafe instructions template; not copied");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(template = template_folder, error = %e, "cannot inspect the instructions template");
+            return None;
+        }
+    };
+    let file = match safe_fs::open_regular_at(folder.as_fd(), name, MAX_TEMPLATE_BYTES) {
         Ok((file, _)) => file,
         Err(safe_fs::OpenRefusal::Missing) => return None,
         Err(safe_fs::OpenRefusal::Rejected(reason)) => {
-            tracing::warn!(template = template_folder, %reason, "unsafe CLAUDE.md template; not copied");
+            tracing::warn!(template = template_folder, file = name, %reason, "unsafe instructions template; not copied");
             return None;
         }
     };
@@ -643,12 +666,12 @@ fn read_template(groups: BorrowedFd<'_>, template_folder: &str) -> Option<String
         Ok(Err(_)) => {
             tracing::warn!(
                 template = template_folder,
-                "CLAUDE.md template is not UTF-8; not copied"
+                "instructions template is not UTF-8; not copied"
             );
             None
         }
         Err(e) => {
-            tracing::warn!(template = template_folder, error = %e, "cannot read CLAUDE.md template");
+            tracing::warn!(template = template_folder, error = %e, "cannot read the instructions template");
             None
         }
     }

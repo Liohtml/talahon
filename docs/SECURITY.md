@@ -30,10 +30,28 @@ containment is what protects the host, the credentials and other tenants.
   mounted read-only, and their credential files are shadowed and staged for
   the matching `mcp-*` user; credential-named files in any other mount are
   shadowed.
-- `groups/<folder>/CLAUDE.md` and `.mcp.json` are bind-mounted read-only (the
+- `groups/<folder>/AGENT.md` and `.mcp.json` are bind-mounted read-only (the
   host creates placeholders when missing), so an agent cannot rewrite its own
   trusted instructions or the commands the supervisor runs as `mcp-*` users.
   Agent-writable notes live in `MEMORY.md`, which is fenced as untrusted.
+- The instructions have two candidate names: `AGENT.md`, and `CLAUDE.md` for
+  installations from before the rename (used while `AGENT.md` has no
+  content). Neither may be plantable, or an agent could create the name that
+  is not in use and have the host prefer it on the next run. So on every run
+  the host binds the one source file read-only over **both**
+  `/workspace/group/AGENT.md` and `/workspace/group/CLAUDE.md`; the unused
+  name exists on the host only as a host-created stub that is never a source
+  (empty files and the host's own marker texts carry no instructions). A
+  symlink, directory, FIFO or other non-regular file under either name
+  refuses the launch, as does a file that appears or changes between the
+  host's decision and the binds (`mount.rejected`). Inside the container the
+  root supervisor refuses to start the agent unless both paths are read-only
+  mount points, and the agent reads only `AGENT.md` in the group folder.
+  Template copies (`register_group`, `talon setup register`, the Emacs
+  bootstrap) follow the same precedence, create `AGENT.md` only in a folder
+  that has neither name, and never replace either. If both names have
+  content, `AGENT.md` wins, the run is audited
+  (`instructions.legacy_ignored`) and `talon doctor` reports it.
 - Group, session and IPC lane directories must be real directories; symlinks
   refuse the launch.
 - Output from the container is parsed with frame/byte budgets and bounded
@@ -203,6 +221,13 @@ findings, proofs of concept and their fixes are tracked in
 
   Anchor `talon audit head` on a system the host cannot write (append-only
   log store, another host) if these matter.
+- The `AGENT.md` name was not protected before the rename: an `AGENT.md` an
+  agent created in its group folder under an older version is
+  indistinguishable from one the operator wrote, and takes precedence over
+  `CLAUDE.md` after the upgrade. Check `ls groups/*/AGENT.md` before
+  upgrading; afterwards `talon doctor` (`instructions_legacy_ignored`) and
+  the `instructions.legacy_ignored` audit event point at every folder where
+  both files have content.
 - Egress firewall rules are opt-in and must be applied by the operator; they
   survive a reboot only when applied with `--persist` (systemd hosts).
 - Model capacity is shared between lanes by a per-lane ceiling on requests

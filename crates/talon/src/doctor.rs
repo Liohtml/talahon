@@ -5,9 +5,10 @@
 //! `CHECK_GATEWAY` (bind address the LLM gateway would use and whether
 //! containers can reach it), `CHECK_EXPOSURE` (vLLM API key requirement,
 //! HTTP API bind address — MYTH-05), `CHECK_NETWORK` (the dedicated agent
-//! network exists — MYTH-05), `AUDIT_VERIFY`, and a final `DOCTOR`
-//! summary with one hint per problem. Exit code 0 when no problem was
-//! found.
+//! network exists — MYTH-05), `CHECK_INSTRUCTIONS` (which file holds each
+//! group folder's instructions: `AGENT.md`, or the legacy `CLAUDE.md` —
+//! MYTH-09), `AUDIT_VERIFY`, and a final `DOCTOR` summary with one hint per
+//! problem. Exit code 0 when no problem was found.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -20,6 +21,7 @@ use talon_core::config::TalonConfig;
 use talon_core::provider::effective_vllm;
 use talon_db::{Db, DbOptions, default_db_path};
 use talon_http::HttpConfig;
+use talon_security::instructions::InstructionFiles;
 use talon_setup::checks::check_port;
 use talon_setup::{SetupContext, StatusBlock, Step, StepArgs, run_step};
 
@@ -104,6 +106,17 @@ pub fn hint(issue: &str) -> &'static str {
         "audit_key_invalid" => {
             "TALON_AUDIT_KEY is too short or not random (openssl rand -hex 32); `talon run` \
              refuses to start"
+        }
+        "instructions_legacy_ignored" => {
+            "a group folder has both AGENT.md and CLAUDE.md with content (see CHECK_INSTRUCTIONS \
+             IGNORED_LEGACY): AGENT.md is used and CLAUDE.md is ignored. Check that AGENT.md is \
+             the file you wrote (it is the trusted system prompt), then delete the CLAUDE.md or \
+             merge it into AGENT.md"
+        }
+        "instructions_unsafe" => {
+            "AGENT.md or CLAUDE.md of a group folder is a symlink, directory or other non-regular \
+             file (see CHECK_INSTRUCTIONS UNSAFE): every run in that folder is refused. Replace \
+             it with a regular file, or remove it"
         }
         _ => "see the blocks above",
     }
@@ -315,6 +328,97 @@ async fn network_block(config: &TalonConfig) -> Option<(StatusBlock, Vec<String>
     Some((block, issues))
 }
 
+/// Most folder names listed per field of `CHECK_INSTRUCTIONS`.
+const MAX_LISTED_FOLDERS: usize = 50;
+
+fn listed(names: &[String]) -> String {
+    if names.is_empty() {
+        return "none".to_string();
+    }
+    let mut out = names
+        .iter()
+        .take(MAX_LISTED_FOLDERS)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    if names.len() > MAX_LISTED_FOLDERS {
+        out.push_str(&format!(",... ({} more)", names.len() - MAX_LISTED_FOLDERS));
+    }
+    out
+}
+
+/// `CHECK_INSTRUCTIONS` block plus issue codes: which file holds the
+/// instructions of each folder under `groups/` (`groups/global` included).
+///
+/// - `LEGACY`: folders that still read `CLAUDE.md` (the fallback). Not a
+///   problem: a `HINT` says how to rename the file.
+/// - `IGNORED_LEGACY`: folders in which both names have content, so
+///   `AGENT.md` is used and `CLAUDE.md` is ignored
+///   (`instructions_legacy_ignored`).
+/// - `UNSAFE`: folders in which either name is a symlink or another
+///   non-regular file; runs there are refused (`instructions_unsafe`).
+///
+/// Symlinked folders are skipped (lanes refuse them anyway).
+pub fn instructions_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
+    let mut block = StatusBlock::new("CHECK_INSTRUCTIONS");
+    let mut issues = Vec::new();
+    let mut folders: Vec<String> = std::fs::read_dir(&config.groups_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    folders.sort();
+    let (mut legacy, mut ignored, mut unsafe_entries) = (Vec::new(), Vec::new(), Vec::new());
+    for folder in &folders {
+        let files = match InstructionFiles::inspect(&config.groups_dir.join(folder)) {
+            Ok(files) => files,
+            Err(e) => {
+                unsafe_entries.push(format!("{folder} (cannot be inspected: {e})"));
+                continue;
+            }
+        };
+        if let Some(found) = files.unsafe_entry() {
+            unsafe_entries.push(format!("{folder} ({found})"));
+        } else if files.legacy_ignored() {
+            ignored.push(folder.clone());
+        } else if files.uses_legacy() {
+            legacy.push(folder.clone());
+        }
+    }
+    block.set("FOLDERS", folders.len());
+    block.set("LEGACY", listed(&legacy));
+    block.set("IGNORED_LEGACY", listed(&ignored));
+    block.set("UNSAFE", listed(&unsafe_entries));
+    if !legacy.is_empty() {
+        block.set(
+            "HINT",
+            "the LEGACY folders still keep their instructions in CLAUDE.md, which is read as \
+             before. Rename it when convenient: `mv groups/<folder>/CLAUDE.md \
+             groups/<folder>/AGENT.md` (this replaces the AGENT.md mount-point stub Talon put \
+             there; use `git mv -f` for tracked files)",
+        );
+    }
+    if !ignored.is_empty() {
+        issues.push("instructions_legacy_ignored".to_string());
+    }
+    if !unsafe_entries.is_empty() {
+        issues.push("instructions_unsafe".to_string());
+    }
+    block.set(
+        "STATUS",
+        if issues.is_empty() {
+            "success"
+        } else {
+            "failed"
+        },
+    );
+    (block, issues)
+}
+
 /// `AUDIT_VERIFY` block plus issue codes (skipped without a database).
 fn audit_block(config: &TalonConfig) -> Option<(StatusBlock, Vec<String>)> {
     let path = default_db_path(&config.store_dir);
@@ -417,6 +521,10 @@ pub async fn run(project_root: &Path, config: &TalonConfig) -> i32 {
     if config.env.file_value("HTTP_API_KEY").is_none() {
         issues.push("http_api_key_unset".to_string());
     }
+
+    let (instructions, instruction_issues) = instructions_block(config);
+    println!("{instructions}");
+    issues.extend(instruction_issues);
 
     if let Some((block, audit_issues)) = audit_block(config) {
         println!("{block}");
@@ -630,8 +738,90 @@ mod tests {
             "http_config_invalid",
             "http_api_key_unset",
             "audit_chain_tampered",
+            "instructions_legacy_ignored",
+            "instructions_unsafe",
         ] {
             assert_ne!(hint(issue), hint("unknown_issue"), "{issue}");
         }
+    }
+
+    #[test]
+    fn instructions_block_reports_legacy_ignored_and_unsafe_files() {
+        use talon_security::instructions::{
+            AGENT_MOUNT_STUB, INSTRUCTIONS_PLACEHOLDER, LEGACY_MOUNT_STUB,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            TalonConfig::from_env(dir.path(), talon_core::env::EnvFile::from_str_content(""));
+        // No groups directory at all.
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("FOLDERS"), Some("0"));
+        assert_eq!(block.get("STATUS"), Some("success"));
+        assert!(issues.is_empty());
+
+        let groups = &config.groups_dir;
+        let write = |rel: &str, content: &str| {
+            let path = groups.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        // Migrated folders (with the stub the host leaves at the old name).
+        write("main/AGENT.md", "main rules");
+        write("main/CLAUDE.md", LEGACY_MOUNT_STUB);
+        write("global/AGENT.md", "global rules");
+        // No instructions.
+        write("empty/AGENT.md", INSTRUCTIONS_PLACEHOLDER);
+        write("old-empty/CLAUDE.md", INSTRUCTIONS_PLACEHOLDER);
+        std::fs::create_dir_all(groups.join("bare")).unwrap();
+        // Fallback in use: before the first run, and after it (stub).
+        write("copilot/CLAUDE.md", "old rules");
+        write("team/CLAUDE.md", "old rules");
+        write("team/AGENT.md", AGENT_MOUNT_STUB);
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("FOLDERS"), Some("7"));
+        assert_eq!(block.get("LEGACY"), Some("copilot,team"));
+        assert_eq!(block.get("IGNORED_LEGACY"), Some("none"));
+        assert_eq!(block.get("UNSAFE"), Some("none"));
+        assert!(
+            block
+                .get("HINT")
+                .unwrap()
+                .contains("mv groups/<folder>/CLAUDE.md")
+        );
+        // A hint, not an error.
+        assert_eq!(block.get("STATUS"), Some("success"));
+        assert!(issues.is_empty());
+
+        // Both names with content: AGENT.md wins, the ignored file is
+        // reported as a problem.
+        write("both/AGENT.md", "new rules");
+        write("both/CLAUDE.md", "old rules");
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("IGNORED_LEGACY"), Some("both"));
+        assert_eq!(block.get("LEGACY"), Some("copilot,team"));
+        assert_eq!(block.get("STATUS"), Some("failed"));
+        assert_eq!(issues, vec!["instructions_legacy_ignored"]);
+
+        // A symlink under either name (and a symlinked folder is skipped).
+        std::fs::remove_file(groups.join("both/CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink("AGENT.md", groups.join("both/CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink("planted.md", groups.join("copilot/AGENT.md")).unwrap();
+        std::os::unix::fs::symlink(groups.join("main"), groups.join("alias")).unwrap();
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("FOLDERS"), Some("8"));
+        let unsafe_entries = block.get("UNSAFE").unwrap();
+        assert!(
+            unsafe_entries.contains("both (CLAUDE.md is a symlink"),
+            "{unsafe_entries}"
+        );
+        assert!(
+            unsafe_entries.contains("copilot (AGENT.md is a symlink"),
+            "{unsafe_entries}"
+        );
+        assert_eq!(block.get("LEGACY"), Some("team"));
+        assert_eq!(issues, vec!["instructions_unsafe"]);
+
+        let many: Vec<String> = (0..60).map(|i| format!("g{i}")).collect();
+        assert!(listed(&many).ends_with(",... (10 more)"));
     }
 }

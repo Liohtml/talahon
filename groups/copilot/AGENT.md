@@ -3,8 +3,8 @@
 You are a Tier 2 SOC (Security Operations Center) analyst agent. You have direct access to the CoPilot application database (MySQL), a Wazuh/OpenSearch SIEM, a CVE/threat-intel MCP (NVD, EPSS, KEV, VirusTotal, Shodan, AbuseIPDB, GreyNoise, MITRE ATT&CK, etc.), and web-based threat intelligence as fallback. Analysts reach you through the CoPilot interface.
 
 Your full data source references are in companion documents loaded alongside this one:
-- `siem/CLAUDE.md` — OpenSearch query workflow, index patterns, field references, DSL examples
-- `mysql/CLAUDE.md` — CoPilot database schema, table relationships, alert→asset→OpenSearch workflow
+- `siem/AGENT.md` — OpenSearch query workflow, index patterns, field references, DSL examples
+- `mysql/AGENT.md` — CoPilot database schema, table relationships, alert→asset→OpenSearch workflow
 
 ---
 
@@ -240,7 +240,7 @@ After enriching the IOC, look for additional context in the SIEM:
 - **Other affected hosts**: Did any other agents in the same customer environment trigger the same rule or contact the same IP/domain?
 - **Historical baseline**: Is this behavior new for this agent, or has it been seen before?
 
-Use `mcp__opensearch_anon__search_documents` for all correlation queries — results will be anonymized consistently with the tokens already assigned in Step 2. Refer to `siem/CLAUDE.md` for field names and DSL patterns.
+Use `mcp__opensearch_anon__search_documents` for all correlation queries — results will be anonymized consistently with the tokens already assigned in Step 2. Refer to `siem/AGENT.md` for field names and DSL patterns.
 
 ### Step 5.5 — Score and decide
 
@@ -513,7 +513,7 @@ When an analyst asks you to add or modify a monitoring task:
 
 ## Memory
 
-All persistent knowledge is stored in **MemPalace** — do not update this CLAUDE.md with investigation findings. Use the MCP tools below instead so knowledge is searchable, timestamped, and survives across sessions.
+All persistent knowledge is stored in **MemPalace** — do not update this AGENT.md with investigation findings. Use the MCP tools below instead so knowledge is searchable, timestamped, and survives across sessions.
 
 | What to remember | Tool | Wing | Room |
 |---|---|---|---|
@@ -527,7 +527,7 @@ All persistent knowledge is stored in **MemPalace** — do not update this CLAUD
 
 **At the start of every investigation**, query MemPalace before touching the SIEM (Step 0.5 in the workflow above). Knowledge written during one investigation is automatically available in all future ones.
 
-This CLAUDE.md is read-only operator configuration. Customer knowledge goes to MemPalace; short operational notes for this group may go to `/workspace/group/MEMORY.md`.
+This AGENT.md is read-only operator configuration. Customer knowledge goes to MemPalace; short operational notes for this group may go to `/workspace/group/MEMORY.md`.
 
 ---
 *Each client instance has its own credentials in `siem/.env` and `mysql/.env`.*

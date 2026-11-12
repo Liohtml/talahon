@@ -215,7 +215,7 @@ reach.
 |---|---|
 | Prompt injection | Untrusted data is wrapped in randomly nonced `<untrusted_data>` envelopes the model is told never to obey; a ~75-rule EN/DE scanner (normalization, base64/exfil decoders, tuned to stay quiet on real SIEM telemetry) flags and audits high-risk content |
 | Model credentials | The vLLM key stays on the host gateway; each run gets a short-lived token (stored as SHA-256, revoked at the end) over stdin, never env. The gateway pins models, clamps tokens, forwards only allowlisted request fields, salts the prefix cache per lane, rate-limits per run and globally and caps the share of concurrency one lane may hold |
-| Container | `--cap-drop=ALL` (+ minimal supervisor caps), `no-new-privileges`, read-only rootfs + tmpfs, `--init`, pid/memory/cpu limits, no sudo or node in the image; read-only `CLAUDE.md`, `.mcp.json` and MCP dirs; mounts containing the project root, `store/`, `data/`, `groups/` or `.env` are refused; credential files in any mount are shadowed |
+| Container | `--cap-drop=ALL` (+ minimal supervisor caps), `no-new-privileges`, read-only rootfs + tmpfs, `--init`, pid/memory/cpu limits, no sudo or node in the image; read-only `AGENT.md` (and legacy `CLAUDE.md`), `.mcp.json` and MCP dirs; mounts containing the project root, `store/`, `data/`, `groups/` or `.env` are refused; credential files in any mount are shadowed |
 | Privilege separation | The root supervisor starts each MCP server as its own `mcp-*` user with a private HOME; the agent runs unprivileged and can't read MCP secrets or their process environments |
 | Lane isolation | Every lane is its own principal: it can only message and schedule into itself, touch tasks it owns and never attach scripts; transcripts, reports and archives are per lane |
 | Host ↔ container | Identity comes from the IPC directory, never from file contents; `openat`/`O_NOFOLLOW` file handling, size and depth limits, claim-before-dispatch, every decision audited |
@@ -240,7 +240,7 @@ cargo build --release && sudo install -m 0755 target/release/talon /usr/local/bi
 ./container/build.sh                        # builds talon-agent:latest
 cp .env.example .env && chmod 600 .env      # set TALON_VLLM_* and HTTP_API_KEY
 talon setup vllm                            # checks that the models are served
-talon doctor                                # runtime, image, vLLM, gateway, audit chain
+talon doctor                                # runtime, image, vLLM, gateway, instructions, audit chain
 talon run
 ```
 
@@ -493,7 +493,7 @@ All endpoints except `/health` require `X-Api-Key` or `Authorization: Bearer`.
 |---|---|
 | `.env` | vLLM, gateway, HTTP API key, channels — `chmod 600`, gitignored |
 | `<mcp-dir>/.env` | Per-MCP credentials — gitignored |
-| `groups/copilot/CLAUDE.md` | SOC agent identity and investigation workflow (read-only inside containers); add client context such as assets, known-good ranges and crown jewels at the bottom |
+| `groups/copilot/AGENT.md` | SOC agent identity and investigation workflow (read-only inside containers); add client context such as assets, known-good ranges and crown jewels at the bottom |
 | `groups/<group>/MEMORY.md` | The group's own agent-written notes (shown to the agent as untrusted data) |
 | `groups/copilot/.mcp.json` | MCP servers and their `runAs` users (mounted read-only) |
 | `groups/copilot/prompts/` | Per-alert-type investigation templates — add `.txt` files, no code changes |
@@ -501,6 +501,44 @@ All endpoints except `/health` require `X-Api-Key` or `Authorization: Bearer`.
 | `~/.config/talon/mount-allowlist.json` | Mount policy — outside the repo, tamper-proof |
 | `~/.config/talon/sender-allowlist.json` | Optional per-chat sender allowlist (`TALON_SENDER_ALLOWLIST_REQUIRED=true` to fail closed) |
 | `mempalace-data/` | MemPalace data — back it up separately |
+
+#### Upgrading: `CLAUDE.md` is now `AGENT.md`
+
+A group's instructions (`groups/<folder>/AGENT.md`) were called `CLAUDE.md`
+in Talon 2.x. Existing installations keep working unchanged:
+
+- Per folder, `AGENT.md` is used when it has content; otherwise an existing
+  `CLAUDE.md` is used (and shown to the agent as `/workspace/group/AGENT.md`);
+  a folder with neither gets a placeholder `AGENT.md`. The same applies to
+  `groups/global/` and to the notes in extra mounts (`siem/AGENT.md`,
+  `mysql/AGENT.md`).
+- Migrate whenever convenient, one folder at a time (no restart needed, the
+  next run picks it up):
+
+  ```bash
+  mv groups/<folder>/CLAUDE.md groups/<folder>/AGENT.md       # untracked folders
+  git mv -f groups/<folder>/CLAUDE.md groups/<folder>/AGENT.md  # folders tracked in git
+  ```
+
+  `talon doctor` lists the folders that still use `CLAUDE.md`
+  (`CHECK_INSTRUCTIONS`, `LEGACY`).
+- Both names are read-only inside every container, so after the first run
+  each folder contains both files on the host: the one in use, and a one-line
+  stub (an HTML comment starting with `<!-- Talon mount point`) under the
+  other name. The stub is never read as instructions and may be overwritten
+  by the `mv` above. Do not delete either file while a container of that
+  folder is running: removing a mount point on the host frees the name
+  inside the running container (stop Talon first; a missing stub is
+  recreated on the next run).
+- If both files have content, `AGENT.md` wins, each run records an
+  `instructions.legacy_ignored` audit event and `talon doctor` fails with
+  `instructions_legacy_ignored` until one of them is removed. **Before
+  upgrading**, check that no group folder already contains an `AGENT.md` you
+  did not write (`ls groups/*/AGENT.md`): older versions did not protect that
+  name, so an agent could have created it, and it would now take precedence.
+- The host and the agent image must be upgraded together
+  (`./container/build.sh`): a new image refuses to run under an older host,
+  because that host does not bind `AGENT.md` read-only.
 
 ## 🔧 Development
 
