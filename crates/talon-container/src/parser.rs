@@ -231,6 +231,17 @@ impl OutputParser {
                     // switches to Skipping. Keep the invariant anyway.
                     self.frame.clear();
                     self.state = State::Skipping;
+                } else if self.frame.len() + line.len() > self.max_frame_bytes + EDGE_BYTES {
+                    // Many short lines: once the frame is past the limit,
+                    // `line_limit` still grants every line its EDGE_BYTES
+                    // of slack, so no single line overflows. Cap the frame
+                    // here or it would grow without bound.
+                    events.push(ParseEvent::Oversize {
+                        bytes: self.frame.len() + line.len(),
+                    });
+                    self.noise_bytes = self.noise_bytes.saturating_add(line.len() as u64 + 1);
+                    self.frame.clear();
+                    self.state = State::Skipping;
                 } else {
                     self.frame.extend_from_slice(&line);
                     self.frame.push(b'\n');
@@ -516,3 +527,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod proptests;

@@ -1916,7 +1916,9 @@ pub fn analyze_process(ctx: &ProcessContext<'_>) -> CommandLineAnalysis {
     process_findings(ctx, &mut acc);
     let mut a = finish(cmd, acc);
     if a.executable.is_none() {
-        a.executable = ctx.image.map(basename);
+        // An empty image (or one ending in a path separator) names no
+        // executable.
+        a.executable = ctx.image.map(basename).filter(|b| !b.is_empty());
     }
     a
 }
@@ -2352,3 +2354,7 @@ mod tests {
         assert_eq!(decode_base64_text("\u{e9}\u{e9}\u{e9}\u{e9}"), None);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod proptests;

@@ -1665,3 +1665,7 @@ Content that originates outside Talon (SIEM and EDR events, alert fields, log li
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod proptests;

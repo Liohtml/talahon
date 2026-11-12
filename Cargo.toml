@@ -94,6 +94,9 @@ clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 wiremock = "0.6"
 pretty_assertions = "1"
+# Property tests for the parsers that face hostile input (no fork/timeout
+# support: the tests run in-process).
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

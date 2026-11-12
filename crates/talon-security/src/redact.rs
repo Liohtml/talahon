@@ -52,9 +52,11 @@ static JWT: LazyLock<Regex> =
     LazyLock::new(|| re(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"));
 
 /// `Authorization: <scheme> <credential>` (header or JSON/quoted forms).
+/// The credential cannot start with `=`: in `Authorization: apikey = <value>`
+/// the `=` belongs to an `apikey = ...` assignment, not to a scheme.
 static AUTH_HEADER: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        r#"(?i)(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(bearer|basic|token|digest|negotiate|ntlm|apikey)\s+)([A-Za-z0-9\-._~+/=]+)"#,
+        r#"(?i)(\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(bearer|basic|token|digest|negotiate|ntlm|apikey)\s+)([A-Za-z0-9\-._~+/][A-Za-z0-9\-._~+/=]*)"#,
     )
 });
 
@@ -99,14 +101,37 @@ static TOKEN_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     ]
 });
 
+/// Key of a sensitive assignment: the keyword must end the key (so
+/// `TokenElevationType=%%1936` or `PasswordLastSet: ...` from Windows events
+/// are left alone).
+const ASSIGNMENT_KEY: &str = r"[a-z0-9_.-]{0,40}?(?:password|passwd|passphrase|secret|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|bot[_-]?token|client[_-]?secret|token|credentials?)s?";
+
+/// Value of an assignment: double-quoted, single-quoted, bare, or a
+/// double-quoted string that is cut off.
+const ASSIGNMENT_VALUE: &str =
+    r#""(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*'|[^\s,;&"'<>{}\[\]()]+|"[^"\r\n]+"#;
+
 /// `key = value` / `"key": "value"` assignments with a sensitive key name.
-/// The keyword must end the key (so `TokenElevationType=%%1936` or
-/// `PasswordLastSet: ...` from Windows events are left alone).
 static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    re(
-        r#"(?i)\b([a-z0-9_.-]{0,40}?(?:password|passwd|passphrase|secret|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|bot[_-]?token|client[_-]?secret|token|credentials?)s?)(["']?\s{0,4}(?:=|:)\s{0,4})("(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*'|[^\s,;&"'<>{}\[\]()]+|"[^"\r\n]+)"#,
-    )
+    re(&format!(
+        r#"(?i)\b({ASSIGNMENT_KEY})(["']?\s{{0,4}}(?:=|:)\s{{0,4}})({ASSIGNMENT_VALUE})"#
+    ))
 });
+
+/// An assignment "value" that is itself a sensitive key: `password:` in
+/// `credentials:\n  password: hunter2` / `token: password: hunter2`
+/// (group 1: the separator came with it) or `"password"` in
+/// `token = "password": "hunter2"`.
+static NESTED_KEY: LazyLock<Regex> =
+    LazyLock::new(|| re(&format!(r#"(?i)^["']?{ASSIGNMENT_KEY}["']?([=:])?$"#)));
+
+/// The value after a [`NESTED_KEY`] that came with its separator.
+static NESTED_VALUE: LazyLock<Regex> =
+    LazyLock::new(|| re(&format!(r"^(\s{{0,4}})({ASSIGNMENT_VALUE})")));
+
+/// Separator and value after a [`NESTED_KEY`] that came without one.
+static NESTED_SEP_VALUE: LazyLock<Regex> =
+    LazyLock::new(|| re(&format!(r"^(\s{{0,4}}[=:]\s{{0,4}})({ASSIGNMENT_VALUE})")));
 
 /// Sensitive JSON object keys (whole-key match).
 static SENSITIVE_KEY: LazyLock<Regex> = LazyLock::new(|| {
@@ -263,20 +288,7 @@ impl Redactor {
         }
 
         // 9. key=value assignments.
-        apply(&mut out, &ASSIGNMENT, |c| {
-            let value = &c[3];
-            if is_placeholder_value(value) || is_exempt_key(&c[1]) {
-                return c[0].to_string();
-            }
-            let kind = assignment_kind(&c[1]);
-            let (open, close) = match value.chars().next() {
-                Some(q @ ('"' | '\'')) if value.len() >= 2 && value.ends_with(q) => {
-                    (q.to_string(), q.to_string())
-                }
-                _ => (String::new(), String::new()),
-            };
-            format!("{}{}{open}[REDACTED:{kind}]{close}", &c[1], &c[2])
-        });
+        redact_assignments(&mut out);
 
         out
     }
@@ -356,6 +368,79 @@ where
     if let Cow::Owned(s) = replaced {
         *text = Cow::Owned(s);
     }
+}
+
+/// Redact the values of `key = value` assignments with a sensitive key.
+///
+/// A plain `replace_all` is not enough: the "value" of one assignment can
+/// be the key of the assignment that carries the secret
+/// (`credentials:\n  password: hunter2`, `token: password: hunter2`,
+/// `max_tokens = password=hunter2`), and the regex would step over that
+/// inner assignment. So
+/// - when a match is left alone (placeholder value, exempt key), the search
+///   resumes at its value instead of after it, and
+/// - when a redacted value was itself a sensitive key, the value that
+///   follows it is redacted as well.
+fn redact_assignments(text: &mut Cow<'_, str>) {
+    if !ASSIGNMENT.is_match(text.as_ref()) {
+        return;
+    }
+    let src = text.as_ref();
+    let mut out = String::with_capacity(src.len());
+    // `src[..copied]` is in `out`; the search continues at `at >= copied`.
+    let (mut copied, mut at) = (0usize, 0usize);
+    while let Some(c) = ASSIGNMENT.captures_at(src, at) {
+        let (Some(whole), Some(key), Some(value)) = (c.get(0), c.get(1), c.get(3)) else {
+            break;
+        };
+        if is_placeholder_value(value.as_str()) || is_exempt_key(key.as_str()) {
+            at = value.start();
+            continue;
+        }
+        out.push_str(&src[copied..value.start()]);
+        push_redacted_value(&mut out, value.as_str(), assignment_kind(key.as_str()));
+        at = whole.end();
+        copied = at;
+
+        let mut nested_key = value.as_str();
+        while let Some(key_shape) = NESTED_KEY.captures(nested_key) {
+            let follows = if key_shape.get(1).is_some() {
+                &*NESTED_VALUE
+            } else {
+                &*NESTED_SEP_VALUE
+            };
+            let Some(inner) = follows.captures(&src[at..]) else {
+                break;
+            };
+            let (Some(whole), Some(gap), Some(inner_value)) =
+                (inner.get(0), inner.get(1), inner.get(2))
+            else {
+                break;
+            };
+            out.push_str(gap.as_str());
+            push_redacted_value(&mut out, inner_value.as_str(), assignment_kind(nested_key));
+            at += whole.len();
+            copied = at;
+            nested_key = inner_value.as_str();
+        }
+    }
+    if copied > 0 {
+        out.push_str(&src[copied..]);
+        *text = Cow::Owned(out);
+    }
+}
+
+/// Append `[REDACTED:<kind>]` in place of `value`, keeping its quotes.
+fn push_redacted_value(out: &mut String, value: &str, kind: &str) {
+    let quote = match value.chars().next() {
+        Some(q @ ('"' | '\'')) if value.len() >= 2 && value.ends_with(q) => Some(q),
+        _ => None,
+    };
+    out.extend(quote);
+    out.push_str("[REDACTED:");
+    out.push_str(kind);
+    out.push(']');
+    out.extend(quote);
 }
 
 fn auth_kind(scheme: &str) -> &'static str {
@@ -745,3 +830,7 @@ mod tests {
         assert_eq!(red.redact("x äöüßäöü y").as_ref(), "x [REDACTED:secret] y");
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod proptests;
