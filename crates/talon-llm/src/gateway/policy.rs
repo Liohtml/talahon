@@ -356,18 +356,16 @@ impl RequestPolicy {
                 continue;
             };
             saw_limit = true;
-            if let Some(cap) = self.max_output_tokens_cap {
-                if n > u64::from(cap) {
-                    obj.insert(key.into(), json!(cap));
-                    out.max_tokens_clamped = true;
-                }
-            }
-        }
-        if !saw_limit {
-            if let Some(cap) = self.max_output_tokens_cap {
-                obj.insert("max_tokens".into(), json!(cap));
+            if let Some(cap) = self.max_output_tokens_cap
+                && n > u64::from(cap)
+            {
+                obj.insert(key.into(), json!(cap));
                 out.max_tokens_clamped = true;
             }
+        }
+        if !saw_limit && let Some(cap) = self.max_output_tokens_cap {
+            obj.insert("max_tokens".into(), json!(cap));
+            out.max_tokens_clamped = true;
         }
 
         out.stream = obj.get("stream").and_then(Value::as_bool).unwrap_or(false);

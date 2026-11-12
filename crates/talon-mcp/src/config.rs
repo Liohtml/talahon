@@ -166,12 +166,12 @@ impl ServerConfig {
                 )));
             }
         }
-        if let Some(user) = &self.run_as {
-            if !is_valid_run_as(user) {
-                return Err(McpError::Config(format!(
-                    "server '{name}': invalid runAs '{user}' (must match ^mcp-[a-z0-9_-]{{1,32}}$)"
-                )));
-            }
+        if let Some(user) = &self.run_as
+            && !is_valid_run_as(user)
+        {
+            return Err(McpError::Config(format!(
+                "server '{name}': invalid runAs '{user}' (must match ^mcp-[a-z0-9_-]{{1,32}}$)"
+            )));
         }
         Ok(())
     }

@@ -352,12 +352,10 @@ impl Router {
                         .map(FieldHints::from_arguments)
                         .unwrap_or_default();
                     let mut modified = false;
-                    if self.opts.deanonymize_arguments {
-                        if let Some(args) = v.get_mut("params").and_then(|p| p.get_mut("arguments"))
-                        {
-                            modified =
-                                lock_session(&self.session).read(|a| a.deanonymize_json(args));
-                        }
+                    if self.opts.deanonymize_arguments
+                        && let Some(args) = v.get_mut("params").and_then(|p| p.get_mut("arguments"))
+                    {
+                        modified = lock_session(&self.session).read(|a| a.deanonymize_json(args));
                     }
                     if let Err(reply) = self.track(id, method, hints) {
                         return Single::Reply(reply);
@@ -370,10 +368,10 @@ impl Router {
                 Single::Forward(v, false)
             }
             MessageKind::Notification { method } => {
-                if method == "notifications/cancelled" {
-                    if let Some(rid) = v.get("params").and_then(|p| p.get("requestId")) {
-                        self.pending().remove(&id_key(rid));
-                    }
+                if method == "notifications/cancelled"
+                    && let Some(rid) = v.get("params").and_then(|p| p.get("requestId"))
+                {
+                    self.pending().remove(&id_key(rid));
                 }
                 Single::Forward(v, false)
             }
@@ -615,13 +613,12 @@ fn append_deanonymize_tool(v: &mut Value) {
     let tools = result
         .entry("tools")
         .or_insert_with(|| Value::Array(Vec::new()));
-    if let Value::Array(list) = tools {
-        if !list
+    if let Value::Array(list) = tools
+        && !list
             .iter()
             .any(|t| t.get("name").and_then(Value::as_str) == Some(DEANONYMIZE_TOOL_NAME))
-        {
-            list.push(deanonymize_tool());
-        }
+    {
+        list.push(deanonymize_tool());
     }
 }
 
@@ -675,16 +672,16 @@ async fn client_loop<R: AsyncRead + Unpin>(
                 continue;
             }
         };
-        if let Some(l) = out.client {
-            if to_client.send(l).await.is_err() {
-                return ClientEnd::ClientOutputGone;
-            }
+        if let Some(l) = out.client
+            && to_client.send(l).await.is_err()
+        {
+            return ClientEnd::ClientOutputGone;
         }
-        if let Some(l) = out.upstream {
-            if to_upstream.send(l).await.is_err() {
-                tracing::warn!("upstream input closed");
-                return ClientEnd::UpstreamGone;
-            }
+        if let Some(l) = out.upstream
+            && to_upstream.send(l).await.is_err()
+        {
+            tracing::warn!("upstream input closed");
+            return ClientEnd::UpstreamGone;
         }
     }
 }
@@ -715,10 +712,10 @@ async fn upstream_loop<R: AsyncRead + Unpin>(
                 continue;
             }
         };
-        if let Some(l) = out {
-            if to_client.send(l).await.is_err() {
-                return;
-            }
+        if let Some(l) = out
+            && to_client.send(l).await.is_err()
+        {
+            return;
         }
     }
 }

@@ -413,10 +413,10 @@ impl Orchestrator {
         }
         // Advisory: a bad usage write never fails the turn.
         let context = usage.map(SessionUsage::context_size).unwrap_or(0);
-        if context > 0 {
-            if let Err(e) = self.db.record_session_usage(&key, context) {
-                tracing::warn!(group = %group.name, error = %e, "Failed to record session usage");
-            }
+        if context > 0
+            && let Err(e) = self.db.record_session_usage(&key, context)
+        {
+            tracing::warn!(group = %group.name, error = %e, "Failed to record session usage");
         }
     }
 

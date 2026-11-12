@@ -532,10 +532,10 @@ impl GroupQueue {
             Err(e) => {
                 warn!(jid = chat_jid, error = %e, "failed to write IPC input message");
                 let mut st = self.inner.lock();
-                if let Some(active) = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut()) {
-                    if active.id == run_id {
-                        active.idle_waiting = was_idle;
-                    }
+                if let Some(active) = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut())
+                    && active.id == run_id
+                {
+                    active.idle_waiting = was_idle;
                 }
                 None
             }
@@ -562,10 +562,10 @@ impl GroupQueue {
             Ok(_) => {
                 debug!(jid = chat_jid, "close sentinel written");
                 let mut st = self.inner.lock();
-                if let Some(active) = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut()) {
-                    if active.id == run_id {
-                        active.closing = true;
-                    }
+                if let Some(active) = st.lanes.get_mut(chat_jid).and_then(|l| l.active.as_mut())
+                    && active.id == run_id
+                {
+                    active.closing = true;
                 }
                 true
             }

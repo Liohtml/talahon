@@ -311,10 +311,10 @@ pub fn template_candidates(
     let is_defender = rule_groups
         .iter()
         .any(|g| g.to_ascii_lowercase().contains("defender"));
-    if let Some(id) = event_id {
-        if !is_defender {
-            add(format!("sysmon_event_{id}.txt"));
-        }
+    if let Some(id) = event_id
+        && !is_defender
+    {
+        add(format!("sysmon_event_{id}.txt"));
     }
     if let Some(desc) = rule_description {
         let d = desc.to_ascii_lowercase();

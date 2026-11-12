@@ -34,12 +34,12 @@ pub async fn run(args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOutc
     .map(str::to_string);
 
     let needs_user_input = resolved.is_none();
-    if let Some(tz) = &resolved {
-        if Some(tz) != env_file_tz.as_ref() {
-            upsert_env_line(&env_path, "TZ", tz)
-                .with_context(|| format!("writing TZ to {}", env_path.display()))?;
-            tracing::info!(timezone = %tz, "Set TZ in .env");
-        }
+    if let Some(tz) = &resolved
+        && Some(tz) != env_file_tz.as_ref()
+    {
+        upsert_env_line(&env_path, "TZ", tz)
+            .with_context(|| format!("writing TZ to {}", env_path.display()))?;
+        tracing::info!(timezone = %tz, "Set TZ in .env");
     }
 
     let block = StatusBlock::new("TIMEZONE")

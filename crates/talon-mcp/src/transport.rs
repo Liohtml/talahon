@@ -129,10 +129,8 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                 (if found { end + 1 } else { end }, found)
             };
             self.inner.consume(consumed);
-            if found_newline {
-                if let Some(frame) = self.finish_line() {
-                    return Ok(Some(frame));
-                }
+            if found_newline && let Some(frame) = self.finish_line() {
+                return Ok(Some(frame));
             }
         }
     }

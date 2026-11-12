@@ -103,10 +103,10 @@ fn render_items(items: &[TodoItem]) -> String {
             TodoStatus::Pending => "[ ]",
         };
         out.push_str(&format!("{mark} {}. {}", n + 1, i.content));
-        if i.status == TodoStatus::InProgress {
-            if let Some(a) = &i.active_form {
-                out.push_str(&format!(" ({a})"));
-            }
+        if i.status == TodoStatus::InProgress
+            && let Some(a) = &i.active_form
+        {
+            out.push_str(&format!(" ({a})"));
         }
         out.push('\n');
     }

@@ -100,12 +100,10 @@ pub fn split_message_with(text: &str, max_len: usize, unit: LengthUnit) -> Vec<S
             budget
         };
         let (mut cut, mut next) = find_cut(rest, window, unit);
-        if fence_aware {
-            if let Some(line_start) = fence_line_backoff(rest, cut) {
-                // Never cut through a fence line: end the chunk before it.
-                cut = line_start - 1;
-                next = line_start;
-            }
+        if fence_aware && let Some(line_start) = fence_line_backoff(rest, cut) {
+            // Never cut through a fence line: end the chunk before it.
+            cut = line_start - 1;
+            next = line_start;
         }
         let head = &rest[..cut];
         let state = if fence_aware {
@@ -167,17 +165,18 @@ fn find_cut(rest: &str, window: usize, unit: LengthUnit) -> (usize, usize) {
     let min = hard / 2;
     const SEPARATORS: [&str; 3] = ["\n\n", "\n", " "];
     for sep in SEPARATORS {
-        if let Some(p) = candidate.rfind(sep) {
-            if p > 0 && p >= min {
-                return (p, p + sep.len());
-            }
+        if let Some(p) = candidate.rfind(sep)
+            && p > 0
+            && p >= min
+        {
+            return (p, p + sep.len());
         }
     }
     for sep in SEPARATORS {
-        if let Some(p) = candidate.rfind(sep) {
-            if p > 0 {
-                return (p, p + sep.len());
-            }
+        if let Some(p) = candidate.rfind(sep)
+            && p > 0
+        {
+            return (p, p + sep.len());
         }
     }
     (hard, hard)

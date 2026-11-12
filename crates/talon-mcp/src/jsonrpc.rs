@@ -317,13 +317,13 @@ impl Message {
         };
         let raw_id = obj.remove("id");
         let id = raw_id.as_ref().and_then(RequestId::from_value);
-        if let Some(version) = obj.get("jsonrpc") {
-            if version.as_str() != Some(JSONRPC_VERSION) {
-                return Err(InvalidMessage {
-                    id,
-                    reason: format!("unsupported jsonrpc version {version}"),
-                });
-            }
+        if let Some(version) = obj.get("jsonrpc")
+            && version.as_str() != Some(JSONRPC_VERSION)
+        {
+            return Err(InvalidMessage {
+                id,
+                reason: format!("unsupported jsonrpc version {version}"),
+            });
         }
         if let Some(method) = obj.remove("method") {
             let Value::String(method) = method else {

@@ -305,7 +305,7 @@ proptest! {
         let mut text = String::new();
         for (before, pick) in &pieces {
             text.push_str(before);
-            text.push_str(pick.get(&secrets));
+            text.push_str(pick.get(secrets.as_slice()).as_str());
         }
         text.push_str(&tail);
         let red = Redactor::with_secrets(&secrets);

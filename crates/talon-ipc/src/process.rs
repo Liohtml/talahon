@@ -290,12 +290,12 @@ impl IpcWatcher {
         let mut details = Map::new();
         details.insert("type".into(), json!("message"));
         details.insert("textLength".into(), json!(text.chars().count()));
-        if let Some(claimed) = group_folder {
-            if claimed != &source.folder {
-                // Identity comes from the directory; a mismatching claim is
-                // ignored but worth flagging.
-                details.insert("claimedFolderMismatch".into(), json!(true));
-            }
+        if let Some(claimed) = group_folder
+            && claimed != &source.folder
+        {
+            // Identity comes from the directory; a mismatching claim is
+            // ignored but worth flagging.
+            details.insert("claimedFolderMismatch".into(), json!(true));
         }
         let target = Some(chat_jid.as_str());
 

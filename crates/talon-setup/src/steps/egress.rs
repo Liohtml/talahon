@@ -1004,12 +1004,12 @@ pub async fn apply_plan(
         }
         FirewallPlan::Iptables { sections } => {
             for section in sections {
-                if let Some(guard) = &section.guard {
-                    if !try_run(runner, guard, &mut report).await {
-                        tracing::warn!(section = %section.title, "firewall section skipped (guard failed)");
-                        report.skipped_sections.push(section.title.clone());
-                        continue;
-                    }
+                if let Some(guard) = &section.guard
+                    && !try_run(runner, guard, &mut report).await
+                {
+                    tracing::warn!(section = %section.title, "firewall section skipped (guard failed)");
+                    report.skipped_sections.push(section.title.clone());
+                    continue;
                 }
                 for step in &section.steps {
                     match step {
@@ -1052,10 +1052,11 @@ pub fn parse_resolv_conf(text: &str) -> Vec<IpAddr> {
         }
         let Some(value) = parts.next() else { continue };
         let value = value.split('%').next().unwrap_or(value);
-        if let Ok(ip) = value.parse::<IpAddr>() {
-            if !ip.is_loopback() && !out.contains(&ip) {
-                out.push(ip);
-            }
+        if let Ok(ip) = value.parse::<IpAddr>()
+            && !ip.is_loopback()
+            && !out.contains(&ip)
+        {
+            out.push(ip);
         }
     }
     out

@@ -445,14 +445,14 @@ pub fn prepare_dir(path: &Path, mode: u32, uid: u32, gid: u32) -> std::io::Resul
             )));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                if !parent.exists() {
-                    // e.g. /run/talon when the entrypoint did not create it:
-                    // it must stay traversable for the agent and mcp-* users
-                    // (the process umask is 077).
-                    std::fs::create_dir_all(parent)?;
-                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755))?;
-                }
+            if let Some(parent) = path.parent()
+                && !parent.exists()
+            {
+                // e.g. /run/talon when the entrypoint did not create it:
+                // it must stay traversable for the agent and mcp-* users
+                // (the process umask is 077).
+                std::fs::create_dir_all(parent)?;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755))?;
             }
             std::fs::create_dir(path)?;
         }

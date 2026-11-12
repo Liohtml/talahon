@@ -504,13 +504,13 @@ pub fn prepare_requests(
                     case.id
                 );
             }
-            if let Some(template) = &request.template_override {
-                if !is_valid_template_name(template) {
-                    bail!(
-                        "{}: template_override must be a plain .txt filename",
-                        case.id
-                    );
-                }
+            if let Some(template) = &request.template_override
+                && !is_valid_template_name(template)
+            {
+                bail!(
+                    "{}: template_override must be a plain .txt filename",
+                    case.id
+                );
             }
             Ok(request)
         })

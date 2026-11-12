@@ -123,10 +123,10 @@ pub fn has_systemd_from(proc_1_comm: &Path) -> bool {
 
 /// Effective uid from `/proc/self/status` (Linux) or `id -u` (elsewhere).
 pub fn current_uid() -> Option<u32> {
-    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-        if let Some(uid) = parse_proc_status_euid(&status) {
-            return Some(uid);
-        }
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status")
+        && let Some(uid) = parse_proc_status_euid(&status)
+    {
+        return Some(uid);
     }
     let out = std::process::Command::new("id").arg("-u").output().ok()?;
     if !out.status.success() {

@@ -140,36 +140,37 @@ pub fn postprocess_message(
         return report;
     }
 
-    if options.split_think {
-        if let Some(content) = message.content.as_deref() {
-            if let Some((reasoning, rest)) = split_think(content) {
-                if let Some(r) = reasoning {
-                    message.reasoning_content = Some(match message.reasoning_content.take() {
-                        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n{r}"),
-                        _ => r,
-                    });
-                }
-                message.content = (!rest.is_empty()).then_some(rest);
-                report.reasoning_extracted = true;
-            }
+    if options.split_think
+        && let Some(content) = message.content.as_deref()
+        && let Some((reasoning, rest)) = split_think(content)
+    {
+        if let Some(r) = reasoning {
+            message.reasoning_content = Some(match message.reasoning_content.take() {
+                Some(existing) if !existing.trim().is_empty() => format!("{existing}\n{r}"),
+                _ => r,
+            });
         }
+        message.content = (!rest.is_empty()).then_some(rest);
+        report.reasoning_extracted = true;
     }
 
-    if options.recover_tool_calls && !offered_tools.is_empty() && message.tool_calls.is_empty() {
-        if let Some(content) = message.content.as_deref() {
-            let is_known = |name: &str| offered_tools.iter().any(|t| t == name);
-            if let Some(parsed) = parse_text_tool_calls(content, &is_known) {
-                report.rejected_tool_calls = parsed.rejected;
-                if !parsed.calls.is_empty() {
-                    report.recovered_format = Some(parsed.format);
-                    report.recovered_tool_calls = parsed.calls.len();
-                    message.tool_calls = parsed.calls;
-                    let rest = parsed.content.trim();
-                    message.content = (!rest.is_empty()).then(|| rest.to_string());
-                }
-                // When nothing was accepted the original text is kept, so the
-                // agent still has something to show / feed back.
+    if options.recover_tool_calls
+        && !offered_tools.is_empty()
+        && message.tool_calls.is_empty()
+        && let Some(content) = message.content.as_deref()
+    {
+        let is_known = |name: &str| offered_tools.iter().any(|t| t == name);
+        if let Some(parsed) = parse_text_tool_calls(content, &is_known) {
+            report.rejected_tool_calls = parsed.rejected;
+            if !parsed.calls.is_empty() {
+                report.recovered_format = Some(parsed.format);
+                report.recovered_tool_calls = parsed.calls.len();
+                message.tool_calls = parsed.calls;
+                let rest = parsed.content.trim();
+                message.content = (!rest.is_empty()).then(|| rest.to_string());
             }
+            // When nothing was accepted the original text is kept, so the
+            // agent still has something to show / feed back.
         }
     }
 

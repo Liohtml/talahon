@@ -142,10 +142,11 @@ fn collect_hints(v: &Value, h: &mut FieldHints, depth: usize) {
         Value::Array(a) => a.iter().for_each(|c| collect_hints(c, h, depth + 1)),
         Value::String(s) => {
             let t = s.trim_start();
-            if depth < 8 && (t.starts_with('{') || t.starts_with('[')) {
-                if let Ok(inner) = serde_json::from_str::<Value>(s) {
-                    collect_hints(&inner, h, depth + 1);
-                }
+            if depth < 8
+                && (t.starts_with('{') || t.starts_with('['))
+                && let Ok(inner) = serde_json::from_str::<Value>(s)
+            {
+                collect_hints(&inner, h, depth + 1);
             }
         }
         _ => {}
@@ -215,25 +216,24 @@ fn is_structured(v: &Value) -> bool {
 /// embedded after a prefix such as `Search results: {...}`) and plain text.
 fn parse_text_doc(text: &str) -> TextDoc {
     let trimmed = text.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-            if v.is_object() || v.is_array() {
-                let lead_len = text.len() - text.trim_start().len();
-                let trail_start = text.trim_end().len();
-                let mut segments = Vec::with_capacity(3);
-                if lead_len > 0 {
-                    segments.push(Segment::Text(text[..lead_len].to_string()));
-                }
-                segments.push(Segment::Json {
-                    value: v,
-                    original: trimmed.to_string(),
-                });
-                if trail_start < text.len() {
-                    segments.push(Segment::Text(text[trail_start..].to_string()));
-                }
-                return TextDoc { segments };
-            }
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && let Ok(v) = serde_json::from_str::<Value>(trimmed)
+        && (v.is_object() || v.is_array())
+    {
+        let lead_len = text.len() - text.trim_start().len();
+        let trail_start = text.trim_end().len();
+        let mut segments = Vec::with_capacity(3);
+        if lead_len > 0 {
+            segments.push(Segment::Text(text[..lead_len].to_string()));
         }
+        segments.push(Segment::Json {
+            value: v,
+            original: trimmed.to_string(),
+        });
+        if trail_start < text.len() {
+            segments.push(Segment::Text(text[trail_start..].to_string()));
+        }
+        return TextDoc { segments };
     }
     let bytes = text.as_bytes();
     let mut segments = Vec::new();
@@ -592,18 +592,18 @@ impl Anonymizer {
         match value {
             Value::String(s) => {
                 let t = s.trim_start();
-                if nest < MAX_NESTED_JSON && (t.starts_with('{') || t.starts_with('[')) {
-                    if let Ok(mut inner) = serde_json::from_str::<Value>(s) {
-                        if inner.is_object() || inner.is_array() {
-                            if self.deanonymize_value(&mut inner, nest + 1) {
-                                if let Ok(n) = serde_json::to_string(&inner) {
-                                    *s = n;
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
+                if nest < MAX_NESTED_JSON
+                    && (t.starts_with('{') || t.starts_with('['))
+                    && let Ok(mut inner) = serde_json::from_str::<Value>(s)
+                    && (inner.is_object() || inner.is_array())
+                {
+                    if self.deanonymize_value(&mut inner, nest + 1)
+                        && let Ok(n) = serde_json::to_string(&inner)
+                    {
+                        *s = n;
+                        return true;
                     }
+                    return false;
                 }
                 let n = self.map.deanonymize(s);
                 if n != *s {
@@ -624,14 +624,14 @@ impl Anonymizer {
     }
 
     fn classify(&self, path: &FieldPath, hints: &FieldHints) -> FieldClass {
-        if !hints.is_empty() {
-            if let Some(field) = hint_field(&path.keys, hints) {
-                let mut atoms = Vec::new();
-                key_atoms(field, &mut atoms);
-                let c = self.cfg.classify_atoms(&atoms);
-                if c != FieldClass::Free {
-                    return c;
-                }
+        if !hints.is_empty()
+            && let Some(field) = hint_field(&path.keys, hints)
+        {
+            let mut atoms = Vec::new();
+            key_atoms(field, &mut atoms);
+            let c = self.cfg.classify_atoms(&atoms);
+            if c != FieldClass::Free {
+                return c;
             }
         }
         self.cfg.classify_atoms(&path.atoms)
@@ -655,10 +655,10 @@ impl Anonymizer {
                 }
             }
             Value::String(s) => {
-                if let FieldClass::Categories(cats) = self.classify(path, hints) {
-                    if let Some(c) = self.cfg.pick_category(&cats, s) {
-                        let _ = self.tokenize_category(s, c);
-                    }
+                if let FieldClass::Categories(cats) = self.classify(path, hints)
+                    && let Some(c) = self.cfg.pick_category(&cats, s)
+                {
+                    let _ = self.tokenize_category(s, c);
                 }
             }
             Value::Number(n) => {
@@ -802,22 +802,22 @@ impl Anonymizer {
     /// strings are parsed (bounded), everything else goes to the detectors.
     fn free_string(&mut self, value: &str, nest: usize) -> Option<String> {
         let t = value.trim_start();
-        if nest < MAX_NESTED_JSON && (t.starts_with('{') || t.starts_with('[')) {
-            if let Ok(mut inner) = serde_json::from_str::<Value>(value) {
-                if inner.is_object() || inner.is_array() {
-                    let none = FieldHints::default();
-                    self.register_walk(&inner, &mut FieldPath::default(), &none, 0);
-                    if !self.rewrite_walk(&mut inner, &mut FieldPath::default(), &none, 0, nest + 1)
-                        && !has_duplicate_keys(value)
-                    {
-                        return None;
-                    }
-                    return match serde_json::to_string(&inner) {
-                        Ok(s) => Some(s),
-                        Err(_) => self.scan(value, true),
-                    };
-                }
+        if nest < MAX_NESTED_JSON
+            && (t.starts_with('{') || t.starts_with('['))
+            && let Ok(mut inner) = serde_json::from_str::<Value>(value)
+            && (inner.is_object() || inner.is_array())
+        {
+            let none = FieldHints::default();
+            self.register_walk(&inner, &mut FieldPath::default(), &none, 0);
+            if !self.rewrite_walk(&mut inner, &mut FieldPath::default(), &none, 0, nest + 1)
+                && !has_duplicate_keys(value)
+            {
+                return None;
             }
+            return match serde_json::to_string(&inner) {
+                Ok(s) => Some(s),
+                Err(_) => self.scan(value, true),
+            };
         }
         self.scan(value, true)
     }
@@ -1263,12 +1263,11 @@ impl Anonymizer {
             if char_before(text, m.start()).is_some_and(|p| matches!(p, ':' | '-' | '.')) {
                 return None;
             }
-            if let Some(n) = char_after(text, m.end()) {
-                if matches!(n, ':' | '-' | '.')
-                    && char_after(text, m.end() + 1).is_some_and(|x| x.is_ascii_hexdigit())
-                {
-                    return None;
-                }
+            if let Some(n) = char_after(text, m.end())
+                && matches!(n, ':' | '-' | '.')
+                && char_after(text, m.end() + 1).is_some_and(|x| x.is_ascii_hexdigit())
+            {
+                return None;
             }
             let hex: Vec<u8> = m
                 .as_str()
@@ -1349,14 +1348,14 @@ impl Anonymizer {
             if char_before(text, m.start()).is_some_and(|p| is_word_char(p) || p == '-') {
                 return None;
             }
-            if let Some(n) = char_after(text, m.end()) {
-                if n == '-'
+            if let Some(n) = char_after(text, m.end())
+                && (n == '-'
                     || is_word_char(n)
                     || (n == '.'
-                        && char_after(text, m.end() + 1).is_some_and(|x| x.is_ascii_alphanumeric()))
-                {
-                    return None;
-                }
+                        && char_after(text, m.end() + 1)
+                            .is_some_and(|x| x.is_ascii_alphanumeric())))
+            {
+                return None;
             }
             self.tokenize_internal_fqdn(m.as_str())
         })

@@ -480,15 +480,14 @@ impl McpClient {
                     if let McpError::Rpc {
                         data: Some(data), ..
                     } = &e
+                        && let Some(alt) = pick_supported_version(data)
+                        && !retried
+                        && alt != version
                     {
-                        if let Some(alt) = pick_supported_version(data) {
-                            if !retried && alt != version {
-                                tracing::info!(server = %self.name, from = %version, to = %alt, "retrying MCP initialize with server-supported version");
-                                version = alt;
-                                retried = true;
-                                continue;
-                            }
-                        }
+                        tracing::info!(server = %self.name, from = %version, to = %alt, "retrying MCP initialize with server-supported version");
+                        version = alt;
+                        retried = true;
+                        continue;
                     }
                     return Err(e);
                 }
@@ -878,14 +877,12 @@ async fn exit_reason_or(
     exited: Option<watch::Receiver<Option<String>>>,
     fallback: String,
 ) -> String {
-    if let Some(mut rx) = exited {
-        if let Ok(Ok(status)) =
+    if let Some(mut rx) = exited
+        && let Ok(Ok(status)) =
             tokio::time::timeout(EXIT_STATUS_WAIT, rx.wait_for(Option::is_some)).await
-        {
-            if let Some(s) = status.as_ref() {
-                return s.clone();
-            }
-        }
+        && let Some(s) = status.as_ref()
+    {
+        return s.clone();
     }
     fallback
 }

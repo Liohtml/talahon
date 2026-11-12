@@ -497,10 +497,10 @@ impl IocExtractor {
     }
 
     fn push(&mut self, f: Found, source: &str, defanged: bool) {
-        if let Some(types) = &self.opts.types {
-            if !types.contains(&f.ty) {
-                return;
-            }
+        if let Some(types) = &self.opts.types
+            && !types.contains(&f.ty)
+        {
+            return;
         }
         let key_value = if f.ty.case_insensitive() {
             f.value.to_lowercase()
@@ -1751,10 +1751,8 @@ fn scan_generic(text: &str, allow_network: bool, allow_hash: bool, out: &mut Vec
             continue;
         }
         spans.add(m.start(), end);
-        if allow_network {
-            if let Some(h) = unc_host(&v) {
-                out.extend(h);
-            }
+        if allow_network && let Some(h) = unc_host(&v) {
+            out.extend(h);
         }
         out.push(Found::new(IocType::WindowsPath, v));
     }

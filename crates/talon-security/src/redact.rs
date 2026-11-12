@@ -322,13 +322,14 @@ impl Redactor {
                 }
                 Value::Object(map) => {
                     for (key, v) in map.iter_mut() {
-                        if SENSITIVE_KEY.is_match(key) && !is_exempt_key(key) {
-                            if let Value::String(s) = &mut *v {
-                                if !is_placeholder_value(s) {
-                                    *s = format!("[REDACTED:{}]", assignment_kind(key));
-                                }
-                                continue;
+                        if SENSITIVE_KEY.is_match(key)
+                            && !is_exempt_key(key)
+                            && let Value::String(s) = &mut *v
+                        {
+                            if !is_placeholder_value(s) {
+                                *s = format!("[REDACTED:{}]", assignment_kind(key));
                             }
+                            continue;
                         }
                         stack.push((v, depth + 1));
                     }

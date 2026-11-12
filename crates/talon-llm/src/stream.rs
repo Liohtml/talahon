@@ -153,10 +153,10 @@ impl StreamAccumulator {
         };
         self.last_index = Some(index);
         let entry = self.calls.entry(index).or_default();
-        if let Some(id) = tc.id.filter(|id| !id.is_empty()) {
-            if entry.id.is_empty() {
-                entry.id = id;
-            }
+        if let Some(id) = tc.id.filter(|id| !id.is_empty())
+            && entry.id.is_empty()
+        {
+            entry.id = id;
         }
         if let Some(f) = tc.function {
             if let Some(name) = f.name.filter(|n| !n.is_empty()) {
@@ -626,13 +626,13 @@ impl Stream for ChatStream {
             }
             match this.body.as_mut().poll_next(cx) {
                 Poll::Pending => {
-                    if let Some(sleep) = this.idle_sleep.as_mut() {
-                        if sleep.as_mut().poll(cx).is_ready() {
-                            let secs = this.idle_timeout.map_or(0, |d| d.as_secs());
-                            return this.fail(LlmError::Timeout(format!(
-                                "no data from LLM server for {secs}s"
-                            )));
-                        }
+                    if let Some(sleep) = this.idle_sleep.as_mut()
+                        && sleep.as_mut().poll(cx).is_ready()
+                    {
+                        let secs = this.idle_timeout.map_or(0, |d| d.as_secs());
+                        return this.fail(LlmError::Timeout(format!(
+                            "no data from LLM server for {secs}s"
+                        )));
                     }
                     return Poll::Pending;
                 }

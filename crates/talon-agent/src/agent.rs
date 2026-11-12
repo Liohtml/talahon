@@ -369,10 +369,12 @@ impl Agent {
         if final_message.text().trim().is_empty() {
             tracing::warn!("model returned an empty final answer");
         }
-        if self.investigation && self.settings.self_check && st.tool_calls > 0 {
-            if let Some(revised) = self.self_check(&final_message, &mut st).await? {
-                final_message = ChatMessage::assistant(revised);
-            }
+        if self.investigation
+            && self.settings.self_check
+            && st.tool_calls > 0
+            && let Some(revised) = self.self_check(&final_message, &mut st).await?
+        {
+            final_message = ChatMessage::assistant(revised);
         }
         final_message.tool_calls.clear();
         if final_message.content.is_none() {
@@ -650,10 +652,10 @@ impl Agent {
         }
         // With tools disabled the client does not strip tool-call markup the
         // model may still write as text; never deliver it as the answer.
-        if let Some(parsed) = talon_llm::parse_text_tool_calls(message.text(), &|_| true) {
-            if !parsed.calls.is_empty() || !parsed.rejected.is_empty() {
-                message.content = Some(parsed.content.trim().to_string());
-            }
+        if let Some(parsed) = talon_llm::parse_text_tool_calls(message.text(), &|_| true)
+            && (!parsed.calls.is_empty() || !parsed.rejected.is_empty())
+        {
+            message.content = Some(parsed.content.trim().to_string());
         }
         if message.text().trim().is_empty() {
             message.content = Some(prompt::EMPTY_ANSWER_FALLBACK.to_string());
