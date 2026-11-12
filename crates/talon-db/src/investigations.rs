@@ -102,7 +102,7 @@ impl Db {
 
     /// One investigation by id.
     pub fn get_investigation(&self, id: &str) -> Result<Option<Investigation>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql = format!("SELECT {INV_COLUMNS} FROM investigations WHERE id = ?1");
             conn.prepare_cached(&sql)
                 .db()?
@@ -114,7 +114,7 @@ impl Db {
 
     /// Most recent first.
     pub fn list_investigations(&self, limit: usize) -> Result<Vec<Investigation>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql = format!(
                 "SELECT {INV_COLUMNS} FROM investigations
                  ORDER BY created_at DESC, rowid DESC LIMIT ?1"
@@ -131,7 +131,7 @@ impl Db {
 
     /// Latest investigation for an alert, if any (dedup of repeat triggers).
     pub fn latest_investigation_for_alert(&self, alert_id: &str) -> Result<Option<Investigation>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let sql = format!(
                 "SELECT {INV_COLUMNS} FROM investigations WHERE alert_id = ?1
                  ORDER BY created_at DESC, rowid DESC LIMIT 1"
@@ -146,7 +146,7 @@ impl Db {
 
     /// Number of investigations per status (for `/metrics`).
     pub fn investigation_status_counts(&self) -> Result<BTreeMap<String, u64>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached("SELECT status, COUNT(*) AS n FROM investigations GROUP BY status")
                 .db()?;

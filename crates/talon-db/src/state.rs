@@ -14,7 +14,7 @@ impl Db {
 
     /// Value stored under `key` (`last_timestamp`, `last_agent_timestamp`, ...).
     pub fn get_router_state(&self, key: &str) -> Result<Option<String>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached("SELECT value FROM router_state WHERE key = ?1")
                 .db()?;
@@ -38,7 +38,7 @@ impl Db {
 
     /// Stored agent session id for a lane.
     pub fn get_session(&self, key: &str) -> Result<Option<String>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached("SELECT session_id FROM sessions WHERE group_folder = ?1")
                 .db()?;
@@ -65,7 +65,7 @@ impl Db {
     /// Provider that produced the stored session; `None` when there is no
     /// session or it predates the provider column.
     pub fn get_session_provider(&self, key: &str) -> Result<Option<String>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached("SELECT provider FROM sessions WHERE group_folder = ?1")
                 .db()?;
@@ -93,7 +93,7 @@ impl Db {
 
     /// Every stored session with its last recorded context size.
     pub fn get_session_rows(&self) -> Result<Vec<SessionRow>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT group_folder, session_id, provider, input_tokens, updated_at
@@ -130,7 +130,7 @@ impl Db {
 
     /// Session key -> session id for every stored session.
     pub fn get_all_sessions(&self) -> Result<HashMap<String, String>> {
-        self.with_conn(|conn| {
+        self.with_read(|conn| {
             let mut stmt = conn
                 .prepare_cached("SELECT group_folder, session_id FROM sessions")
                 .db()?;

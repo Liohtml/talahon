@@ -130,7 +130,7 @@ impl Db {
     /// The group registered for `jid`. Rows with an invalid folder / lane
     /// key or unparseable JSON are treated as absent (and logged).
     pub fn get_registered_group(&self, jid: &str) -> Result<Option<RegisteredGroup>> {
-        let row = self.with_conn(|conn| {
+        let row = self.with_read(|conn| {
             let sql = format!("SELECT {GROUP_COLUMNS} FROM registered_groups WHERE jid = ?1");
             let mut stmt = conn.prepare_cached(&sql).db()?;
             stmt.query_row([jid], group_row).optional().db()
@@ -234,7 +234,7 @@ impl Db {
     /// Every valid registered group keyed by JID (invalid rows are skipped
     /// and logged, see [`Db::get_registered_group`]).
     pub fn get_all_registered_groups(&self) -> Result<HashMap<String, RegisteredGroup>> {
-        let rows = self.with_conn(|conn| {
+        let rows = self.with_read(|conn| {
             let sql = format!("SELECT {GROUP_COLUMNS} FROM registered_groups");
             let mut stmt = conn.prepare_cached(&sql).db()?;
             let rows = stmt
