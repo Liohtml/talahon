@@ -1,0 +1,68 @@
+name: Agent image
+
+# Builds the agent container image (never pushes it) so a broken Dockerfile,
+# a pinned MCP server that no longer installs or a missing binary is caught
+# in the pull request and not on an operator's host. The weekly run catches
+# breakage from outside the repository (base image, PyPI, upstream git).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "container/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/image.yml"
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build / smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Version pins are complete
+        run: |
+          # Nothing in the image may float: no unpinned git source or package.
+          ! grep -nE 'git\+https://[^"@]+\.git"' container/Dockerfile */setup.sh
+          ! grep -nE '^[A-Z_]+=$' container/mcp-versions.env
+          grep -qE '^ARG RUST_IMAGE=.+@sha256:[0-9a-f]{64}$' container/Dockerfile
+          grep -qE '^ARG DEBIAN_IMAGE=.+@sha256:[0-9a-f]{64}$' container/Dockerfile
+
+      - name: Build
+        run: ./container/build.sh ci
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          run() { docker run --rm --network none --entrypoint "$1" talon-agent:ci "${@:2}"; }
+          run /usr/local/bin/talon-agent --version
+          run /usr/local/bin/talon-anon-proxy --help >/dev/null
+          # Every MCP server virtualenv has a working interpreter.
+          for venv in opensearch-mcp mysql-mcp mysql-tools copilot-mcp wazuh-mcp \
+                      velociraptor-mcp shuffle-mcp cve-mcp mempalace; do
+            run "/opt/$venv/bin/python3" -c 'import sys; print(sys.prefix)'
+          done
+          # The installed versions are the pinned ones.
+          . container/mcp-versions.env
+          ver() { run "/opt/$1/bin/python3" -c 'import importlib.metadata as m, sys; print(m.version(sys.argv[1]))' "$2"; }
+          test "$(ver opensearch-mcp opensearch-mcp-server)" = "$OPENSEARCH_MCP_VERSION"
+          test "$(ver mysql-mcp mysql-mcp-server)" = "$MYSQL_MCP_VERSION"
+          test "$(ver mempalace mempalace)" = "$MEMPALACE_VERSION"
+          test "$(ver mempalace chromadb)" = "$CHROMADB_VERSION"
+          # No privilege-escalation helper, no setuid binaries.
+          run /bin/sh -c '! command -v sudo && test -z "$(find / -xdev -perm /6000 -type f 2>/dev/null)"'

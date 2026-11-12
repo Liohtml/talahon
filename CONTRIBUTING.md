@@ -48,7 +48,8 @@ CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
 --locked -- -D warnings`, `cargo test --workspace --locked` and
 `cargo package --workspace --locked` (every crate must package and build on its
 own, as crates.io will); all four must pass. It also checks the workspace with
-the minimum supported Rust version (`rust-version` in `Cargo.toml`), enforces
+the minimum supported Rust version (`rust-version` in `Cargo.toml`; builds
+only, the test dependencies need a newer compiler), enforces
 the dependency policy in `deny.toml` (`cargo deny check bans licenses
 sources`) and, when `container/` or a crate changes, builds and smoke-tests
 the agent image.
