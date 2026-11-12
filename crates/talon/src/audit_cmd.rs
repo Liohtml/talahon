@@ -1,5 +1,5 @@
-//! `talon audit verify`, `talon audit head` and `talon audit tail`, plus the
-//! audit key wiring shared with `talon run` and `talon doctor`.
+//! `talahon audit verify`, `talahon audit head` and `talahon audit tail`, plus the
+//! audit key wiring shared with `talahon run` and `talahon doctor`.
 
 use std::io::Write;
 
@@ -13,8 +13,8 @@ use talon_setup::StatusBlock;
 
 /// Shown wherever the chain turns out to be unkeyed.
 pub const UNKEYED_HINT: &str = "the audit chain is unkeyed: somebody who can write the database \
-     can rewrite or truncate it unnoticed. Set TALON_AUDIT_KEY in .env (openssl rand -hex 32) \
-     and restart talon";
+     can rewrite or truncate it unnoticed. Set TALAHON_AUDIT_KEY in .env (openssl rand -hex 32) \
+     and restart talahon";
 
 /// The audit key from `.env` ([`AUDIT_KEY_ENV`]; a secret, so the process
 /// environment is not consulted). `None` when unset or blank.
@@ -45,12 +45,12 @@ pub fn enable_audit_key(db: &Db, config: &TalonConfig) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Startup check of `talon run`: attach the audit key and make sure events
+/// Startup check of `talahon run`: attach the audit key and make sure events
 /// can be recorded with it.
 ///
 /// # Errors
 /// An invalid key, a keyed chain without a key, or a key that does not
-/// authenticate the newest row: Talon must not run without a working audit
+/// authenticate the newest row: Talahon must not run without a working audit
 /// log.
 pub fn prepare_audit(db: &Db, config: &TalonConfig) -> anyhow::Result<AuditKeyStatus> {
     enable_audit_key(db, config)?;
@@ -63,7 +63,7 @@ pub fn prepare_audit(db: &Db, config: &TalonConfig) -> anyhow::Result<AuditKeySt
         ),
         AuditKeyStatus::KeyMismatch => bail!(
             "{AUDIT_KEY_ENV} does not authenticate the newest audit row (wrong key, or the audit \
-             log was tampered with): refusing to start. Run `talon audit verify`"
+             log was tampered with): refusing to start. Run `talahon audit verify`"
         ),
         AuditKeyStatus::Unkeyed => tracing::info!("{UNKEYED_HINT}"),
         AuditKeyStatus::Pending => {
@@ -145,7 +145,7 @@ pub fn verify_block(db: &Db) -> anyhow::Result<(StatusBlock, bool)> {
         } else if v.keyed_rows == 0 && v.rows > 0 {
             block.set(
                 "WARNING",
-                "an audit key is configured but the chain has no keyed rows: talon keys it with \
+                "an audit key is configured but the chain has no keyed rows: talahon keys it with \
                  the next event it records. If it was keyed before, the keyed rows were removed",
             );
         }
@@ -171,7 +171,7 @@ pub fn verify_block(db: &Db) -> anyhow::Result<(StatusBlock, bool)> {
     Ok((block, false))
 }
 
-/// `talon audit verify`: exit code 0 when the chain is intact, 1 otherwise.
+/// `talahon audit verify`: exit code 0 when the chain is intact, 1 otherwise.
 ///
 /// # Errors
 /// The database cannot be opened or read, or the audit key is invalid.
@@ -182,7 +182,7 @@ pub fn verify(config: &TalonConfig) -> anyhow::Result<i32> {
             StatusBlock::new("AUDIT_VERIFY")
                 .field("CHAIN", "missing")
                 .field("STATUS", "failed")
-                .field("ERROR", "no database (talon has not run yet)")
+                .field("ERROR", "no database (talahon has not run yet)")
         );
         return Ok(1);
     };
@@ -215,13 +215,13 @@ pub fn head_block(db: &Db) -> anyhow::Result<StatusBlock> {
     Ok(block)
 }
 
-/// `talon audit head`: print the chain head (needs no audit key).
+/// `talahon audit head`: print the chain head (needs no audit key).
 ///
 /// # Errors
 /// The database cannot be opened or read.
 pub fn head(config: &TalonConfig) -> anyhow::Result<i32> {
     let Some(db) = open_db(config)? else {
-        eprintln!("no database (talon has not run yet)");
+        eprintln!("no database (talahon has not run yet)");
         return Ok(1);
     };
     println!("{}", head_block(&db)?);
@@ -244,13 +244,13 @@ pub fn tail_lines(db: &Db, n: usize, kind: Option<&str>) -> anyhow::Result<Vec<S
         .collect()
 }
 
-/// `talon audit tail`.
+/// `talahon audit tail`.
 ///
 /// # Errors
 /// The database cannot be opened or read.
 pub fn tail(config: &TalonConfig, n: usize, kind: Option<&str>) -> anyhow::Result<i32> {
     let Some(db) = open_db(config)? else {
-        eprintln!("no database (talon has not run yet)");
+        eprintln!("no database (talahon has not run yet)");
         return Ok(1);
     };
     let lines = tail_lines(&db, n, kind)?;
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(block.get("KEYED_EVENTS"), Some("0"));
         assert_eq!(block.get("HEAD_SCHEME"), Some("sha256"));
         assert_eq!(block.get("CHECKPOINT"), Some("disabled"));
-        assert!(block.get("HINT").unwrap().contains("TALON_AUDIT_KEY"));
+        assert!(block.get("HINT").unwrap().contains("TALAHON_AUDIT_KEY"));
 
         let head = head_block(&db).unwrap();
         assert_eq!(head.get("HEAD_ID"), Some("3"));
@@ -347,14 +347,22 @@ mod tests {
     fn audit_key_comes_from_the_env_file_and_is_validated() {
         let (_d, config) = project("");
         assert!(audit_key(&config).unwrap().is_none());
-        let (_d, config) = project("TALON_AUDIT_KEY=\n");
+        let (_d, config) = project("TALAHON_AUDIT_KEY=\n");
         assert!(audit_key(&config).unwrap().is_none());
-        let (_d, config) = project(&format!("TALON_AUDIT_KEY={KEY}\n"));
+        let (_d, config) = project(&format!("TALAHON_AUDIT_KEY={KEY}\n"));
         assert!(audit_key(&config).unwrap().is_some());
 
+        // The key under its pre-rename name still keys the chain (losing it
+        // on upgrade would make `talahon run` refuse to start), and is
+        // validated the same way.
+        let (_d, config) = project(&format!("TALON_AUDIT_KEY={KEY}\n"));
+        assert!(audit_key(&config).unwrap().is_some());
         let (_d, config) = project("TALON_AUDIT_KEY=hunter2-too-short\n");
+        assert!(audit_key(&config).is_err());
+
+        let (_d, config) = project("TALAHON_AUDIT_KEY=hunter2-too-short\n");
         let err = format!("{:#}", audit_key(&config).unwrap_err());
-        assert!(err.contains("TALON_AUDIT_KEY is too short"), "{err}");
+        assert!(err.contains("TALAHON_AUDIT_KEY is too short"), "{err}");
         assert!(!err.contains("hunter2"));
         let db = Db::open_in_memory().unwrap();
         assert!(enable_audit_key(&db, &config).is_err());
@@ -364,7 +372,7 @@ mod tests {
     #[test]
     fn keyed_chain_lifecycle_through_the_commands() {
         let (_d, unkeyed_config) = project("");
-        let env = format!("TALON_AUDIT_KEY={KEY}\n");
+        let env = format!("TALAHON_AUDIT_KEY={KEY}\n");
         let keyed_config = TalonConfig::from_env(
             &unkeyed_config.project_root,
             EnvFile::from_str_content(&env),
@@ -381,7 +389,7 @@ mod tests {
         assert!(!checkpoint.exists());
         drop(db);
 
-        // The operator sets the key: verify warns until talon has run.
+        // The operator sets the key: verify warns until talahon has run.
         let db = open(&keyed_config);
         assert!(enable_audit_key(&db, &keyed_config).unwrap());
         let (block, ok) = verify_block(&db).unwrap();
@@ -418,16 +426,16 @@ mod tests {
         assert!(!rendered.contains(KEY));
         drop(db);
 
-        // The key disappears from .env: nothing verifies, talon does not start.
+        // The key disappears from .env: nothing verifies, talahon does not start.
         let db = open(&unkeyed_config);
         let (block, ok) = verify_block(&db).unwrap();
         assert!(!ok);
         assert_eq!(block.get("CHAIN"), Some("unverifiable"));
         assert_eq!(block.get("FIRST_BAD_ROW"), Some("3"));
-        assert!(block.get("ERROR").unwrap().contains("TALON_AUDIT_KEY"));
+        assert!(block.get("ERROR").unwrap().contains("TALAHON_AUDIT_KEY"));
         let err = format!("{:#}", prepare_audit(&db, &unkeyed_config).unwrap_err());
         assert!(err.contains("refusing to start"), "{err}");
-        // `talon audit head` needs no key.
+        // `talahon audit head` needs no key.
         assert_eq!(head_block(&db).unwrap().get("HEAD_SEQ"), Some("6"));
         drop(db);
 
@@ -435,7 +443,7 @@ mod tests {
         let other = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
         let other_config = TalonConfig::from_env(
             &unkeyed_config.project_root,
-            EnvFile::from_str_content(&format!("TALON_AUDIT_KEY={other}\n")),
+            EnvFile::from_str_content(&format!("TALAHON_AUDIT_KEY={other}\n")),
         );
         let db = open(&other_config);
         let err = format!("{:#}", prepare_audit(&db, &other_config).unwrap_err());
@@ -448,7 +456,7 @@ mod tests {
         assert!(!format!("{block}").contains(other));
         drop(db);
 
-        // Tail truncated behind talon's back.
+        // Tail truncated behind talahon's back.
         assert_eq!(delete_tail(&default_db_path(&keyed_config.store_dir)), 2);
         let db = open(&keyed_config);
         enable_audit_key(&db, &keyed_config).unwrap();
@@ -457,7 +465,7 @@ mod tests {
         assert_eq!(block.get("CHAIN"), Some("truncated"));
         assert_eq!(block.get("CHECKPOINT"), Some("failed"));
         assert!(block.get("ERROR").unwrap().contains("truncated"));
-        // talon still starts, and its first event records the anomaly.
+        // talahon still starts, and its first event records the anomaly.
         assert_eq!(
             prepare_audit(&open(&keyed_config), &keyed_config).unwrap(),
             AuditKeyStatus::Active

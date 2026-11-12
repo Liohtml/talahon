@@ -1,6 +1,6 @@
 [package]
 name = "talahon-mcp-mysql"
-description = "Native MySQL MCP server (stdio) for the Talon agent container"
+description = "Native MySQL MCP server (stdio) for the Talahon agent container"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,5 +33,5 @@ mysql_async = { version = "0.37.1", default-features = false, features = ["minim
 workspace = true
 
 [[bin]]
-name = "talon-mysql-mcp"
+name = "talahon-mysql-mcp"
 path = "src/main.rs"

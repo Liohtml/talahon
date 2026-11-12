@@ -1,5 +1,5 @@
 //! OpenAI-compatible chat-completions wire types, with the vLLM extensions
-//! Talon uses (`chat_template_kwargs`, guided decoding via `response_format`
+//! Talahon uses (`chat_template_kwargs`, guided decoding via `response_format`
 //! `json_schema`, `prompt_tokens_details.cached_tokens`, `reasoning_content`).
 //!
 //! Deserialization is deliberately lenient (servers differ in small ways:
@@ -967,7 +967,7 @@ pub struct ChatCompletionChunk {
 /// One choice inside a [`ChatCompletionChunk`].
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ChunkChoice {
-    /// Choice index (Talon only uses 0).
+    /// Choice index (Talahon only uses 0).
     #[serde(default)]
     pub index: u32,
     /// The incremental update.

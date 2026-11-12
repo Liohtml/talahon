@@ -588,11 +588,20 @@ impl Orchestrator {
             return;
         };
         let name = &self.config.assistant_name;
-        if name != "Talon" {
+        // A template may carry either shipped name: the current default or,
+        // in a checkout from before the rename, the old one.
+        for shipped in [
+            talon_core::trigger::DEFAULT_ASSISTANT_NAME,
+            talon_core::trigger::LEGACY_ASSISTANT_NAME,
+        ] {
+            if name == shipped {
+                continue;
+            }
+            let heading = format!("# {shipped}");
             content = content
                 .lines()
                 .map(|l| {
-                    if l == "# Talon" {
+                    if l == heading {
                         format!("# {name}")
                     } else {
                         l.to_string()
@@ -601,7 +610,7 @@ impl Orchestrator {
                 .collect::<Vec<_>>()
                 .join("\n")
                 + if content.ends_with('\n') { "\n" } else { "" };
-            content = content.replace("You are Talon", &format!("You are {name}"));
+            content = content.replace(&format!("You are {shipped}"), &format!("You are {name}"));
         }
         match safe_fs::create_new_at(dir, AGENT_MD, content.as_bytes()) {
             Ok(()) => tracing::info!(folder = %group.folder, "Created AGENT.md from template"),

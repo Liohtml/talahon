@@ -73,7 +73,7 @@ struct ResponseParameters {
     migrate_to_chat_id: Option<i64>,
 }
 
-/// `User` (only the fields Talon uses).
+/// `User` (only the fields Talahon uses).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct User {
     pub id: i64,
@@ -118,7 +118,7 @@ pub(crate) struct Sticker {
     pub emoji: Option<String>,
 }
 
-/// `Message`. Media payloads Talon only acknowledges with a placeholder are
+/// `Message`. Media payloads Talahon only acknowledges with a placeholder are
 /// skipped without being parsed.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Message {
@@ -333,7 +333,7 @@ mod tests {
             .and(path(format!("/bot{TOKEN}/getMe")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "ok": true,
-                "result": {"id": 42, "is_bot": true, "first_name": "Talon", "username": "talonai_bot"}
+                "result": {"id": 42, "is_bot": true, "first_name": "Talahon", "username": "talonai_bot"}
             })))
             .mount(&server)
             .await;

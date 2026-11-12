@@ -1,6 +1,6 @@
 //! Per-chat sender allowlist.
-//! File: `~/.config/talon/sender-allowlist.json`. Missing file => everyone
-//! allowed (legacy behaviour) unless `TALON_SENDER_ALLOWLIST_REQUIRED=true`.
+//! File: `~/.config/talahon/sender-allowlist.json`. Missing file => everyone
+//! allowed (legacy behaviour) unless `TALAHON_SENDER_ALLOWLIST_REQUIRED=true`.
 //!
 //! File format:
 //!
@@ -20,7 +20,7 @@
 //!
 //! Load semantics: a missing file yields the allow-all default unless the
 //! allowlist is *required* ([`SenderAllowlist::load_with_policy`] with
-//! `required = true`, or `TALON_SENDER_ALLOWLIST_REQUIRED` set in the
+//! `required = true`, or `TALAHON_SENDER_ALLOWLIST_REQUIRED` set in the
 //! process environment for [`SenderAllowlist::load`]). A file that exists
 //! but cannot be used (unreadable, invalid JSON, invalid `default` entry)
 //! always fails closed, and so does an invalid per-chat entry for its chat:
@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Environment variable that makes the sender allowlist mandatory.
-pub const REQUIRED_ENV: &str = "TALON_SENDER_ALLOWLIST_REQUIRED";
+pub const REQUIRED_ENV: &str = "TALAHON_SENDER_ALLOWLIST_REQUIRED";
 
 /// Maximum size of the allowlist file.
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -130,7 +130,7 @@ impl SenderAllowlist {
     /// environment ([`REQUIRED_ENV`]). Hosts that read settings from `.env`
     /// should call [`SenderAllowlist::load_with_policy`] instead.
     pub fn load(path: &Path) -> Self {
-        let required = std::env::var(REQUIRED_ENV)
+        let required = talon_core::env::process_var(REQUIRED_ENV)
             .map(|v| {
                 matches!(
                     v.trim().to_ascii_lowercase().as_str(),

@@ -1,6 +1,6 @@
 //! # talon-setup — install, verify and service management
 //!
-//! Library behind `talon setup <step> [args...]`.
+//! Library behind `talahon setup <step> [args...]`.
 //! Every step prints one machine-readable status block (see [`status`]) that
 //! the setup skill parses, and returns an exit code:
 //!
@@ -36,7 +36,7 @@
 //! ```
 //!
 //! External commands go through [`CommandRunner`] (argv only, never a
-//! shell) so every step is unit-testable; secrets (`TALON_VLLM_API_KEY`,
+//! shell) so every step is unit-testable; secrets (`TALAHON_VLLM_API_KEY`,
 //! channel tokens) are used but never printed.
 
 #![warn(missing_docs)]

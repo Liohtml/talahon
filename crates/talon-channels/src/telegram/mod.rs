@@ -72,6 +72,11 @@ pub struct TelegramConfig {
     pub api_base_url: String,
     /// Assistant name used for the trigger (`@<name>`) and `/ping`.
     pub assistant_name: String,
+    /// True when `ASSISTANT_NAME` is not set and [`Self::assistant_name`] is
+    /// the built-in default: default triggers then also accept the name the
+    /// assistant had before the rename (`@Talon`), see
+    /// [`talon_core::trigger::trigger_pattern`].
+    pub assistant_name_is_default: bool,
     /// Where the `getUpdates` offset is persisted. `None` disables
     /// persistence (Telegram then redelivers unconfirmed updates).
     pub state_path: Option<PathBuf>,
@@ -91,6 +96,7 @@ impl std::fmt::Debug for TelegramConfig {
             .field("bot_token", &"<redacted>")
             .field("api_base_url", &self.api_base_url)
             .field("assistant_name", &self.assistant_name)
+            .field("assistant_name_is_default", &self.assistant_name_is_default)
             .field("state_path", &self.state_path)
             .field("poll_timeout", &self.poll_timeout)
             .finish_non_exhaustive()
@@ -104,6 +110,7 @@ impl TelegramConfig {
             bot_token: bot_token.into(),
             api_base_url: DEFAULT_TELEGRAM_API_BASE.to_string(),
             assistant_name: assistant_name.into(),
+            assistant_name_is_default: false,
             state_path: None,
             poll_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(30),
@@ -118,8 +125,12 @@ impl TelegramConfig {
     /// configured.
     pub fn from_env(env: &EnvFile) -> Option<Self> {
         let token = secret_value(env, TELEGRAM_BOT_TOKEN_ENV)?;
-        let name = setting(env, "ASSISTANT_NAME").unwrap_or_else(|| "Talon".to_string());
+        let configured = setting(env, "ASSISTANT_NAME");
+        let name_is_default = configured.is_none();
+        let name =
+            configured.unwrap_or_else(|| talon_core::trigger::DEFAULT_ASSISTANT_NAME.to_string());
         let mut cfg = Self::new(token, name);
+        cfg.assistant_name_is_default = name_is_default;
         cfg.state_path =
             project_root(env).map(|root| root.join("data").join("telegram").join("state.json"));
         Some(cfg)
@@ -140,6 +151,8 @@ struct Inner {
     api: BotApi,
     host: Arc<dyn ChannelHost>,
     assistant_name: String,
+    /// `ASSISTANT_NAME` is not set: default triggers also accept `@Talon`.
+    assistant_name_is_default: bool,
     trigger: Regex,
     /// The bot's own `@username` (from `getMe`), lowercase comparison.
     bot_username: RwLock<Option<String>>,
@@ -187,20 +200,24 @@ impl TelegramChannel {
         )
         .map_err(|e| Error::Channel(e.to_string()))?;
         let assistant_name = config.assistant_name.trim().to_string();
+        let assistant_name_is_default =
+            config.assistant_name_is_default || assistant_name.is_empty();
         let assistant_name = if assistant_name.is_empty() {
-            "Talon".to_string()
+            talon_core::trigger::DEFAULT_ASSISTANT_NAME.to_string()
         } else {
             assistant_name
         };
-        let trigger = talon_core::trigger::build_trigger_pattern(
+        let trigger = talon_core::trigger::trigger_pattern(
             &talon_core::trigger::default_trigger(&assistant_name),
             &assistant_name,
+            assistant_name_is_default,
         );
         Ok(Self {
             inner: Arc::new(Inner {
                 api,
                 host,
                 assistant_name,
+                assistant_name_is_default,
                 trigger,
                 bot_username: RwLock::new(None),
                 connected: AtomicBool::new(false),
@@ -375,7 +392,7 @@ fn is_group_chat(kind: &str) -> bool {
     kind == "group" || kind == "supergroup"
 }
 
-/// Placeholder for a non-text message, or `None` for kinds Talon ignores.
+/// Placeholder for a non-text message, or `None` for kinds Talahon ignores.
 fn non_text_placeholder(msg: &Message) -> Option<String> {
     if msg.photo.is_some() {
         Some("[Photo]".to_string())
@@ -570,7 +587,11 @@ impl Inner {
         match group.map(|g| g.trigger.trim()).filter(|t| !t.is_empty()) {
             Some(trigger) => (
                 trigger.to_string(),
-                talon_core::trigger::build_trigger_pattern(trigger, &self.assistant_name),
+                talon_core::trigger::trigger_pattern(
+                    trigger,
+                    &self.assistant_name,
+                    self.assistant_name_is_default,
+                ),
             ),
             None => (
                 talon_core::trigger::default_trigger(&self.assistant_name),
@@ -580,7 +601,7 @@ impl Inner {
     }
 
     /// Translate an `@bot_username` mention into the chat's trigger: a
-    /// Telegram mention (`@talonai_bot`) never matches `^@Talon\b`, nor a
+    /// Telegram mention (`@talonai_bot`) never matches `^@Talahon\b`, nor a
     /// group's own trigger word.
     fn with_trigger(
         &self,

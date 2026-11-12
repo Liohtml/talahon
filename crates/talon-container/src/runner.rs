@@ -87,7 +87,7 @@ pub const DEFAULT_MAX_RESULT_BYTES_PER_RUN: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_RUN_TIME_FACTOR: u32 = 4;
 /// Env / `.env` key selecting the agent network (`default` or empty: the
 /// runtime's default bridge; unset: [`AGENT_NETWORK`]).
-pub const CONTAINER_NETWORK_ENV: &str = "TALON_CONTAINER_NETWORK";
+pub const CONTAINER_NETWORK_ENV: &str = "TALAHON_CONTAINER_NETWORK";
 /// Longest session id accepted from a container frame (N-5). The agent
 /// reports a UUID (36 bytes); the id is persisted, logged and sent back to
 /// the container on the next run, so anything longer is dropped.
@@ -214,7 +214,7 @@ impl RunnerConfig {
         out.idle_timeout = cfg.idle_timeout;
         out.max_output_bytes = cfg.container_max_output_bytes;
         // `EnvFile::get` cannot tell "set but empty" from "unset".
-        let raw = std::env::var(CONTAINER_NETWORK_ENV).ok().or_else(|| {
+        let raw = talon_core::env::process_var(CONTAINER_NETWORK_ENV).or_else(|| {
             cfg.env
                 .file_value(CONTAINER_NETWORK_ENV)
                 .map(str::to_string)
@@ -1667,7 +1667,7 @@ mod tests {
 
     impl Harness {
         fn config(&self) -> RunnerConfig {
-            let mut cfg = RunnerConfig::new("talon-agent:latest", MountLayout::new(&self.root));
+            let mut cfg = RunnerConfig::new("talahon-agent:latest", MountLayout::new(&self.root));
             cfg.timezone = "America/Los_Angeles".into();
             cfg.run_as = Some(RunAs {
                 uid: 1000,
@@ -1701,7 +1701,7 @@ mod tests {
         RegisteredGroup {
             name: "Test Group".into(),
             folder: "test-group".into(),
-            trigger: "@Talon".into(),
+            trigger: "@Talahon".into(),
             added_at: "2026-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,
@@ -2489,11 +2489,11 @@ mod tests {
         assert_eq!(launch.details["envKeys"], serde_json::json!(["LOG_LEVEL"]));
         assert_eq!(events[2].outcome, "info");
 
-        // The spawned command is `docker run ... talon-agent:latest`.
+        // The spawned command is `docker run ... talahon-agent:latest`.
         let seen = spawner.seen.lock().unwrap().clone();
         assert_eq!(seen[0].program, "docker");
         assert_eq!(seen[0].args[0], "run");
-        assert_eq!(seen[0].args.last().unwrap(), "talon-agent:latest");
+        assert_eq!(seen[0].args.last().unwrap(), "talahon-agent:latest");
         assert!(seen[0].args.contains(&"--read-only".to_string()));
         assert!(!seen[0].args.iter().any(|a| a.contains("API_TOKEN")));
 
@@ -2639,18 +2639,18 @@ mod tests {
 
         // From the host configuration (.env values; the process env is
         // only consulted when it sets the key, which tests never do).
-        if std::env::var_os(CONTAINER_NETWORK_ENV).is_none() {
+        if !talon_core::env::process_var_is_set(CONTAINER_NETWORK_ENV) {
             let load = |content: &str| {
                 let env = talon_core::env::EnvFile::from_str_content(content);
                 RunnerConfig::from_talon_config(&TalonConfig::from_env(&h.root, env))
             };
             assert_eq!(load("").default_network.as_deref(), Some("talon-agents"));
             assert_eq!(
-                load("TALON_CONTAINER_NETWORK=default").default_network,
+                load("TALAHON_CONTAINER_NETWORK=default").default_network,
                 None
             );
             assert_eq!(
-                load("TALON_CONTAINER_NETWORK=soc-net")
+                load("TALAHON_CONTAINER_NETWORK=soc-net")
                     .default_network
                     .as_deref(),
                 Some("soc-net")

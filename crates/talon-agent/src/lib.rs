@@ -1,16 +1,16 @@
-//! # talon-agent — in-container agent runtime
+//! # talahon-agent — in-container agent runtime
 //!
 //! See `docs/RUST_ARCHITECTURE.md` §3.1–3.4. Runs the agent turn inside the
 //! container with a native vLLM agent loop.
 //!
 //! The binary has two modes:
 //!
-//! - **`talon-agent supervise`** ([`supervise`]) — runs as root (PID 1 of the
+//! - **`talahon-agent supervise`** ([`supervise`]) — runs as root (PID 1 of the
 //!   container), LLM-free: validates the stdin input, starts each MCP server
 //!   of `.mcp.json` as its `mcp-*` account behind a unix socket, then runs
-//!   `talon-agent run` as `RUN_UID:RUN_GID` and tears everything down when
+//!   `talahon-agent run` as `RUN_UID:RUN_GID` and tears everything down when
 //!   it exits. Without root it falls back to `run`.
-//! - **`talon-agent run`** ([`run`]) — the unprivileged agent: reads the
+//! - **`talahon-agent run`** ([`run`]) — the unprivileged agent: reads the
 //!   `ContainerInput`, resumes/creates the session, and drives the
 //!   [`agent::Agent`] loop against the host LLM gateway (vLLM), emitting
 //!   `ContainerOutput` frames on stdout.
@@ -31,9 +31,9 @@
 //!   archives under `<state>/conversations/`
 //! - [`script`]   — scheduled-task pre-flight scripts
 //! - [`agent`]    — the turn / session loop
-//! - [`run`]      — `talon-agent run` (lane-private triage reports under
+//! - [`run`]      — `talahon-agent run` (lane-private triage reports under
 //!   `<state>/reports/`, eval records under `<state>/evals/`)
-//! - [`supervise`]— `talon-agent supervise`
+//! - [`supervise`]— `talahon-agent supervise`
 //! - [`mountinfo`]— read-only mount check for privileged MCP commands
 //! - [`error`]    — [`AgentError`]
 //!

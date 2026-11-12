@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Talon SIEM — one-time setup
+# Talahon SIEM — one-time setup
 #
 # What this does:
 #   1. Creates a Python virtual environment (.venv/) to avoid host Python conflicts
@@ -8,7 +8,7 @@
 #   4. Generates .claude/settings.json (MCP settings for local dev tools)
 #
 # After running this, edit .env with your OpenSearch credentials, then
-# restart Talon.
+# restart Talahon.
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 SETTINGS_FILE="$SCRIPT_DIR/.claude/settings.json"
 MCP_WRAPPER="$SCRIPT_DIR/opensearch-mcp.sh"
 
-echo "=== Talon SIEM Setup ==="
+echo "=== Talahon SIEM Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ echo "Using $PYTHON_BIN ($PYTHON_VERSION)  ✓"
 #   2. Has no pip (Debian/Ubuntu strip ensurepip from python3-venv).
 #   3. Has a stale shebang in pip pointing at a path that doesn't exist —
 #      happens when the venv was rsync'd or restored from another host. The
-#      old shebang lingers (e.g. #!/opt/talon/siem/.venv/bin/python from the
+#      old shebang lingers (e.g. #!/opt/talahon/siem/.venv/bin/python from the
 #      build host) and pip silently fails with "no such file" before its own
 #      logic runs.
 _venv_pip_shebang_stale() {
@@ -105,7 +105,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
     echo ""
     echo "  Created .env from template."
-    echo "  ➜ Edit $ENV_FILE with your OpenSearch credentials before starting Talon."
+    echo "  ➜ Edit $ENV_FILE with your OpenSearch credentials before starting Talahon."
     echo ""
 else
     echo ".env exists  ✓"
@@ -135,8 +135,8 @@ echo ""
 echo "Next steps:"
 if grep -q "your-opensearch-host" "$ENV_FILE" 2>/dev/null; then
     echo "  1. Edit siem/.env with your OpenSearch URL, username, and password"
-    echo "  2. Restart Talon (systemctl --user restart talon)"
+    echo "  2. Restart Talahon (systemctl --user restart talahon)"
 else
-    echo "  1. Restart Talon (systemctl --user restart talon)"
+    echo "  1. Restart Talahon (systemctl --user restart talahon)"
 fi
 echo ""

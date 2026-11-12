@@ -1,5 +1,5 @@
 //! The setup steps (one module each) and the
-//! dispatcher the host CLI (`talon setup <step> [args...]`) calls.
+//! dispatcher the host CLI (`talahon setup <step> [args...]`) calls.
 
 pub mod container;
 pub mod egress;

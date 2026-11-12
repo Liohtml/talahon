@@ -159,7 +159,7 @@ Alert to investigate:
 - triggered_by: {triggered_by}{override_line}
 
 Steps:
-1. Skip Step 0 deduplication — Talon already deduplicated this request and assigned the job id. Register the job in CoPilot and mark it running, in this order:
+1. Skip Step 0 deduplication — Talahon already deduplicated this request and assigned the job id. Register the job in CoPilot and mark it running, in this order:
    a. mcp__copilot__CreateAiAnalystJobTool(id="{job_id}", alert_id={alert_id}, customer_code="{customer_code}", triggered_by="{triggered_by}")
    b. mcp__copilot__UpdateAiAnalystJobTool(job_id="{job_id}", status="running")
 2. Resolve the alert source and target document via MySQL before any OpenSearch query. The alert_id passed here is CoPilot's internal DB counter and is NOT a field on raw SIEM documents — searching OpenSearch for it returns nothing, and falling back to a time-window query will pick up unrelated noise (typically the agent's own container-startup events) and produce a report about the wrong event. Run exactly this query via mcp__mysql__mysql_query:
@@ -173,7 +173,7 @@ Steps:
 
    Treat the returned (index_name, index_id) as the authoritative pointer to the raw event for every subsequent SIEM lookup. The 'source' column ("wazuh", "office365", "misp", …) tells you which OpenSearch index family the event lives in. If the row is missing, ast.index_name is empty, or the source is unrecognised, mark the job 'failed' with a descriptive error_message rather than guessing from timestamps.
 3. Follow Step 0.5 (MemPalace prior context for the asset, customer and IOCs) and Steps 2–6 from AGENT.md exactly (fetch raw event + index mapping, detect alert type, load template, extract IOCs, threat intel, SIEM correlation).
-{step_override_instruction}3b. Complete Step 5.5 from AGENT.md: call score_alert, verify every claim against the evidence you collected, then call submit_triage_report with report_id="{job_id}". Use the severity_assessment label and the Markdown it returns for step 4a. Talon records this structured verdict on the investigation.
+{step_override_instruction}3b. Complete Step 5.5 from AGENT.md: call score_alert, verify every claim against the evidence you collected, then call submit_triage_report with report_id="{job_id}". Use the severity_assessment label and the Markdown it returns for step 4a. Talahon records this structured verdict on the investigation.
 4. Write back to CoPilot — call these three tools in order. The four body fields on SubmitAiAnalystReportTool (severity_assessment, summary, report_markdown, recommended_actions) carry the entire human-readable investigation output; a call missing any of them persists a blank row that surfaces as an empty report in CoPilot. Pass all of them every time, even on trivial false positives.
 
    a. mcp__copilot__SubmitAiAnalystReportTool — returns report_id:
@@ -396,7 +396,7 @@ mod tests {
         assert!(!p.contains("TEMPLATE OVERRIDE"));
         assert!(p.contains("SIEM correlation).\n3b. Complete Step 5.5"));
         assert!(p.contains(r#"submit_triage_report with report_id="copilot-inv-1234-1""#));
-        assert!(p.contains("for step 4a. Talon records this structured verdict on the investigation.\n4. Write back"));
+        assert!(p.contains("for step 4a. Talahon records this structured verdict on the investigation.\n4. Write back"));
         // MemPalace lessons are recalled on the real-time path too.
         assert!(p.contains("3. Follow Step 0.5 (MemPalace"));
         // The job is completed only after its report exists.

@@ -103,7 +103,7 @@ pub fn available_groups(
 mod tests {
     use super::*;
 
-    const ASSISTANT: &str = "Talon";
+    const ASSISTANT: &str = "Talahon";
 
     fn make_group() -> RegisteredGroup {
         RegisteredGroup {
@@ -252,40 +252,40 @@ mod tests {
 
     #[test]
     fn trigger_matches_at_start() {
-        assert!(default_pattern().is_match("@Talon hello"));
+        assert!(default_pattern().is_match("@Talahon hello"));
     }
 
     #[test]
     fn trigger_matches_case_insensitively() {
-        assert!(default_pattern().is_match("@talon hello"));
-        assert!(default_pattern().is_match("@TALON hello"));
+        assert!(default_pattern().is_match("@talahon hello"));
+        assert!(default_pattern().is_match("@TALAHON hello"));
     }
 
     #[test]
     fn trigger_not_matched_mid_message() {
-        assert!(!default_pattern().is_match("hello @Talon"));
+        assert!(!default_pattern().is_match("hello @Talahon"));
     }
 
     #[test]
     fn trigger_requires_word_boundary() {
-        assert!(!default_pattern().is_match("@Talonextra hello"));
+        assert!(!default_pattern().is_match("@Talahonextra hello"));
     }
 
     #[test]
     fn trigger_word_boundary_before_apostrophe() {
-        assert!(default_pattern().is_match("@Talon's thing"));
+        assert!(default_pattern().is_match("@Talahon's thing"));
     }
 
     #[test]
     fn trigger_alone_matches() {
-        assert!(default_pattern().is_match("@Talon"));
+        assert!(default_pattern().is_match("@Talahon"));
     }
 
     #[test]
     fn per_group_trigger_is_used() {
         let p = build_trigger_pattern("@Claw", ASSISTANT);
         assert!(p.is_match("@Claw hello"));
-        assert!(!p.is_match("@Talon hello"));
+        assert!(!p.is_match("@Talahon hello"));
     }
 
     #[test]
@@ -321,14 +321,14 @@ mod tests {
 
     #[test]
     fn non_main_processes_with_trigger() {
-        assert!(gate(false, Some(true), "", "@Talon do something"));
-        assert!(gate(false, Some(true), "", "   @Talon do something"));
+        assert!(gate(false, Some(true), "", "@Talahon do something"));
+        assert!(gate(false, Some(true), "", "   @Talahon do something"));
     }
 
     #[test]
     fn non_main_uses_its_own_trigger() {
         assert!(gate(false, Some(true), "@Claw", "@Claw do something"));
-        assert!(!gate(false, Some(true), "@Claw", "@Talon do something"));
+        assert!(!gate(false, Some(true), "@Claw", "@Talahon do something"));
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod tests {
             RegisteredGroup {
                 name: "Registered".into(),
                 folder: "registered".into(),
-                trigger: "@Talon".into(),
+                trigger: "@Talahon".into(),
                 ..make_group()
             },
         )]);

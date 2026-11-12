@@ -1,6 +1,6 @@
 //! Byte-level relay between one connection (e.g. an accepted
 //! `UnixStream`) and a server process's stdio. The privileged supervisor
-//! (`talon-agent supervise`) uses this to expose each MCP server, running
+//! (`talahon-agent supervise`) uses this to expose each MCP server, running
 //! as its own `mcp-*` user, on `/run/talon/mcp/<server>.sock` for the
 //! unprivileged agent. Message framing and limits are enforced by the
 //! client on the other end; the relay itself is transparent.

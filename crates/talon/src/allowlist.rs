@@ -46,7 +46,7 @@ impl std::fmt::Debug for AllowlistSource {
 
 impl AllowlistSource {
     /// Read `path`; with `required`, a missing or invalid file denies every
-    /// sender (`TALON_SENDER_ALLOWLIST_REQUIRED`).
+    /// sender (`TALAHON_SENDER_ALLOWLIST_REQUIRED`).
     pub fn from_file(path: PathBuf, required: bool) -> Self {
         Self {
             mode: Mode::File {

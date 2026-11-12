@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Shuffle MCP server wrapper for Talon.
+# Shuffle MCP server wrapper for Talahon.
 #
 # Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Talon agent container. `talon-agent supervise` starts this script
+#   1. Talahon agent container. `talahon-agent supervise` starts this script
 #      directly as `mcp-shuffle` (`"runAs": "mcp-shuffle"` in .mcp.json). The
 #      credentials were staged at /etc/mcp-secrets/shuffle.env (owner
 #      mcp-shuffle, mode 0600); the visible shuffle-mcp/.env is shadowed with

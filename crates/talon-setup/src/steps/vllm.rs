@@ -1,8 +1,8 @@
 //! Step `vllm`:
 //! verify that the configured vLLM server answers `GET <base>/v1/models`
-//! and serves `TALON_VLLM_MODEL` (and `TALON_VLLM_FAST_MODEL` if set).
+//! and serves `TALAHON_VLLM_MODEL` (and `TALAHON_VLLM_FAST_MODEL` if set).
 //!
-//! The API key (`TALON_VLLM_API_KEY`, `.env` only) is used for the probe but
+//! The API key (`TALAHON_VLLM_API_KEY`, `.env` only) is used for the probe but
 //! only ever reported as `set` / `unset`.
 
 use super::StepArgs;
@@ -102,7 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_server_is_probed_with_key_from_env_file() {
-        if std::env::var_os("TALON_VLLM_BASE_URL").is_some() {
+        if talon_core::env::process_var_is_set("TALAHON_VLLM_BASE_URL") {
             return;
         }
         let server = MockServer::start().await;
@@ -119,7 +119,7 @@ mod tests {
         std::fs::write(
             dir.path().join(".env"),
             format!(
-                "TALON_VLLM_BASE_URL={base}\nTALON_VLLM_MODEL=qwen\nTALON_VLLM_API_KEY=s3cret\n"
+                "TALAHON_VLLM_BASE_URL={base}\nTALAHON_VLLM_MODEL=qwen\nTALAHON_VLLM_API_KEY=s3cret\n"
             ),
         )
         .unwrap();

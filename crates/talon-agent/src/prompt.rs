@@ -55,7 +55,7 @@ pub const MEMORY_SOURCE: &str = "group-memory";
 const MAX_MCP_INSTRUCTIONS_BYTES: usize = 8 * 1024;
 
 /// Default assistant name when the host does not send one.
-pub const DEFAULT_ASSISTANT_NAME: &str = "Talon";
+pub const DEFAULT_ASSISTANT_NAME: &str = "Talahon";
 
 /// Name of the intel tool investigations should finish with.
 pub const SUBMIT_TRIAGE_REPORT: &str = "submit_triage_report";
@@ -64,16 +64,16 @@ pub const SUBMIT_TRIAGE_REPORT: &str = "submit_triage_report";
 pub const SCHEDULED_TASK_PREFIX: &str = "[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]";
 
 /// Appended (as a user message) when the per-turn tool budget is spent.
-pub const FORCE_FINAL_BUDGET: &str = "[talon] You have reached the tool-call limit for this turn. Do not call any more tools. Write your final answer now, based only on the information gathered so far, and state clearly what remains unverified or unfinished.";
+pub const FORCE_FINAL_BUDGET: &str = "[talahon] You have reached the tool-call limit for this turn. Do not call any more tools. Write your final answer now, based only on the information gathered so far, and state clearly what remains unverified or unfinished.";
 
 /// Appended (as a user message) when a tool-call loop stopped the turn.
-pub const FORCE_FINAL_LOOP: &str = "[talon] You kept repeating the same tool call with identical arguments, so the turn was stopped. Do not call any more tools. Write your final answer now based on what you have, and explain what you could not complete.";
+pub const FORCE_FINAL_LOOP: &str = "[talahon] You kept repeating the same tool call with identical arguments, so the turn was stopped. Do not call any more tools. Write your final answer now based on what you have, and explain what you could not complete.";
 
 /// Self-check request for investigation answers.
-pub const SELF_CHECK_PROMPT: &str = "[talon self-check] Before your answer above is delivered, verify it. Check every factual claim (alert details, hosts, users, IP addresses, hashes, counts, timestamps, verdict, severity, threat-intel results, MITRE mappings) against the tool results in this conversation. Remove or correct anything that is not supported by tool evidence and mark remaining uncertainty explicitly. Do not call tools. Reply with the complete corrected final answer only, without commentary about the check; if everything is supported, repeat the answer unchanged.";
+pub const SELF_CHECK_PROMPT: &str = "[talahon self-check] Before your answer above is delivered, verify it. Check every factual claim (alert details, hosts, users, IP addresses, hashes, counts, timestamps, verdict, severity, threat-intel results, MITRE mappings) against the tool results in this conversation. Remove or correct anything that is not supported by tool evidence and mark remaining uncertainty explicitly. Do not call tools. Reply with the complete corrected final answer only, without commentary about the check; if everything is supported, repeat the answer unchanged.";
 
 /// Guided-decoding request for a missing structured triage report.
-pub const REPORT_PROMPT: &str = "[talon] The investigation is finished but no structured triage report was submitted. Produce it now as a single JSON object matching the required schema. Use only facts supported by the tool results in this conversation, and lower the confidence where the evidence is thin.";
+pub const REPORT_PROMPT: &str = "[talahon] The investigation is finished but no structured triage report was submitted. Produce it now as a single JSON object matching the required schema. Use only facts supported by the tool results in this conversation, and lower the confidence where the evidence is thin.";
 
 /// Text returned when the model produced no final answer at all.
 pub const EMPTY_ANSWER_FALLBACK: &str =
@@ -161,7 +161,7 @@ fn read_text_capped(path: &Path, max: usize, follow_symlinks: bool) -> Option<St
             cut -= 1;
         }
         text.truncate(cut);
-        text.push_str("\n\n[... truncated by Talon ...]");
+        text.push_str("\n\n[... truncated by Talahon ...]");
     }
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -191,7 +191,7 @@ const TOOL_GUIDANCE: &str = "## Tool use
 - Long tool results are truncated (beginning and end kept). Narrow the query, filter, or read a smaller range instead of repeating the same call; an identical call returns an identical result.
 - When you are done, reply with plain text and no tool calls. That final message is delivered to the user or chat. Wrap notes that should not be delivered in <internal>...</internal>.
 - Use `send_message` only for progress updates or messages that must go out before you finish.
-- Instructions may use Claude Code tool names. Use the Talon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`. WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
+- Instructions may use Claude Code tool names. Use the Talahon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`. WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
 - MCP tools are named `mcp__<server>__<tool>`.
 - To remember something for future runs, update `MEMORY.md` in the group folder (`edit_file` / `write_file`). `AGENT.md` files (and `CLAUDE.md`, their former name) are read-only instructions: never try to modify them.";
 
@@ -206,7 +206,7 @@ pub fn build_system_prompt(inputs: &SystemPromptInputs) -> String {
     let p = &inputs.paths;
     let mut s = String::with_capacity(16 * 1024);
     s.push_str(&format!(
-        "You are {name}, an AI assistant running inside Talon, an autonomous security-operations agent platform (CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
+        "You are {name}, an AI assistant running inside Talahon, an autonomous security-operations agent platform (CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
     ));
 
     if let Some(global) = read_operator_instructions(&p.global) {
@@ -315,7 +315,7 @@ fn workspace_section(inputs: &SystemPromptInputs) -> String {
     }
     if inputs.is_main && p.project.is_dir() {
         s.push_str(&format!(
-            "- `{}`: the Talon project (read-only).\n",
+            "- `{}`: the Talahon project (read-only).\n",
             p.project.display()
         ));
     }
@@ -431,7 +431,7 @@ pub fn script_prompt(data: Option<&serde_json::Value>, prompt: &str) -> String {
 /// Note appended to a tool result that repeats an identical call.
 pub fn loop_nudge(tool: &str, count: u32) -> String {
     format!(
-        "\n\n[talon] Note: this is call #{count} of `{tool}` with identical arguments in this turn; the result will not change. Use a different approach or different arguments, or finish your answer."
+        "\n\n[talahon] Note: this is call #{count} of `{tool}` with identical arguments in this turn; the result will not change. Use a different approach or different arguments, or finish your answer."
     )
 }
 
@@ -463,7 +463,7 @@ mod tests {
 
     fn inputs(root: &Path) -> SystemPromptInputs {
         SystemPromptInputs {
-            assistant_name: "Talon".into(),
+            assistant_name: "Talahon".into(),
             group_folder: "main".into(),
             is_main: true,
             paths: AgentPaths::under(root),
@@ -486,7 +486,7 @@ mod tests {
         let a = build_system_prompt(&i);
         let b = build_system_prompt(&i);
         assert_eq!(a, b, "system prompt must be byte-stable");
-        assert!(a.starts_with("You are Talon"));
+        assert!(a.starts_with("You are Talahon"));
         let g = a.find("GLOBAL RULES").unwrap();
         let gr = a.find("GROUP RULES").unwrap();
         let f = a.find("## Untrusted data").unwrap();
@@ -627,7 +627,7 @@ mod tests {
         std::fs::write(paths.memory(), "ü".repeat(MAX_MEMORY_BYTES)).unwrap();
         let m = read_group_memory(&paths.memory()).unwrap();
         assert!(m.len() <= MAX_MEMORY_BYTES + 64);
-        assert!(m.ends_with("[... truncated by Talon ...]"));
+        assert!(m.ends_with("[... truncated by Talahon ...]"));
         assert!(build_memory_note(&paths).unwrap().len() < MAX_MEMORY_BYTES + 4096);
 
         // A symlink is refused even when it points at a readable file.
@@ -668,7 +668,7 @@ mod tests {
         ];
         i.unavailable_mcp_servers = vec!["wazuh".into()];
         let s = build_system_prompt(&i);
-        assert!(s.starts_with("You are Talon"));
+        assert!(s.starts_with("You are Talahon"));
         // Per-run data never reaches the system prompt (prefix-cache stable).
         assert_eq!(s, baseline);
         assert!(!s.contains("untrusted_data source=\"mcp:"));
@@ -689,7 +689,7 @@ mod tests {
         std::fs::write(&f, "é".repeat(MAX_INSTRUCTIONS_BYTES)).unwrap();
         let t = read_instructions(&f).unwrap();
         assert!(t.len() <= MAX_INSTRUCTIONS_BYTES + 64);
-        assert!(t.ends_with("[... truncated by Talon ...]"));
+        assert!(t.ends_with("[... truncated by Talahon ...]"));
         std::fs::write(&f, "   ").unwrap();
         assert!(read_instructions(&f).is_none());
         assert!(read_instructions(&dir.path().join("missing")).is_none());

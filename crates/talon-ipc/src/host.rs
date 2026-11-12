@@ -44,7 +44,7 @@ impl SourceIdentity {
     }
 }
 
-/// Callbacks into the host orchestrator (`talon`).
+/// Callbacks into the host orchestrator (`talahon`).
 ///
 /// Async callbacks are bounded by
 /// [`IpcWatcherConfig::host_call_timeout`](crate::IpcWatcherConfig::host_call_timeout).
@@ -93,7 +93,7 @@ mod tests {
         RegisteredGroup {
             name: folder.into(),
             folder: folder.into(),
-            trigger: "@Talon".into(),
+            trigger: "@Talahon".into(),
             added_at: "2024-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,

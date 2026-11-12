@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# OpenSearch MCP server wrapper for Talon (SIEM).
+# OpenSearch MCP server wrapper for Talahon (SIEM).
 #
 # Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Talon agent container. `talon-agent supervise` starts this script
+#   1. Talahon agent container. `talahon-agent supervise` starts this script
 #      directly as the dedicated `mcp-siem` user (`"runAs": "mcp-siem"` in the
 #      group's .mcp.json). The entrypoint staged the credentials at
 #      /etc/mcp-secrets/siem.env (owner mcp-siem, mode 0600) — nobody else,
@@ -16,7 +16,7 @@
 # Server implementation:
 #
 #   default                     the Python `opensearch-mcp-server` (PyPI)
-#   TALON_OPENSEARCH_MCP=rust   the native `talon-opensearch-mcp` binary
+#   TALAHON_OPENSEARCH_MCP=rust   the native `talahon-opensearch-mcp` binary
 #                               (crates/talon-mcp-opensearch): same read-only
 #                               tools and arguments, no Python cold start.
 #                               Opt-in; set it in the env file loaded below or
@@ -38,7 +38,9 @@ export PYTHONSAFEPATH=1
 LOCAL_MCP="$SCRIPT_DIR/.venv/bin/opensearch-mcp-server"
 SYSTEM_MCP="/opt/opensearch-mcp/bin/opensearch-mcp-server"
 ISOLATED_ENV="/etc/mcp-secrets/siem.env"
-NATIVE_NAME="talon-opensearch-mcp"
+NATIVE_NAME="talahon-opensearch-mcp"
+# The binary's name up to 2.x (an image built before the rename has only this).
+LEGACY_NATIVE_NAME="talon-opensearch-mcp"
 TAG="[opensearch-mcp]"
 
 _err() { echo "$TAG ERROR: $*" >&2; }
@@ -62,19 +64,26 @@ _is_native_exec() {
     return 0
 }
 
-# Exec the native Rust server if it was asked for (TALON_OPENSEARCH_MCP=rust,
+# Exec the native Rust server if it was asked for (TALAHON_OPENSEARCH_MCP=rust,
 # from the env file just loaded or the environment) and a binary exists.
 # Extra arguments are further directories to search (dev mode only). Returns
 # when the Python server should be used.
 _maybe_exec_native() {
-    [[ "${TALON_OPENSEARCH_MCP:-}" == "rust" ]] || return 0
-    local candidates=("/usr/local/bin/$NATIVE_NAME")
-    local on_path
-    on_path="$(command -v "$NATIVE_NAME" 2>/dev/null || true)"
-    [[ -n "$on_path" ]] && candidates+=("$on_path")
-    local dir
-    for dir in "$@"; do
-        candidates+=("$dir/$NATIVE_NAME")
+    # TALON_OPENSEARCH_MCP is the pre-rename spelling: still read, the new name wins.
+    local choice="${TALAHON_OPENSEARCH_MCP:-${TALON_OPENSEARCH_MCP:-}}"
+    [[ "$choice" == "rust" ]] || return 0
+    if [[ -z "${TALAHON_OPENSEARCH_MCP:-}" ]]; then
+        _warn "TALON_OPENSEARCH_MCP is deprecated; rename it to TALAHON_OPENSEARCH_MCP"
+    fi
+    local candidates=() name on_path dir
+    # Every place under the current name first, then under the old one.
+    for name in "$NATIVE_NAME" "$LEGACY_NATIVE_NAME"; do
+        candidates+=("/usr/local/bin/$name")
+        on_path="$(command -v "$name" 2>/dev/null || true)"
+        [[ -n "$on_path" ]] && candidates+=("$on_path")
+        for dir in "$@"; do
+            candidates+=("$dir/$name")
+        done
     done
     local c
     for c in "${candidates[@]}"; do
@@ -82,7 +91,7 @@ _maybe_exec_native() {
             exec "$c"
         fi
     done
-    _warn "TALON_OPENSEARCH_MCP=rust but $NATIVE_NAME was not found; using the Python server"
+    _warn "TALAHON_OPENSEARCH_MCP=rust but $NATIVE_NAME was not found; using the Python server"
     return 0
 }
 

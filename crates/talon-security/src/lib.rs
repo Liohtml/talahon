@@ -1,7 +1,7 @@
 //! # talon-security — the policy engine
 //!
 //! The module layout and public signatures below are the contract consumed
-//! by talon-container, talon-ipc, talon-http, talon-tools, talon-agent and
+//! by talon-container, talon-ipc, talon-http, talon-tools, talahon-agent and
 //! the host. Items may be added, but do not change/remove the listed
 //! signatures without coordinating.
 //!

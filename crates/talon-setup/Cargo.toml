@@ -1,6 +1,6 @@
 [package]
 name = "talahon-setup"
-description = "Installation, environment checks, group registration and service management for Talon"
+description = "Installation, environment checks, group registration and service management for Talahon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

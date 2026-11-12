@@ -49,5 +49,5 @@ wiremock = { workspace = true }
 workspace = true
 
 [[bin]]
-name = "talon-agent"
+name = "talahon-agent"
 path = "src/main.rs"

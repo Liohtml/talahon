@@ -2,7 +2,7 @@
 
 use talon_llm::LlmError;
 
-/// Everything that makes `talon-agent run` give up. Each variant is reported
+/// Everything that makes `talahon-agent run` give up. Each variant is reported
 /// to the host as one `ContainerOutput::error` frame (see [`crate::wire`]),
 /// followed by a non-zero exit.
 #[derive(Debug, thiserror::Error)]

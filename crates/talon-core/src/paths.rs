@@ -86,6 +86,52 @@ pub fn group_sessions_path(data_dir: &Path, session_key: &str) -> Result<PathBuf
     resolve_under(&data_dir.join("sessions"), session_key)
 }
 
+/// Name of the host configuration directory under `~/.config`.
+pub const CONFIG_DIR_NAME: &str = "talahon";
+
+/// Its name up to 2.x, still used when it is the only one that exists.
+pub const LEGACY_CONFIG_DIR_NAME: &str = "talon";
+
+/// Which host configuration directory is in effect, see
+/// [`resolve_config_dir`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDir {
+    /// The one authoritative directory (mount and sender allowlists).
+    pub path: PathBuf,
+    /// True when [`Self::path`] is the pre-rename `~/.config/talon`.
+    pub legacy: bool,
+    /// `~/.config/talon` when it exists next to `~/.config/talahon`: it is
+    /// **not** read (the two are never merged).
+    pub ignored_legacy: Option<PathBuf>,
+}
+
+/// The host configuration directory for `home`.
+///
+/// `~/.config/talahon` when it exists; else `~/.config/talon` when that
+/// exists (an installation from before the rename); else
+/// `~/.config/talahon`. The allowlists in there are security decisions, so
+/// exactly one directory is authoritative: nothing is ever read from the
+/// other one.
+pub fn resolve_config_dir(home: &Path) -> ConfigDir {
+    let base = home.join(".config");
+    let current = base.join(CONFIG_DIR_NAME);
+    let legacy = base.join(LEGACY_CONFIG_DIR_NAME);
+    let legacy_exists = legacy.is_dir();
+    if current.is_dir() || !legacy_exists {
+        ConfigDir {
+            path: current,
+            legacy: false,
+            ignored_legacy: legacy_exists.then_some(legacy),
+        }
+    } else {
+        ConfigDir {
+            path: legacy,
+            legacy: true,
+            ignored_legacy: None,
+        }
+    }
+}
+
 /// Expand a leading `~` / `~/` using `$HOME`.
 pub fn expand_home(p: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
@@ -103,6 +149,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_dir_prefers_the_new_name_and_never_merges() {
+        let home = std::env::temp_dir().join(format!(
+            "talahon-core-config-dir-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let new = home.join(".config/talahon");
+        let old = home.join(".config/talon");
+
+        // Fresh install: the new name, even though nothing exists yet.
+        let fresh = resolve_config_dir(&home);
+        assert_eq!(fresh.path, new);
+        assert!(!fresh.legacy);
+        assert_eq!(fresh.ignored_legacy, None);
+
+        // Upgraded install: only the old directory exists and is used.
+        std::fs::create_dir_all(&old).unwrap();
+        let upgraded = resolve_config_dir(&home);
+        assert_eq!(upgraded.path, old);
+        assert!(upgraded.legacy);
+        assert_eq!(upgraded.ignored_legacy, None);
+
+        // Both exist: the new one alone is authoritative, the old one is
+        // reported as ignored (never merged).
+        std::fs::create_dir_all(&new).unwrap();
+        let both = resolve_config_dir(&home);
+        assert_eq!(both.path, new);
+        assert!(!both.legacy);
+        assert_eq!(both.ignored_legacy, Some(old.clone()));
+
+        // A file named like the directory does not count.
+        std::fs::remove_dir_all(&new).unwrap();
+        std::fs::write(&new, "x").unwrap();
+        assert_eq!(resolve_config_dir(&home).path, old);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn folder_validation() {
         assert!(is_valid_group_folder("main"));
         assert!(is_valid_group_folder("copilot-u-42"));
@@ -117,13 +202,13 @@ mod tests {
 
     #[test]
     fn resolution_stays_in_base() {
-        let base = Path::new("/srv/talon/groups");
+        let base = Path::new("/srv/talahon/groups");
         assert_eq!(
             group_folder_path(base, "main").unwrap(),
-            PathBuf::from("/srv/talon/groups/main")
+            PathBuf::from("/srv/talahon/groups/main")
         );
         assert!(group_folder_path(base, "..").is_err());
-        assert!(ensure_within(base, Path::new("/srv/talon/groups/../x")).is_err());
+        assert!(ensure_within(base, Path::new("/srv/talahon/groups/../x")).is_err());
     }
 
     #[test]

@@ -28,7 +28,7 @@ use crate::allowlist::AllowlistSource;
 use crate::orchestrator::{Orchestrator, OrchestratorDeps, Settings};
 
 /// Default vLLM settings for the harness.
-pub const VLLM_ENV: &str = "TALON_VLLM_BASE_URL=http://vllm.test:8000\nTALON_VLLM_MODEL=qwen\n";
+pub const VLLM_ENV: &str = "TALAHON_VLLM_BASE_URL=http://vllm.test:8000\nTALAHON_VLLM_MODEL=qwen\n";
 
 // ---------------------------------------------------------------------------
 // Channel
@@ -453,7 +453,7 @@ pub fn group(name: &str, folder: &str, is_main: bool) -> RegisteredGroup {
     RegisteredGroup {
         name: name.into(),
         folder: folder.into(),
-        trigger: "@Talon".into(),
+        trigger: "@Talahon".into(),
         added_at: "2026-01-01T00:00:00.000Z".into(),
         container_config: None,
         requires_trigger: None,

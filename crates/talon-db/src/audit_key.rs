@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 type HmacSha256 = Hmac<Sha256>;
 
 /// `.env` key holding the audit key (a secret: read from the file only).
-pub const AUDIT_KEY_ENV: &str = "TALON_AUDIT_KEY";
+pub const AUDIT_KEY_ENV: &str = "TALAHON_AUDIT_KEY";
 
 /// Minimum length of the audit key in bytes (`openssl rand -hex 32` yields
 /// 64).

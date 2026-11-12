@@ -37,7 +37,7 @@ const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Text of the synthetic tool result inserted for calls that never got one.
 pub const INTERRUPTED_TOOL_RESULT: &str =
-    "[talon] No result: the previous run ended before this tool call finished.";
+    "[talahon] No result: the previous run ended before this tool call finished.";
 
 /// Validate a session id: a hyphenated UUID (36 chars). Returns the
 /// canonical (lower-case) form.

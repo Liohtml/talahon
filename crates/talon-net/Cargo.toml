@@ -1,6 +1,6 @@
 [package]
 name = "talahon-net"
-description = "Hardened HTTP serving for Talon: header-read timeouts, connection caps, graceful shutdown"
+description = "Hardened HTTP serving for Talahon: header-read timeouts, connection caps, graceful shutdown"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

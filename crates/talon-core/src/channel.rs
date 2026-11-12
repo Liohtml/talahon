@@ -70,7 +70,7 @@ pub trait Channel: Send + Sync {
 }
 
 /// Callbacks a channel uses to talk back to the host orchestrator.
-/// Implemented by the `talon` binary.
+/// Implemented by the `talahon` binary.
 #[async_trait]
 pub trait ChannelHost: Send + Sync {
     /// Deliver an inbound message. The host applies the sender allowlist,

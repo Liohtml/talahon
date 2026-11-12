@@ -3,7 +3,7 @@
 //! `axum::serve` applies no header-read timeout and no connection cap, so a
 //! client that opens many connections and never finishes its request headers
 //! (slowloris) can exhaust the host's file descriptors and stall every lane,
-//! IPC, SQLite and container spawns. [`serve`] replaces it for every Talon
+//! IPC, SQLite and container spawns. [`serve`] replaces it for every Talahon
 //! listener (CoPilot HTTP API, LLM gateway, Emacs bridge) with:
 //!
 //! - HTTP/1.1 only, with a header-read timeout that also bounds idle
@@ -137,7 +137,7 @@ pub async fn serve(
     // HTTP/2 on a prior-knowledge preface). HTTP/2 connections have no
     // header-read timeout: a client that sends the preface and answers PINGs
     // but never opens a stream would hold a connection slot forever. Every
-    // Talon client (CoPilot, the agent's gateway client, Emacs) speaks
+    // Talahon client (CoPilot, the agent's gateway client, Emacs) speaks
     // HTTP/1.1; SSE works over it.
     let mut builder = http1::Builder::new();
     builder

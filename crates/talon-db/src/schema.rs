@@ -543,12 +543,12 @@ mod tests {
                  INSERT INTO chats VALUES ('dc:42', 'Discord', '2024-01-01T00:00:04.000Z');
                  INSERT INTO chats VALUES ('tg:12345', 'TG DM', '2024-01-01T00:00:00.000Z');
                  INSERT INTO messages VALUES ('m1', 'room@g.us', 'u', 'U', 'hello', '2024-01-01T00:00:01.000Z', 0);
-                 INSERT INTO messages VALUES ('m2', 'room@g.us', 'b', 'Talon', 'Talon: hi there', '2024-01-01T00:00:02.000Z', 1);
+                 INSERT INTO messages VALUES ('m2', 'room@g.us', 'b', 'Talahon', 'Talahon: hi there', '2024-01-01T00:00:02.000Z', 1);
                  INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, next_run, status, created_at)
                    VALUES ('t1', 'main', 'room@g.us', 'p', 'interval', '60000', '2024-01-01T00:00:00.000Z', 'active', '2024-01-01T00:00:00.000Z');
                  INSERT INTO sessions VALUES ('main', 'sess-legacy');
-                 INSERT INTO registered_groups VALUES ('main@s.whatsapp.net', 'Main', 'main', '@Talon', '2024-01-01T00:00:00.000Z', NULL, 0);
-                 INSERT INTO registered_groups VALUES ('room@g.us', 'Room', 'room', '@Talon', '2024-01-01T00:00:00.000Z', '{\"timeout\":1000}', 1);",
+                 INSERT INTO registered_groups VALUES ('main@s.whatsapp.net', 'Main', 'main', '@Talahon', '2024-01-01T00:00:00.000Z', NULL, 0);
+                 INSERT INTO registered_groups VALUES ('room@g.us', 'Room', 'room', '@Talahon', '2024-01-01T00:00:00.000Z', '{\"timeout\":1000}', 1);",
             )
             .unwrap();
         }
@@ -651,12 +651,12 @@ mod tests {
                  INSERT INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id)
                    VALUES ('m1', 'tg:1', 'u', 'U', 'hi', '2024-01-01T00:00:01.000Z', 0, 0, 'r9');
                  INSERT INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
-                   VALUES ('tg:1', 'TG', 'telegram_main', '@Talon', '2024-01-01T00:00:00.000Z', NULL, 0, 1);",
+                   VALUES ('tg:1', 'TG', 'telegram_main', '@Talahon', '2024-01-01T00:00:00.000Z', NULL, 0, 1);",
             )
             .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        let msgs = db.get_messages_since("tg:1", "", "Talon", 10).unwrap();
+        let msgs = db.get_messages_since("tg:1", "", "Talahon", 10).unwrap();
         assert_eq!(msgs[0].reply_to_message_id.as_deref(), Some("r9"));
         assert!(db.get_registered_group("tg:1").unwrap().unwrap().is_main);
         assert_eq!(
@@ -741,16 +741,16 @@ mod tests {
             conn.execute_batch(LEGACY_TS_SCHEMA).unwrap();
             conn.execute_batch(
                 "INSERT INTO chats VALUES ('c', 'c', '2024');
-                 INSERT INTO messages VALUES ('1', 'c', 's', 'S', 'Talon: report', '2024-01-01', 1);
+                 INSERT INTO messages VALUES ('1', 'c', 's', 'S', 'Talahon: report', '2024-01-01', 1);
                  INSERT INTO messages VALUES ('2', 'c', 's', 'S', 'Nova: other bot', '2024-01-02', 1);
-                 INSERT INTO messages VALUES ('3', 'c', 's', 'S', 'Talonx: user', '2024-01-03', 0);",
+                 INSERT INTO messages VALUES ('3', 'c', 's', 'S', 'Talahonx: user', '2024-01-03', 0);",
             )
             .unwrap();
         }
         let db = Db::open_with_options(
             &path,
             &DbOptions {
-                assistant_name: "Talon".into(),
+                assistant_name: "Talahon".into(),
             },
         )
         .unwrap();

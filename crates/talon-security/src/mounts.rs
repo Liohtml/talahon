@@ -406,7 +406,9 @@ fn blocked_location(real: &Path) -> Option<String> {
         }
         let config = home.join(".config");
         if real.starts_with(&config) {
-            return Some("~/.config is never mountable (holds Talon and tool credentials)".into());
+            return Some(
+                "~/.config is never mountable (holds Talahon and tool credentials)".into(),
+            );
         }
     }
     None
@@ -504,7 +506,7 @@ fn find_allowed_root<'a>(real: &Path, roots: &'a [AllowedRoot]) -> Option<&'a Al
     })
 }
 
-/// Example allowlist JSON for `talon setup`.
+/// Example allowlist JSON for `talahon setup`.
 pub fn allowlist_template() -> String {
     let template = MountAllowlist {
         allowed_roots: vec![

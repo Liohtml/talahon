@@ -860,7 +860,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
                     "jid": {"type": "string", "description": "The chat JID (e.g., \"tg:-1001234567890\")"},
                     "name": {"type": "string", "description": "Display name for the group"},
                     "folder": {"type": "string", "description": "Channel-prefixed folder name (e.g., \"telegram_dev-team\")"},
-                    "trigger": {"type": "string", "description": "Trigger word (e.g., \"@Talon\")"},
+                    "trigger": {"type": "string", "description": "Trigger word (e.g., \"@Talahon\")"},
                     "requiresTrigger": {"type": "boolean", "description": "Whether messages must start with the trigger word. Default: false (respond to all messages). Set to true for busy groups with many participants where you only want the agent to respond when explicitly mentioned."}
                 },
                 "required": ["jid", "name", "folder", "trigger"],
@@ -1392,7 +1392,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = ctx_for(dir.path());
         let t = RegisterGroupTool;
-        let args = json!({"jid": "tg:-100123", "name": "Dev Team", "folder": "telegram_dev-team", "trigger": "@Talon"});
+        let args = json!({"jid": "tg:-100123", "name": "Dev Team", "folder": "telegram_dev-team", "trigger": "@Talahon"});
         let out = t.call(args.clone(), &ctx).await;
         assert_eq!(
             out,

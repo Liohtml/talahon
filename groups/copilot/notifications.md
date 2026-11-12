@@ -1,6 +1,6 @@
 # Post-investigation notification fan-out
 
-**Audience:** the SOC agent (Talon), reading this after report write-back.
+**Audience:** the SOC agent (Talahon), reading this after report write-back.
 **Trigger:** every successful investigation that reaches Step 6c.
 **Failure mode:** best-effort. If notification dispatch fails, log it but
 do **not** fail the investigation.
@@ -70,7 +70,7 @@ Arguments:
 
 Always pass `trigger: "investigation_complete"`. The trigger is the
 *event type* that caused the dispatch — there's only one event type
-right now (Talon-driven investigations). Severity gating happens on
+right now (Talahon-driven investigations). Severity gating happens on
 the route side via each route's `min_severity`, not here.
 
 If you ever see another trigger value documented (e.g. for analyst-

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MemPalace MCP server wrapper for Talon.
+# MemPalace MCP server wrapper for Talahon.
 #
 # Gives the SOC agent persistent semantic memory — past investigations, asset
 # metadata, false-positive records and IOC history in a local ChromaDB +
@@ -11,7 +11,7 @@
 #
 # Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Talon agent container. `talon-agent supervise` starts this script
+#   1. Talahon agent container. `talahon-agent supervise` starts this script
 #      directly as `mcp-palace` (`"runAs": "mcp-palace"` in .mcp.json). An
 #      optional mempalace/.env is staged at /etc/mcp-secrets/palace.env
 #      (owner mcp-palace, mode 0600).

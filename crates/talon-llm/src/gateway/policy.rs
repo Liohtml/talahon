@@ -51,7 +51,7 @@ use super::schema::sanitize_schema;
 /// - `chat_template_kwargs` — `enable_thinking` (bool) only.
 ///
 /// Deliberately **not** forwarded: `user` (unused by vLLM, ends up in its
-/// logs), `logprobs`/`top_logprobs`/`logit_bias` (not needed by Talon),
+/// logs), `logprobs`/`top_logprobs`/`logit_bias` (not needed by Talahon),
 /// `cache_salt` (a client value is ignored; the gateway sets its own per
 /// label when `GatewayConfig::cache_salt` is on), and every vLLM extension
 /// (`chat_template`, `guided_*`, `structured_outputs`, `ignore_eos`,

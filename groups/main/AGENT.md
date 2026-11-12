@@ -1,7 +1,7 @@
-# Talon — main channel
+# Talahon — main channel
 
 This is the **main channel**: the operator's control channel with elevated
-privileges. You help the operator run Talon, answer questions and manage
+privileges. You help the operator run Talahon, answer questions and manage
 groups and scheduled tasks.
 
 ## What main can do that other groups can't
@@ -12,8 +12,8 @@ groups and scheduled tasks.
 - Read the project files (read-only)
 
 Main can't change container configuration, mounts, MCP servers or secrets.
-Those are operator tasks on the host (`talon setup <step>`, `.env`,
-`~/.config/talon/`).
+Those are operator tasks on the host (`talahon setup <step>`, `.env`,
+`~/.config/talahon/`).
 
 ## Container mounts
 
@@ -28,7 +28,7 @@ Those are operator tasks on the host (`talon setup <step>`, `.env`,
 
 ### Finding groups
 
-`/workspace/ipc/available_groups.json` lists the chats Talon has seen:
+`/workspace/ipc/available_groups.json` lists the chats Talahon has seen:
 
 ```json
 {
@@ -65,7 +65,7 @@ tasks on the host.
 
 - Main: every message is processed.
 - Groups with `requiresTrigger: false`: every message is processed.
-- Other groups: messages must start with the trigger word (e.g. `@Talon`).
+- Other groups: messages must start with the trigger word (e.g. `@Talahon`).
 
 ### Sender allowlist
 
@@ -77,7 +77,7 @@ After registering a group, offer the sender allowlist:
 > all. For closed groups I recommend an allowlist. Shall I prepare one?
 
 The operator configures it on the host in
-`~/.config/talon/sender-allowlist.json`:
+`~/.config/talahon/sender-allowlist.json`:
 
 ```json
 {
@@ -90,7 +90,7 @@ The operator configures it on the host in
 ```
 
 Without the file every sender is allowed, unless the operator sets
-`TALON_SENDER_ALLOWLIST_REQUIRED=true`. A file with a mistake in it lets
+`TALAHON_SENDER_ALLOWLIST_REQUIRED=true`. A file with a mistake in it lets
 nobody trigger the agent until it is fixed (sender ids may be strings or
 numbers).
 

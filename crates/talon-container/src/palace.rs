@@ -67,7 +67,7 @@ pub const PALACE_CPUS: &str = "1";
 pub struct PalaceRunSpec {
     /// Agent image (the palace venv lives at `/opt/mempalace`).
     pub image: String,
-    /// Talon checkout holding `mempalace/` and `mempalace-data/`.
+    /// Talahon checkout holding `mempalace/` and `mempalace-data/`.
     pub project_root: PathBuf,
     /// Container name (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`).
     pub name: String,
@@ -215,7 +215,7 @@ mod tests {
 
     fn spec(root: &Path, network: Option<&str>) -> PalaceRunSpec {
         PalaceRunSpec {
-            image: "talon-agent:latest".into(),
+            image: "talahon-agent:latest".into(),
             project_root: root.to_path_buf(),
             name: "talon-palace-1700000000000".into(),
             network: network.map(str::to_string),
@@ -267,7 +267,7 @@ mod tests {
             &code_spec,
             "--entrypoint",
             "/workspace/extra/mempalace/palace-call.sh",
-            "talon-agent:latest",
+            "talahon-agent:latest",
         ]);
 
         let args = build_palace_run_args(&spec(&fx.root, None)).unwrap();
@@ -410,7 +410,7 @@ mod tests {
     fn run_palace_step(scratch: &Path, dir: &Path) -> std::process::Output {
         let harness = format!(
             "set -euo pipefail\nPALACE_DATA=$1\nPALACE_USER=mcp-palace\n\
-             log() {{ printf 'talon-entrypoint: %s\\n' \"$*\" >&2; }}\n\
+             log() {{ printf 'talahon-entrypoint: %s\\n' \"$*\" >&2; }}\n\
              die() {{ log \"FATAL: $*\"; exit 70; }}\n\
              id() {{ case \"$1\" in -u|-g) echo {MCP_PALACE_UID} ;; *) command id \"$@\" ;; esac; }}\n\
              {}\nsecure_palace_data\n",

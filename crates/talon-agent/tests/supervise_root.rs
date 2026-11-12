@@ -1,4 +1,4 @@
-//! End-to-end test of `talon-agent supervise` (privileged path): the agent
+//! End-to-end test of `talahon-agent supervise` (privileged path): the agent
 //! runs as `nobody`, an MCP server runs as a fake `mcp-echo` account behind
 //! the supervisor's unix socket, the model is a wiremock fake vLLM. The
 //! mount table is injected (read-only rootfs, writable `/usr/bin/env`).
@@ -153,7 +153,7 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
 
     let socket_dir = root.join("run/mcp");
     let home_root = root.join("run/home");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_talon-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_talahon-agent"))
         .arg("supervise")
         .arg("--group-dir")
         .arg(root.join("group"))
@@ -179,8 +179,8 @@ async fn supervisor_runs_mcp_and_agent_unprivileged() {
         .arg(root.join("mountinfo"))
         .env("RUN_UID", NOBODY.to_string())
         .env("RUN_GID", NOBODY.to_string())
-        .env("TALON_LOG", "debug")
-        .env_remove("TALON_MCP_SOCKET_DIR")
+        .env("TALAHON_LOG", "debug")
+        .env_remove("TALAHON_MCP_SOCKET_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -341,7 +341,7 @@ async fn supervisor_refuses_instructions_that_are_not_read_only_binds() {
     )
     .unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_talon-agent"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_talahon-agent"))
         .arg("supervise")
         .arg("--group-dir")
         .arg(root.join("group"))
@@ -359,7 +359,7 @@ async fn supervisor_refuses_instructions_that_are_not_read_only_binds() {
         .arg(root.join("mountinfo"))
         .env("RUN_UID", NOBODY.to_string())
         .env("RUN_GID", NOBODY.to_string())
-        .env_remove("TALON_MCP_SOCKET_DIR")
+        .env_remove("TALAHON_MCP_SOCKET_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

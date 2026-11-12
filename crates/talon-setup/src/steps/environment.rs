@@ -14,7 +14,7 @@ use super::vllm::add_vllm_fields;
 use crate::checks::{
     MIN_FREE_DISK_MB, PortStatus, RuntimeState, VllmStatus, check_configured_vllm, check_port,
     check_writable_dirs, detect_runtime, disk_free_mb, exposure_issues, image_present,
-    runtime_dirs,
+    legacy_image_present, runtime_dirs,
 };
 use crate::context::{SETUP_LOG, SetupContext};
 use crate::status::{StatusBlock, StepOutcome};
@@ -66,6 +66,15 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
     block.set("IMAGE_PRESENT", image_ok);
     if !image_ok {
         issues.push("image_missing".into());
+        // Upgraded from 2.x without rebuilding: the image still carries its
+        // old name. Say so; it is not run in place of the configured one.
+        if let Some(rt) = &runtimes.selected
+            && let Some(legacy) =
+                legacy_image_present(ctx.runner.as_ref(), rt, &ctx.config.container_image).await
+        {
+            block.set("LEGACY_IMAGE", legacy);
+            issues.push("image_has_old_name".into());
+        }
     }
 
     // vLLM.
@@ -234,7 +243,7 @@ mod tests {
 
         std::fs::write(
             dir.path().join(".env"),
-            "TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n",
+            "TALAHON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n",
         )
         .unwrap();
         ctx.reload_config();
@@ -249,6 +258,43 @@ mod tests {
             assert!(!issues.contains("http_bind_all_interfaces"), "{issues}");
             assert_eq!(b.get("HTTP_BIND"), Some("127.0.0.1"));
         }
+    }
+
+    #[tokio::test]
+    async fn a_missing_image_points_at_the_pre_rename_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(MockRunner::new());
+        runner.install("docker");
+        runner.on("docker info", CommandOutput::ok("27"));
+        // Only the 2.x image exists; the configured default is the new name.
+        runner.on(
+            "docker image inspect --format {{.Id}} talon-agent:latest",
+            CommandOutput::ok("sha256:old"),
+        );
+        let mut ctx = SetupContext::new(dir.path(), dir.path(), runner.clone());
+        ctx.config.container_runtime = "docker".into();
+        ctx.config.container_image = "talahon-agent:latest".into();
+        let b = run(&StepArgs::default(), &ctx)
+            .await
+            .unwrap()
+            .block
+            .unwrap();
+        assert_eq!(b.get("IMAGE"), Some("talahon-agent:latest"));
+        assert_eq!(b.get("IMAGE_PRESENT"), Some("false"));
+        assert_eq!(b.get("LEGACY_IMAGE"), Some("talon-agent:latest"));
+        let issues = b.get("ISSUES").unwrap();
+        assert!(issues.contains("image_missing"), "{issues}");
+        assert!(issues.contains("image_has_old_name"), "{issues}");
+
+        // A custom image name has no pre-rename counterpart.
+        ctx.config.container_image = "registry.example/soc/agent:1".into();
+        let b = run(&StepArgs::default(), &ctx)
+            .await
+            .unwrap()
+            .block
+            .unwrap();
+        assert_eq!(b.get("LEGACY_IMAGE"), None);
+        assert!(!b.get("ISSUES").unwrap().contains("image_has_old_name"));
     }
 
     #[tokio::test]

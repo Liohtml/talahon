@@ -53,7 +53,7 @@ use crate::text::fold;
 
 /// The shipped field list (`crates/talon-anon/fields.yaml`, kept identical to
 /// `siem/anon_proxy/fields.yaml`), embedded at build time. Used by
-/// `talon-anon-proxy` when `--fields` is not given.
+/// `talahon-anon-proxy` when `--fields` is not given.
 pub const DEFAULT_FIELDS_YAML: &str = include_str!("../fields.yaml");
 
 /// Default prefix for internal IP addresses (Python: `internal_ip_token_prefix`).

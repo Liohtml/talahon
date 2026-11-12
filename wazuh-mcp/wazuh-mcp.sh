@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Wazuh MCP server wrapper for Talon.
+# Wazuh MCP server wrapper for Talahon.
 #
 # Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Talon agent container. `talon-agent supervise` starts this script
+#   1. Talahon agent container. `talahon-agent supervise` starts this script
 #      directly as `mcp-wazuh` (`"runAs": "mcp-wazuh"` in .mcp.json). The
 #      credentials were staged at /etc/mcp-secrets/wazuh.env (owner
 #      mcp-wazuh, mode 0600); the visible wazuh-mcp/.env is shadowed with

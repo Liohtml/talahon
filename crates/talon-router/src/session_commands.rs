@@ -47,7 +47,7 @@ impl std::fmt::Display for SessionCommand {
 }
 
 /// Extract a session command from a message, stripping a leading trigger
-/// (`@Talon /compact`). Returns `None` for anything that is not exactly a
+/// (`@Talahon /compact`). Returns `None` for anything that is not exactly a
 /// known command — `/compact now` or `/deploy` fall through as prompts.
 pub fn extract_session_command(content: &str, trigger_pattern: &Regex) -> Option<SessionCommand> {
     let text = content.trim();
@@ -327,7 +327,7 @@ mod tests {
     use super::*;
 
     fn trigger() -> Regex {
-        talon_core::trigger::build_trigger_pattern("@Talon", "Talon")
+        talon_core::trigger::build_trigger_pattern("@Talahon", "Talahon")
     }
 
     // --- extract_session_command --------------------------------------------
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn detects_compact_with_trigger_prefix() {
         assert_eq!(
-            extract_session_command("@Talon /compact", &trigger()),
+            extract_session_command("@Talahon /compact", &trigger()),
             Some(SessionCommand::Compact)
         );
     }
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn detects_new_with_trigger_prefix() {
         assert_eq!(
-            extract_session_command("@Talon /new", &trigger()),
+            extract_session_command("@Talahon /new", &trigger()),
             Some(SessionCommand::New)
         );
     }
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn trigger_is_case_insensitive() {
         assert_eq!(
-            extract_session_command("@talon /new", &trigger()),
+            extract_session_command("@talahon /new", &trigger()),
             Some(SessionCommand::New)
         );
     }

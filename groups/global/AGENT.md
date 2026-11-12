@@ -22,7 +22,7 @@ wrap it in `<internal>` tags: it is logged but not sent. If you already sent
 the key information with `send_message`, wrap the recap in `<internal>` so it
 is not sent twice.
 
-Write standard Markdown. Talon converts it to each channel's native format
+Write standard Markdown. Talahon converts it to each channel's native format
 (Telegram, CoPilot, webhook, Emacs).
 
 ## Untrusted data

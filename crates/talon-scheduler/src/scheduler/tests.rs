@@ -114,7 +114,7 @@ fn group(name: &str, folder: &str, is_main: bool) -> RegisteredGroup {
     RegisteredGroup {
         name: name.into(),
         folder: folder.into(),
-        trigger: "@Talon".into(),
+        trigger: "@Talahon".into(),
         added_at: "2026-01-01T00:00:00.000Z".into(),
         container_config: None,
         requires_trigger: None,
@@ -1345,7 +1345,7 @@ fn helpers() {
 #[test]
 fn config_from_talon_config() {
     let env = talon_core::env::EnvFile::default();
-    let cfg = TalonConfig::from_env(Path::new("/srv/talon"), env);
+    let cfg = TalonConfig::from_env(Path::new("/srv/talahon"), env);
     let s = SchedulerConfig::from_talon_config(&cfg);
     assert_eq!(s.poll_interval, cfg.scheduler_poll_interval);
     assert_eq!(s.default_run_timeout, cfg.container_timeout);

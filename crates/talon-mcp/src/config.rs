@@ -1,6 +1,6 @@
 //! `.mcp.json` parsing and validation.
 //!
-//! Format (Claude Code compatible, plus Talon's `runAs`):
+//! Format (Claude Code compatible, plus Talahon's `runAs`):
 //!
 //! ```json
 //! { "mcpServers": {

@@ -35,7 +35,6 @@ use talon_core::types::{NewMessage, RegisteredGroup};
 use talon_router::{
     AgentOutputHandler, SessionCommandOutcome, SessionCommandRequest, extract_session_command,
     format_messages, handle_session_command, is_session_command_allowed, strip_internal_tags,
-    trigger_pattern_for,
 };
 use talon_scheduler::CloseTimer;
 use tokio::time::Instant;
@@ -209,7 +208,7 @@ impl Orchestrator {
         }
 
         // --- Session command interception (before the trigger check) ---
-        let pattern = trigger_pattern_for(&group, &self.config.assistant_name);
+        let pattern = self.config.trigger_pattern(&group.trigger);
         let deps = LaneCommandDeps {
             host: self,
             jid: chat_jid,
@@ -475,7 +474,7 @@ impl Orchestrator {
         channel: &Arc<dyn Channel>,
         lane_messages: &[NewMessage],
     ) -> LaneRoute {
-        let pattern = trigger_pattern_for(group, &self.config.assistant_name);
+        let pattern = self.config.trigger_pattern(&group.trigger);
 
         // --- Session command interception (message loop) ---
         if let Some(cmd_msg) = lane_messages
@@ -601,7 +600,7 @@ impl Orchestrator {
         }
         tracing::info!(
             default_trigger = %self.config.default_trigger,
-            "Talon running"
+            "Talahon running"
         );
         while !cancel.is_cancelled() && self.is_accepting() {
             self.poll_once().await;

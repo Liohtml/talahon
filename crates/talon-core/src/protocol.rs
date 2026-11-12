@@ -1,7 +1,7 @@
 //! Host <-> container wire protocol.
 //!
 //! ```text
-//!   host (talon)                                container (talon-agent)
+//!   host (talahon)                              container (talahon-agent)
 //!   ────────────                                ───────────────────────
 //!   stdin  ── ContainerInput JSON, then EOF ──▶ read once at start
 //!   stdout ◀─ OUTPUT_START / ContainerOutput / OUTPUT_END ── (repeatable)

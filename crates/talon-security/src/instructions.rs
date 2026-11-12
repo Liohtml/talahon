@@ -5,7 +5,7 @@
 //! (`AGENT.md`); installations from before the rename keep working with
 //! [`LEGACY_INSTRUCTIONS_FILE`] (`CLAUDE.md`). Every host component that
 //! reads, creates or binds the file (container mounts, template copies, the
-//! Emacs bootstrap, `talon setup register`, `talon doctor`) decides through
+//! Emacs bootstrap, `talahon setup register`, `talahon doctor`) decides through
 //! [`InstructionFiles`], so the precedence is the same everywhere:
 //!
 //! 1. `AGENT.md` with content is the source;
@@ -57,9 +57,13 @@ pub const INSTRUCTIONS_PLACEHOLDER: &str =
     "<!-- Operator-maintained group instructions (read-only inside containers). -->\n";
 /// Content of the host-created `AGENT.md` of a folder whose instructions
 /// are still in `CLAUDE.md`: only a mount point, never a source.
+///
+/// The text is compared byte for byte to recognise stubs written by earlier
+/// versions, so it keeps the product name of the time ("Talon").
 pub const AGENT_MOUNT_STUB: &str = "<!-- Talon mount point, not in use: this folder's instructions are still read from the legacy CLAUDE.md. Migrate with `mv CLAUDE.md AGENT.md`. -->\n";
 /// Content of the host-created `CLAUDE.md` of a folder whose instructions
 /// are in `AGENT.md`: only a mount point, never a source.
+/// Keeps the wording of earlier versions, like [`AGENT_MOUNT_STUB`].
 pub const LEGACY_MOUNT_STUB: &str = "<!-- Talon mount point, not in use: this folder's instructions are read from AGENT.md. This legacy name stays read-only inside containers. -->\n";
 
 /// Every text the host itself writes into an instruction file. A file whose

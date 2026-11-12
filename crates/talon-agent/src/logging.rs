@@ -6,7 +6,7 @@
 //! with [`register_secret`] as soon as the input is parsed, so it is redacted
 //! even if some error message were to echo it.
 //!
-//! Filter: `TALON_LOG`, else `RUST_LOG`, else `info`.
+//! Filter: `TALAHON_LOG`, else `RUST_LOG`, else `info`.
 
 use std::io::Write;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -21,14 +21,17 @@ static SECRETS: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::
 
 /// Install the global subscriber (idempotent; later calls are no-ops).
 pub fn init() {
-    let filter = EnvFilter::try_from_env("TALON_LOG")
-        .or_else(|_| EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    // `TALAHON_LOG`, or its pre-rename alias `TALON_LOG`.
+    let filter = talon_core::env::process_var("TALAHON_LOG")
+        .and_then(|f| EnvFilter::try_new(f).ok())
+        .or_else(|| EnvFilter::try_from_default_env().ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(RedactingStderr)
         .with_ansi(false)
         .try_init();
+    talon_core::env::flush_legacy_key_warnings();
 }
 
 /// Redact `secret` (literally) from every future log line. Values shorter

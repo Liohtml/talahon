@@ -107,7 +107,7 @@ impl StreamAccumulator {
         }
         for choice in chunk.choices {
             if choice.index != 0 {
-                continue; // Talon never asks for n > 1.
+                continue; // Talahon never asks for n > 1.
             }
             let delta = choice.delta;
             if let Some(r) = delta.reasoning_content.filter(|r| !r.is_empty()) {

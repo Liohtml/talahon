@@ -1,6 +1,6 @@
 //! Step `groups`.
 //!
-//! Talon's channels (CoPilot HTTP, Telegram, webhook, Emacs) discover chat
+//! Talahon's channels (CoPilot HTTP, Telegram, webhook, Emacs) discover chat
 //! names at runtime, so no group metadata is synced up front: the sync is
 //! always skipped (`REASON: runtime_discovery`) and the step only reports
 //! how many group chats the store knows.

@@ -340,7 +340,7 @@ impl Agent {
                 for p in &prepared {
                     self.push(ChatMessage::tool_result(
                         p.id.clone(),
-                        "[talon] Not executed: the same call was repeated too many times.",
+                        "[talahon] Not executed: the same call was repeated too many times.",
                     ));
                 }
                 st.tool_calls += u32::try_from(prepared.len()).unwrap_or(u32::MAX);

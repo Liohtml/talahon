@@ -15,7 +15,7 @@ pub const DEFAULT_MAX_TOKENS: u64 = 16_384;
 /// Host-side switches for the translation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Options {
-    /// Allow adaptive thinking (`TALON_ANTHROPIC_THINKING`). The request's
+    /// Allow adaptive thinking (`TALAHON_ANTHROPIC_THINKING`). The request's
     /// `chat_template_kwargs.enable_thinking: false` still turns it off.
     pub thinking: bool,
 }
@@ -412,7 +412,7 @@ fn text_blocks(text: &str) -> Vec<Value> {
 
 fn system_blocks(system: &[String]) -> Value {
     let text = system.join("\n\n");
-    // One breakpoint on the whole system prompt: Talon keeps it byte-stable
+    // One breakpoint on the whole system prompt: Talahon keeps it byte-stable
     // across turns, so every turn after the first is a cache hit.
     json!([{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}])
 }
@@ -489,7 +489,7 @@ mod tests {
         let mut v = json!({
             "model": "claude-sonnet-5-5",
             "messages": [
-                {"role": "system", "content": "You are Talon."},
+                {"role": "system", "content": "You are Talahon."},
                 {"role": "user", "content": "Investigate alert 7."},
             ],
             "max_tokens": 4096,
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(t.model, "claude-sonnet-5-5");
         assert!(!t.stream);
         assert_eq!(t.body["max_tokens"], 4096);
-        assert_eq!(t.body["system"][0]["text"], "You are Talon.");
+        assert_eq!(t.body["system"][0]["text"], "You are Talahon.");
         assert_eq!(t.body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(t.body["messages"][0]["role"], "user");
         assert_eq!(

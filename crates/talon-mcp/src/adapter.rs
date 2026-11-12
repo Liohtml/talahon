@@ -200,7 +200,7 @@ pub fn truncate_output(text: String, max_bytes: usize) -> String {
     out
 }
 
-/// A remote MCP tool exposed as a Talon [`Tool`].
+/// A remote MCP tool exposed as a Talahon [`Tool`].
 pub struct McpToolAdapter {
     client: Arc<McpClient>,
     tool: McpTool,

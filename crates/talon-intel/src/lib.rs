@@ -17,7 +17,7 @@
 //! | [`report`] | `TriageReport`, strict JSON schema, validation, Markdown |
 //! | [`hints`] | per-alert-type investigation guidance (prompt templates) |
 //! | [`analysis`] | one-shot [`analyze_alert`] combining all of the above |
-//! | [`eval`] | golden-set scoring of investigation verdicts (`talon eval`) |
+//! | [`eval`] | golden-set scoring of investigation verdicts (`talahon eval`) |
 //! | [`tools`] | the agent tools |
 //!
 //! Quick start:

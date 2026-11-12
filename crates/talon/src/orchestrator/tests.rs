@@ -53,7 +53,7 @@ async fn trigger_gating_accumulates_context_until_trigger() {
 
     h.launcher.push(Script::reply("on it"));
     h.orch
-        .accept_message(TEAM, msg(TEAM, "2", "bob", "@Talon please look", &ts(2)));
+        .accept_message(TEAM, msg(TEAM, "2", "bob", "@Talahon please look", &ts(2)));
     assert!(h.orch.process_group_messages(TEAM).await);
     let prompts = h.launcher.prompts();
     assert_eq!(prompts.len(), 1);
@@ -76,7 +76,7 @@ async fn a_trigger_followed_by_a_busy_chat_is_still_answered() {
         .unwrap();
     h.orch.accept_message(
         TEAM,
-        msg(TEAM, "1", "alice", "@Talon check host web-01", &ts(1)),
+        msg(TEAM, "1", "alice", "@Talahon check host web-01", &ts(1)),
     );
     // More chatter than fits in one prompt (MAX_MESSAGES_PER_PROMPT = 10).
     for i in 2..=13u32 {
@@ -114,12 +114,12 @@ async fn trigger_from_disallowed_sender_is_ignored() {
         .register_group_inner(TEAM, group("Team", "team", false), true, false)
         .unwrap();
     h.orch
-        .accept_message(TEAM, msg(TEAM, "1", "mallory", "@Talon do it", &ts(1)));
+        .accept_message(TEAM, msg(TEAM, "1", "mallory", "@Talahon do it", &ts(1)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert!(h.launcher.calls().is_empty());
 
     h.orch
-        .accept_message(TEAM, msg(TEAM, "2", "alice", "@Talon do it", &ts(2)));
+        .accept_message(TEAM, msg(TEAM, "2", "alice", "@Talahon do it", &ts(2)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert_eq!(h.launcher.calls().len(), 1);
 }
@@ -227,7 +227,7 @@ async fn cursor_recovered_from_last_bot_message() {
         .unwrap();
     h.orch
         .accept_message(MAIN, msg(MAIN, "1", "me", "old question", &ts(1)));
-    let mut bot = msg(MAIN, "2", "Talon", "old answer", &ts(2));
+    let mut bot = msg(MAIN, "2", "Talahon", "old answer", &ts(2));
     bot.is_bot_message = true;
     h.orch.accept_message(MAIN, bot);
     h.orch
@@ -703,7 +703,7 @@ async fn gateway_token_label_is_the_lanes_ipc_key() {
         h.launcher.push(Script::reply("ok"));
         let n = u32::try_from(i).unwrap() + 1;
         h.orch
-            .accept_message(jid, msg(jid, &n.to_string(), "u", "@Talon hi", &ts(n)));
+            .accept_message(jid, msg(jid, &n.to_string(), "u", "@Talahon hi", &ts(n)));
         assert!(h.orch.process_group_messages(jid).await);
     }
     let labels: Vec<String> = h
@@ -807,7 +807,7 @@ async fn session_command_from_untrusted_sender_is_denied() {
         .register_group_inner(TEAM, group("Team", "team", false), true, false)
         .unwrap();
     h.orch
-        .accept_message(TEAM, msg(TEAM, "1", "bob", "@Talon /compact", &ts(1)));
+        .accept_message(TEAM, msg(TEAM, "1", "bob", "@Talahon /compact", &ts(1)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert!(h.launcher.calls().is_empty());
     assert_eq!(
@@ -1201,7 +1201,7 @@ async fn on_message_stores_and_wakes_the_loop() {
     tokio::time::timeout(Duration::from_secs(1), h.orch.wake.notified())
         .await
         .expect("loop woken");
-    let stored = h.db.get_messages_since(MAIN, "", "Talon", 10).unwrap();
+    let stored = h.db.get_messages_since(MAIN, "", "Talahon", 10).unwrap();
     assert_eq!(stored.len(), 1, "stored under the channel's JID");
 }
 
@@ -1254,7 +1254,7 @@ async fn drop_mode_discards_denied_senders_before_storage() {
     let mut mine = msg(TEAM, "3", "operator", "note", &ts(3));
     mine.is_from_me = true;
     assert!(h.orch.accept_message(TEAM, mine));
-    let stored = h.db.get_messages_since(TEAM, "", "Talon", 10).unwrap();
+    let stored = h.db.get_messages_since(TEAM, "", "Talahon", 10).unwrap();
     let ids: Vec<&str> = stored.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, vec!["2", "3"]);
 }
@@ -1380,7 +1380,7 @@ async fn ipc_registration_installs_agent_md_without_following_symlinks() {
     std::fs::create_dir_all(groups.join("global")).unwrap();
     std::fs::write(
         groups.join("global/AGENT.md"),
-        "# Talon\n\nYou are Talon, a SOC analyst.\n",
+        "# Talahon\n\nYou are Talahon, a SOC analyst.\n",
     )
     .unwrap();
 
@@ -1436,14 +1436,14 @@ async fn group_bootstrap_honours_legacy_claude_md() {
 
     // Template still under the legacy name: copied, as AGENT.md.
     std::fs::create_dir_all(groups.join("global")).unwrap();
-    std::fs::write(groups.join("global/CLAUDE.md"), "# Talon\nold global\n").unwrap();
+    std::fs::write(groups.join("global/CLAUDE.md"), "# Talahon\nold global\n").unwrap();
     register("fake:a", "a").await;
-    assert_eq!(read("a/AGENT.md"), "# Talon\nold global\n");
+    assert_eq!(read("a/AGENT.md"), "# Talahon\nold global\n");
     assert!(!groups.join("a/CLAUDE.md").exists());
 
     // Both names with content in the template folder: no side is picked,
     // nothing is copied.
-    std::fs::write(groups.join("global/AGENT.md"), "# Talon\nnew global\n").unwrap();
+    std::fs::write(groups.join("global/AGENT.md"), "# Talahon\nnew global\n").unwrap();
     register("fake:b", "b").await;
     assert!(!groups.join("b/AGENT.md").exists());
     assert!(!groups.join("b/CLAUDE.md").exists());
@@ -1464,7 +1464,7 @@ async fn group_bootstrap_honours_legacy_claude_md() {
     )
     .unwrap();
     register("fake:c", "c").await;
-    assert_eq!(read("c/AGENT.md"), "# Talon\nold global\n");
+    assert_eq!(read("c/AGENT.md"), "# Talahon\nold global\n");
 
     // Destination already uses CLAUDE.md: untouched, no AGENT.md.
     std::fs::create_dir_all(groups.join("legacy")).unwrap();
@@ -1488,7 +1488,7 @@ async fn group_bootstrap_never_follows_symlinked_folders_or_templates() {
 
     // A symlinked group folder: neither logs/ nor AGENT.md land outside.
     std::fs::create_dir_all(groups.join("global")).unwrap();
-    std::fs::write(groups.join("global/AGENT.md"), "# Talon\n").unwrap();
+    std::fs::write(groups.join("global/AGENT.md"), "# Talahon\n").unwrap();
     let outside = h.root().join("outside-dir");
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, groups.join("evil")).unwrap();

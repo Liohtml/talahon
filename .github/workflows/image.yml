@@ -49,11 +49,17 @@ jobs:
       - name: Smoke test
         run: |
           set -euo pipefail
-          run() { docker run --rm --network none --entrypoint "$1" talon-agent:ci "${@:2}"; }
+          run() { docker run --rm --network none --entrypoint "$1" talahon-agent:ci "${@:2}"; }
+          run /usr/local/bin/talahon-agent --version
+          run /usr/local/bin/talahon-anon-proxy --help >/dev/null
+          run /usr/local/bin/talahon-opensearch-mcp --help >/dev/null
+          run /usr/local/bin/talahon-mysql-mcp --help >/dev/null
+          # The pre-rename names are symlinks to the same binaries (aliases
+          # for one major version).
+          for name in agent anon-proxy opensearch-mcp mysql-mcp entrypoint; do
+            run /bin/sh -c 'test "$(readlink -f "/usr/local/bin/talon-$1")" = "/usr/local/bin/talahon-$1"' sh "$name"
+          done
           run /usr/local/bin/talon-agent --version
-          run /usr/local/bin/talon-anon-proxy --help >/dev/null
-          run /usr/local/bin/talon-opensearch-mcp --help >/dev/null
-          run /usr/local/bin/talon-mysql-mcp --help >/dev/null
           # Every MCP server virtualenv has a working interpreter.
           for venv in opensearch-mcp mysql-mcp mysql-tools copilot-mcp wazuh-mcp \
                       velociraptor-mcp shuffle-mcp cve-mcp mempalace; do

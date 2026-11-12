@@ -886,7 +886,7 @@ async fn announced_oversize_response_is_refused() {
         .mount(&os)
         .await;
     let mut vars = authed(&os.uri());
-    vars.push(("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096".to_string()));
+    vars.push(("TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096".to_string()));
     let mut s = Session::start(&config(&vars));
     let text = s
         .err("search_documents", json!({"index": "x", "body": {}}))
@@ -898,7 +898,7 @@ async fn announced_oversize_response_is_refused() {
     // A response within the same limit is returned.
     let small = mock_json().await;
     let mut vars = authed(&small.uri());
-    vars.push(("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096".to_string()));
+    vars.push(("TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096".to_string()));
     let mut s = Session::start(&config(&vars));
     assert_eq!(s.ok("get_cluster_health", json!({})).await, DOC);
 }
@@ -947,7 +947,7 @@ async fn endless_chunked_server() -> (String, std::sync::Arc<std::sync::atomic::
 async fn streamed_oversize_response_is_cut_off_without_buffering_it() {
     let (url, sent) = endless_chunked_server().await;
     let mut vars = authed(&url);
-    vars.push(("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", "65536".to_string()));
+    vars.push(("TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES", "65536".to_string()));
     let mut s = Session::start(&config(&vars));
     let text = s
         .err("search_documents", json!({"index": "x", "body": {}}))

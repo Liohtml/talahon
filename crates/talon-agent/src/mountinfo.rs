@@ -216,10 +216,10 @@ mod tests {
 1180 1050 0:120 / / ro,relatime master:400 - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w
 1181 1180 0:123 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
 1190 1180 0:130 / /tmp rw,nosuid,nodev,relatime - tmpfs tmpfs rw,size=1048576k
-1200 1180 8:1 /srv/talon /workspace/project ro,relatime - ext4 /dev/sda1 rw
+1200 1180 8:1 /srv/talahon /workspace/project ro,relatime - ext4 /dev/sda1 rw
 1201 1200 8:1 /dev/null /workspace/project/.env ro,relatime - devtmpfs udev rw
-1202 1180 8:1 /srv/talon/groups/main /workspace/group rw,relatime - ext4 /dev/sda1 rw
-1203 1202 8:1 /srv/talon/groups/main/AGENT.md /workspace/group/AGENT.md ro,relatime - ext4 /dev/sda1 rw
+1202 1180 8:1 /srv/talahon/groups/main /workspace/group rw,relatime - ext4 /dev/sda1 rw
+1203 1202 8:1 /srv/talahon/groups/main/AGENT.md /workspace/group/AGENT.md ro,relatime - ext4 /dev/sda1 rw
 1204 1180 8:1 /srv/extra/siem /workspace/extra/siem ro,relatime - ext4 /dev/sda1 rw
 1205 1180 8:1 /srv/extra/scratch /workspace/extra/scratch rw,relatime - ext4 /dev/sda1 rw
 1206 1180 8:1 /srv/my\\040dir /workspace/extra/my\\040dir ro,relatime shared:5 master:7 - ext4 /dev/sda1 rw
@@ -257,7 +257,7 @@ mod tests {
         // Main's project mount (MYTH-13) and the image rootfs.
         assert!(ro(&t, "/workspace/project/mysql/mysql-mcp.sh"));
         assert!(ro(&t, "/workspace/project/mysql"));
-        assert!(ro(&t, "/usr/local/bin/talon-agent"));
+        assert!(ro(&t, "/usr/local/bin/talahon-agent"));
         assert!(ro(&t, "/opt/mysql-mcp/bin/python"));
         assert!(ro(&t, "/workspace/extra/siem/siem-mcp.sh"));
         assert!(ro(&t, "/workspace/extra/my dir/x.sh"));

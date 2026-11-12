@@ -1,4 +1,4 @@
-//! `talon-agent run`: the unprivileged agent process.
+//! `talahon-agent run`: the unprivileged agent process.
 //!
 //! 1. read the `ContainerInput` from stdin (bounded) and register the
 //!    gateway token with the log redactor;
@@ -53,7 +53,7 @@ pub const COMPACTED_MESSAGE: &str = "Conversation compacted.";
 /// Reply to `/compact` when there is nothing to compact.
 pub const NOTHING_TO_COMPACT_MESSAGE: &str = "Nothing to compact: the conversation is empty.";
 
-/// Entry point of `talon-agent run`: reads stdin, runs, returns the exit
+/// Entry point of `talahon-agent run`: reads stdin, runs, returns the exit
 /// code (0 ok, 1 error).
 pub async fn run_main(config: RunConfig) -> i32 {
     warn_if_root();
@@ -90,7 +90,7 @@ pub async fn run_bytes(bytes: &[u8], config: RunConfig, output: Arc<dyn OutputSi
 fn warn_if_root() {
     if rustix::process::geteuid().is_root() {
         tracing::warn!(
-            "talon-agent run is running as root; the container should drop privileges via `supervise`"
+            "talahon-agent run is running as root; the container should drop privileges via `supervise`"
         );
     }
 }

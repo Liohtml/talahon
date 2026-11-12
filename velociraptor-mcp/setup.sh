@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Talon Velociraptor MCP — one-time setup
+# Talahon Velociraptor MCP — one-time setup
 #
 # What this does:
 #   1. Creates a Python virtual environment (.venv/) to avoid host Python conflicts
@@ -10,7 +10,7 @@
 #   1. Copy your Velociraptor api.config.yaml into this directory (velociraptor-mcp/)
 #   2. Edit .env and set VELOCIRAPTOR_API_KEY=api.config.yaml (filename only — the
 #      wrapper script resolves it to an absolute path automatically)
-#   3. Restart Talon
+#   3. Restart Talahon
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 ENV_FILE="$SCRIPT_DIR/.env"
 MCP_WRAPPER="$SCRIPT_DIR/velociraptor-mcp.sh"
 
-echo "=== Talon Velociraptor MCP Setup ==="
+echo "=== Talahon Velociraptor MCP Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ if [[ ! -f "$SCRIPT_DIR/api.config.yaml" ]]; then
     echo ""
     echo "  ⚠ api.config.yaml not found in velociraptor-mcp/"
     echo "  Copy it from your Velociraptor server:"
-    echo "    velociraptor config api_client --name talon > velociraptor-mcp/api.config.yaml"
+    echo "    velociraptor config api_client --name talahon > velociraptor-mcp/api.config.yaml"
     echo ""
 fi
 
@@ -93,8 +93,8 @@ echo ""
 if [[ ! -f "$SCRIPT_DIR/api.config.yaml" ]]; then
     echo "Next steps:"
     echo "  1. Copy your Velociraptor api.config.yaml into velociraptor-mcp/"
-    echo "  2. Restart Talon"
+    echo "  2. Restart Talahon"
 else
-    echo "Restart Talon to pick up the Velociraptor MCP server."
+    echo "Restart Talahon to pick up the Velociraptor MCP server."
 fi
 echo ""

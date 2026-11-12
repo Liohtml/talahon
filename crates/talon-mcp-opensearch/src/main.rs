@@ -1,9 +1,9 @@
-//! `talon-opensearch-mcp` — native read-only OpenSearch MCP server.
+//! `talahon-opensearch-mcp` — native read-only OpenSearch MCP server.
 //!
 //! Speaks line-delimited JSON-RPC (MCP) on stdin/stdout and the OpenSearch
 //! REST API over HTTP(S). Configuration comes from the environment (see
 //! `talon_mcp_opensearch::config`). Logs go to stderr only
-//! (`TALON_OPENSEARCH_LOG` / `RUST_LOG`, default `warn`); stdout is the
+//! (`TALAHON_OPENSEARCH_LOG` / `RUST_LOG`, default `warn`); stdout is the
 //! protocol.
 
 use std::process::ExitCode;
@@ -12,9 +12,9 @@ use talon_mcp_opensearch::{Config, build_server};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "\
-talon-opensearch-mcp — native read-only OpenSearch MCP server (stdio)
+talahon-opensearch-mcp — native read-only OpenSearch MCP server (stdio)
 
-Usage: talon-opensearch-mcp [--check | --version | --help]
+Usage: talahon-opensearch-mcp [--check | --version | --help]
 
   --check     validate the configuration and exit (no request is made)
   --version   print the version and exit
@@ -27,13 +27,13 @@ Environment:
   OPENSEARCH_CA_CERTS    PEM file with additional trusted CA certificates
   OPENSEARCH_PROXY       http(s) proxy for all requests
   REQUEST_TIMEOUT        request timeout in seconds (default 30)
-  TALON_OPENSEARCH_MAX_RESPONSE_BYTES   response size limit (default 8388608)
-  TALON_OPENSEARCH_LOG   log filter for stderr, e.g. 'debug' (default warn)
+  TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES   response size limit (default 8388608)
+  TALAHON_OPENSEARCH_LOG   log filter for stderr, e.g. 'debug' (default warn)
 ";
 
 fn init_logging() {
-    let filter = std::env::var("TALON_OPENSEARCH_LOG")
-        .ok()
+    // `TALAHON_OPENSEARCH_LOG`, or its pre-rename alias `TALON_OPENSEARCH_LOG`.
+    let filter = talon_core::env::process_var("TALAHON_OPENSEARCH_LOG")
         .and_then(|f| EnvFilter::try_new(f).ok())
         .or_else(|| EnvFilter::try_from_default_env().ok())
         .unwrap_or_else(|| EnvFilter::new("warn"));
@@ -51,7 +51,7 @@ async fn main() -> ExitCode {
         match arg.as_str() {
             "--check" => check = true,
             "--version" | "-V" => {
-                println!("talon-opensearch-mcp {}", env!("CARGO_PKG_VERSION"));
+                println!("talahon-opensearch-mcp {}", env!("CARGO_PKG_VERSION"));
                 return ExitCode::SUCCESS;
             }
             "--help" | "-h" => {
@@ -59,13 +59,14 @@ async fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             _ => {
-                eprint!("talon-opensearch-mcp: unexpected argument\n\n{USAGE}");
+                eprint!("talahon-opensearch-mcp: unexpected argument\n\n{USAGE}");
                 return ExitCode::from(2);
             }
         }
     }
 
     init_logging();
+    talon_core::env::flush_legacy_key_warnings();
 
     let server = match Config::from_env().and_then(|config| {
         if config.sends_credentials_in_clear() {
@@ -77,20 +78,20 @@ async fn main() -> ExitCode {
         tracing::info!(
             hosts = ?config.hosts_for_log(),
             authenticated = config.credentials.is_some(),
-            "talon-opensearch-mcp starting"
+            "talahon-opensearch-mcp starting"
         );
         build_server(&config)
     }) {
         Ok(server) => server,
         Err(e) => {
             // ConfigError messages never contain values, only variable names.
-            eprintln!("talon-opensearch-mcp: configuration error: {e}");
+            eprintln!("talahon-opensearch-mcp: configuration error: {e}");
             return ExitCode::from(2);
         }
     };
 
     if check {
-        eprintln!("talon-opensearch-mcp: configuration OK");
+        eprintln!("talahon-opensearch-mcp: configuration OK");
         return ExitCode::SUCCESS;
     }
 

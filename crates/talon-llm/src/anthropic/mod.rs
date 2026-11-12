@@ -1,12 +1,12 @@
 //! Anthropic Messages API as a gateway upstream.
 //!
 //! The agent in the container only ever speaks the OpenAI-compatible chat
-//! API to the host gateway. With `TALON_PROVIDER=anthropic` the gateway
-//! translates in both directions, so nothing in `talon-agent` changes and
+//! API to the host gateway. With `TALAHON_PROVIDER=anthropic` the gateway
+//! translates in both directions, so nothing in `talahon-agent` changes and
 //! the API key stays on the host exactly like a vLLM key:
 //!
 //! ```text
-//! talon-agent ──OpenAI chat/completions──▶ gateway ──Messages API (x-api-key)──▶ api.anthropic.com
+//! talahon-agent ──OpenAI chat/completions──▶ gateway ──Messages API (x-api-key)──▶ api.anthropic.com
 //!             ◀──chat.completion(.chunk)──         ◀──message / SSE events──
 //! ```
 //!

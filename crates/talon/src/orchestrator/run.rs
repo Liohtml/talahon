@@ -53,11 +53,11 @@ const ABORT_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 type ContainerSlot = Arc<Mutex<Option<Arc<dyn RunningContainer>>>>;
 
 /// Error reported when no vLLM provider is configured.
-pub const VLLM_NOT_CONFIGURED: &str = "vLLM provider is not configured: set TALON_VLLM_BASE_URL and \
-     TALON_VLLM_MODEL in .env (run `talon doctor`)";
+pub const VLLM_NOT_CONFIGURED: &str = "vLLM provider is not configured: set TALAHON_VLLM_BASE_URL and \
+     TALAHON_VLLM_MODEL in .env (run `talahon doctor`)";
 /// Error reported when the LLM gateway is not running.
 pub const GATEWAY_NOT_RUNNING: &str =
-    "LLM gateway is not running, so containers cannot reach vLLM (run `talon doctor`)";
+    "LLM gateway is not running, so containers cannot reach vLLM (run `talahon doctor`)";
 
 /// Errors meaning the stored session no longer exists
 /// (`/no conversation found|ENOENT.*\.jsonl|session.*not found/i`).
@@ -533,7 +533,7 @@ mod tests {
         RegisteredGroup {
             name: folder.into(),
             folder: folder.into(),
-            trigger: "@Talon".into(),
+            trigger: "@Talahon".into(),
             added_at: "2026-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Talon Wazuh MCP — one-time setup
+# Talahon Wazuh MCP — one-time setup
 #
 # What this does:
 #   1. Creates a Python virtual environment (.venv/) to avoid host Python conflicts
 #   2. Installs wazuh-mcp-server from GitHub into it
 #   3. Creates .env from .env.example if not already present
 #
-# After running this, edit .env with your Wazuh credentials, then restart Talon.
+# After running this, edit .env with your Wazuh credentials, then restart Talahon.
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 ENV_FILE="$SCRIPT_DIR/.env"
 MCP_WRAPPER="$SCRIPT_DIR/wazuh-mcp.sh"
 
-echo "=== Talon Wazuh MCP Setup ==="
+echo "=== Talahon Wazuh MCP Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -79,8 +79,8 @@ echo ""
 if grep -q "your-wazuh-host" "$ENV_FILE" 2>/dev/null; then
     echo "Next steps:"
     echo "  1. Edit wazuh-mcp/.env with your Wazuh URL, username, and password"
-    echo "  2. Restart Talon"
+    echo "  2. Restart Talahon"
 else
-    echo "Restart Talon to pick up the Wazuh MCP server."
+    echo "Restart Talahon to pick up the Wazuh MCP server."
 fi
 echo ""

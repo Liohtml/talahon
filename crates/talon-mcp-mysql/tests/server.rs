@@ -532,7 +532,7 @@ async fn truncated_results_are_marked() {
         marker.starts_with("[RESULT TRUNCATED: only the first 2 rows are shown"),
         "{marker}"
     );
-    assert!(marker.contains("TALON_MYSQL_MAX_ROWS"), "{marker}");
+    assert!(marker.contains("TALAHON_MYSQL_MAX_ROWS"), "{marker}");
 }
 
 // --- the real backend against things that are not a MySQL server -----------
@@ -541,7 +541,7 @@ fn config(port: u16, extra: &[(&str, &str)]) -> Config {
     let mut vars = vec![
         ("MYSQL_HOST".to_string(), "127.0.0.1".to_string()),
         ("MYSQL_PORT".to_string(), port.to_string()),
-        ("MYSQL_USER".to_string(), "talon".to_string()),
+        ("MYSQL_USER".to_string(), "talahon".to_string()),
         ("MYSQL_PASSWORD".to_string(), PASSWORD.to_string()),
         ("MYSQL_DATABASE".to_string(), "copilot".to_string()),
     ];
@@ -746,7 +746,7 @@ async fn preferred_mode_falls_back_to_plaintext_when_tls_is_not_offered() {
         .filter(|sent| !is_nothing_or_quit(sent))
         .collect();
     assert_eq!(logins.len(), 1, "{replies:?}");
-    assert!(logins[0].windows(5).any(|w| w == b"talon"), "{replies:?}");
+    assert!(logins[0].windows(7).any(|w| w == b"talahon"), "{replies:?}");
     // The password itself never travels, only a scramble of it.
     assert!(
         !logins[0]

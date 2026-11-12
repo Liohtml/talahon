@@ -1,14 +1,19 @@
-//! Step `service`: install Talon as a
-//! background service running `<talon binary> run`.
+//! Step `service`: install Talahon as a
+//! background service running `<talahon binary> run`.
 //!
-//! - **Linux + systemd**: a user unit (`~/.config/systemd/user/talon.service`,
+//! - **Linux + systemd**: a user unit (`~/.config/systemd/user/talahon.service`,
 //!   linger enabled) or, as root, a system unit. The unit is sandboxed
 //!   ([`Hardening`]) as far as is compatible with driving the container
 //!   runtime; if the strict sandbox prevents the service from starting
 //!   (e.g. unprivileged user namespaces disabled), it is rewritten with the
 //!   basic set and restarted.
-//! - **macOS**: a launchd agent (`~/Library/LaunchAgents/com.talon.plist`).
-//! - **No systemd** (WSL, containers): a `start-talon.sh` nohup wrapper.
+//! - **macOS**: a launchd agent (`~/Library/LaunchAgents/com.talahon.plist`).
+//! - **No systemd** (WSL, containers): a `start-talahon.sh` nohup wrapper.
+//!
+//! Up to 2.x the service was called `talon` (`talon.service`, `com.talon`,
+//! `start-talon.sh` / `talon.pid`). Installing the service under its new
+//! name stops, disables and removes the old one first, so two services
+//! never fight over the channels.
 //!
 //! Every generated file is built with proper escaping for its format
 //! (systemd specifiers/quoting, XML, POSIX shell), so unusual paths cannot
@@ -33,9 +38,13 @@ use crate::runner::{CommandOutput, CommandSpec};
 use crate::status::{StatusBlock, StepOutcome};
 
 /// systemd unit name (without `.service`).
-pub const SERVICE_NAME: &str = "talon";
+pub const SERVICE_NAME: &str = "talahon";
 /// launchd label.
-pub const LAUNCHD_LABEL: &str = "com.talon";
+pub const LAUNCHD_LABEL: &str = "com.talahon";
+/// systemd unit name up to 2.x; replaced by [`SERVICE_NAME`] on install.
+pub const LEGACY_SERVICE_NAME: &str = "talon";
+/// launchd label up to 2.x; replaced by [`LAUNCHD_LABEL`] on install.
+pub const LEGACY_LAUNCHD_LABEL: &str = "com.talon";
 /// Open-file limit (soft and hard) of the service process
 /// (`LimitNOFILE=`, launchd `NumberOfFiles`, `ulimit -n`).
 pub const MAX_OPEN_FILES: u32 = 65536;
@@ -45,7 +54,7 @@ pub const MAX_TASKS: u32 = 4096;
 /// systemd sandboxing level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hardening {
-    /// Full sandbox: read-only system/home except Talon's state directories,
+    /// Full sandbox: read-only system/home except Talahon's state directories,
     /// private /tmp, kernel protections, no privilege escalation. In user
     /// units this needs unprivileged user namespaces.
     Strict,
@@ -90,9 +99,9 @@ impl Hardening {
 /// Inputs for the generated service definitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSpec {
-    /// Absolute path of the `talon` binary (`ExecStart=<binary> run`).
+    /// Absolute path of the `talahon` binary (`ExecStart=<binary> run`).
     pub binary: PathBuf,
-    /// Talon project directory (working directory, state, logs).
+    /// Talahon project directory (working directory, state, logs).
     pub project_root: PathBuf,
     /// The service user's home.
     pub home_dir: PathBuf,
@@ -106,11 +115,11 @@ pub struct ServiceSpec {
 
 impl ServiceSpec {
     fn log_file(&self) -> PathBuf {
-        self.project_root.join("logs").join("talon.log")
+        self.project_root.join("logs").join("talahon.log")
     }
 
     fn error_log_file(&self) -> PathBuf {
-        self.project_root.join("logs").join("talon.error.log")
+        self.project_root.join("logs").join("talahon.error.log")
     }
 
     fn path_env(&self) -> String {
@@ -261,7 +270,7 @@ pub fn systemd_unit(spec: &ServiceSpec) -> anyhow::Result<String> {
 
     let mut lines = vec![
         "[Unit]".to_string(),
-        "Description=Talon AI SOC Analyst".into(),
+        "Description=Talahon AI SOC Analyst".into(),
         "After=network-online.target docker.service".into(),
         "Wants=network-online.target".into(),
         String::new(),
@@ -376,14 +385,30 @@ pub fn launchd_plist(spec: &ServiceSpec) -> anyhow::Result<String> {
     ))
 }
 
-/// `<project_root>/start-talon.sh`
+/// `<project_root>/start-talahon.sh`
 pub fn nohup_wrapper_path(project_root: &Path) -> PathBuf {
+    project_root.join("start-talahon.sh")
+}
+
+/// `<project_root>/talahon.pid`
+pub fn pid_file_path(project_root: &Path) -> PathBuf {
+    project_root.join("talahon.pid")
+}
+
+/// `<project_root>/start-talon.sh`: the wrapper's name up to 2.x.
+pub fn legacy_nohup_wrapper_path(project_root: &Path) -> PathBuf {
     project_root.join("start-talon.sh")
 }
 
-/// `<project_root>/talon.pid`
-pub fn pid_file_path(project_root: &Path) -> PathBuf {
+/// `<project_root>/talon.pid`: the PID file's name up to 2.x.
+pub fn legacy_pid_file_path(project_root: &Path) -> PathBuf {
     project_root.join("talon.pid")
+}
+
+/// The pre-rename `talon` binary next to `binary` (an instance started
+/// before the upgrade runs under that name).
+pub fn legacy_binary_path(binary: &Path) -> PathBuf {
+    binary.with_file_name(crate::context::LEGACY_BINARY_NAME)
 }
 
 /// Generate the nohup wrapper script used without systemd.
@@ -394,11 +419,13 @@ pub fn nohup_wrapper(spec: &ServiceSpec) -> anyhow::Result<String> {
     let root = shell_quote(&display(&spec.project_root)?);
     let bin = shell_quote(&display(&spec.binary)?);
     let pid = shell_quote(&display(&pid_file_path(&spec.project_root))?);
+    let legacy_pid = shell_quote(&display(&legacy_pid_file_path(&spec.project_root))?);
+    let legacy_bin = shell_quote(&display(&legacy_binary_path(&spec.binary))?);
     let out_log = shell_quote(&display(&spec.log_file())?);
     let err_log = shell_quote(&display(&spec.error_log_file())?);
     let lines = [
         "#!/bin/bash".to_string(),
-        "# start-talon.sh — start Talon without systemd".into(),
+        "# start-talahon.sh — start Talahon without systemd".into(),
         format!("# To stop: kill \"$(cat {pid})\""),
         String::new(),
         "set -euo pipefail".into(),
@@ -406,19 +433,25 @@ pub fn nohup_wrapper(spec: &ServiceSpec) -> anyhow::Result<String> {
         format!("cd {root}"),
         format!("PID_FILE={pid}"),
         format!("BIN={bin}"),
+        "# Names used before the rename to Talahon (an instance started by".into(),
+        "# start-talon.sh is stopped too, so two never run side by side).".into(),
+        format!("LEGACY_PID_FILE={legacy_pid}"),
+        format!("LEGACY_BIN={legacy_bin}"),
         String::new(),
-        "# Stop an existing instance — only if the recorded PID still is Talon:".into(),
+        "# Stop an existing instance — only if the recorded PID still is Talahon:".into(),
         "# after a reboot or crash the number may belong to another process.".into(),
-        "if [ -f \"$PID_FILE\" ]; then".into(),
-        "  OLD_PID=$(cat \"$PID_FILE\" 2>/dev/null || echo \"\")".into(),
-        "  if [ -n \"$OLD_PID\" ] && ps -p \"$OLD_PID\" -o args= 2>/dev/null | grep -qF -- \"$BIN run\"; then".into(),
-        "    echo \"Stopping existing Talon (PID $OLD_PID)...\"".into(),
+        "for FILE in \"$PID_FILE\" \"$LEGACY_PID_FILE\"; do".into(),
+        "  [ -f \"$FILE\" ] || continue".into(),
+        "  OLD_PID=$(cat \"$FILE\" 2>/dev/null || echo \"\")".into(),
+        "  if [ -n \"$OLD_PID\" ] && ps -p \"$OLD_PID\" -o args= 2>/dev/null | grep -qF -e \"$BIN run\" -e \"$LEGACY_BIN run\"; then".into(),
+        "    echo \"Stopping existing Talahon (PID $OLD_PID)...\"".into(),
         "    kill \"$OLD_PID\" 2>/dev/null || true".into(),
         "    sleep 2".into(),
         "  fi".into(),
-        "fi".into(),
+        "done".into(),
+        "rm -f \"$LEGACY_PID_FILE\"".into(),
         String::new(),
-        "echo \"Starting Talon...\"".into(),
+        "echo \"Starting Talahon...\"".into(),
         "umask 027".into(),
         "# Raise the open-file limit (the soft default of 1024 is easy to exhaust).".into(),
         format!(
@@ -430,11 +463,11 @@ pub fn nohup_wrapper(spec: &ServiceSpec) -> anyhow::Result<String> {
         "echo \"$NEW_PID\" > \"$PID_FILE\"".into(),
         "sleep 2".into(),
         "if ! kill -0 \"$NEW_PID\" 2>/dev/null; then".into(),
-        format!("  echo \"Talon exited right after starting; see \"{err_log} >&2"),
+        format!("  echo \"Talahon exited right after starting; see \"{err_log} >&2"),
         "  rm -f \"$PID_FILE\"".into(),
         "  exit 1".into(),
         "fi".into(),
-        "echo \"Talon started (PID $NEW_PID)\"".into(),
+        "echo \"Talahon started (PID $NEW_PID)\"".into(),
         format!("echo \"Logs: tail -f \"{out_log}"),
     ];
     let mut script = lines.join("\n");
@@ -542,6 +575,18 @@ async fn setup_launchd(ctx: &SetupContext) -> anyhow::Result<StepOutcome> {
     write_atomic(&plist_path, plist.as_bytes(), Some(0o644))?;
     tracing::info!(path = %plist_path.display(), "Wrote launchd plist");
 
+    // The agent installed before the rename (`com.talon`) would keep running
+    // next to the new one: unload and remove it first.
+    let legacy_plist = plist_path.with_file_name(format!("{LEGACY_LAUNCHD_LABEL}.plist"));
+    let legacy_removed = legacy_plist.is_file();
+    if legacy_removed {
+        let legacy_str = display(&legacy_plist)?;
+        let _ = run_cmd(ctx, "launchctl", &["unload", "-w", &legacy_str]).await;
+        std::fs::remove_file(&legacy_plist)
+            .with_context(|| format!("removing {}", legacy_plist.display()))?;
+        tracing::info!(path = %legacy_plist.display(), "Removed the pre-rename launchd agent");
+    }
+
     let plist_str = display(&plist_path)?;
     // Reload so a changed plist takes effect (unload fails if not loaded).
     let _ = run_cmd(ctx, "launchctl", &["unload", &plist_str]).await;
@@ -559,6 +604,7 @@ async fn setup_launchd(ctx: &SetupContext) -> anyhow::Result<StepOutcome> {
     Ok(started(
         base_block(ctx, "launchd")
             .field("PLIST_PATH", plist_path.display())
+            .field("LEGACY_SERVICE_REMOVED", legacy_removed)
             .field("SERVICE_LOADED", loaded),
         loaded,
     ))
@@ -642,10 +688,41 @@ async fn setup_systemd(
         );
     }
 
-    // Stop stray manual instances that would fight over channel connections.
-    if let Ok(bin) = display(&ctx.talon_binary) {
-        let pattern = format!("^{} run", ere_escape(&bin));
-        let _ = run_cmd(ctx, "pkill", &["-f", &pattern]).await;
+    let sc = |extra: &[&'static str]| -> Vec<&str> {
+        systemctl
+            .iter()
+            .copied()
+            .chain(extra.iter().copied())
+            .collect()
+    };
+
+    // The unit installed before the rename (`talon.service`) would keep
+    // running next to the new one and fight over the channels: stop,
+    // disable and remove it before the new unit starts.
+    let legacy_unit_path = unit_dir.join(format!("{LEGACY_SERVICE_NAME}.service"));
+    let legacy_removed = legacy_unit_path.is_file();
+    if legacy_removed {
+        let _ = run_cmd(
+            ctx,
+            "systemctl",
+            &sc(&["disable", "--now", LEGACY_SERVICE_NAME]),
+        )
+        .await;
+        std::fs::remove_file(&legacy_unit_path)
+            .with_context(|| format!("removing {}", legacy_unit_path.display()))?;
+        tracing::info!(path = %legacy_unit_path.display(), "Removed the pre-rename systemd unit");
+    }
+
+    // Stop stray manual instances that would fight over channel connections
+    // (started under the current or the pre-rename binary name).
+    for bin in [
+        ctx.talon_binary.clone(),
+        legacy_binary_path(&ctx.talon_binary),
+    ] {
+        if let Ok(bin) = display(&bin) {
+            let pattern = format!("^{} run", ere_escape(&bin));
+            let _ = run_cmd(ctx, "pkill", &["-f", &pattern]).await;
+        }
     }
 
     let mut linger = false;
@@ -656,13 +733,6 @@ async fn setup_systemd(
         }
     }
 
-    let sc = |extra: &[&'static str]| -> Vec<&str> {
-        systemctl
-            .iter()
-            .copied()
-            .chain(extra.iter().copied())
-            .collect()
-    };
     let restart = || async {
         let _ = run_cmd(ctx, "systemctl", &sc(&["daemon-reload"])).await;
         let _ = run_cmd(ctx, "systemctl", &sc(&["enable", SERVICE_NAME])).await;
@@ -676,7 +746,7 @@ async fn setup_systemd(
     if !active && hardening == Hardening::Strict {
         // Downgrade only when systemd itself failed to set up the sandbox
         // (exit codes 200-245 are systemd's exec-setup failures, e.g. 226
-        // NAMESPACE) — not when Talon started and then exited on its own.
+        // NAMESPACE) — not when Talahon started and then exited on its own.
         let status = run_cmd(
             ctx,
             "systemctl",
@@ -704,6 +774,7 @@ async fn setup_systemd(
         },
     )
     .field("UNIT_PATH", unit_path.display())
+    .field("LEGACY_SERVICE_REMOVED", legacy_removed)
     .field("SERVICE_LOADED", active)
     .field("HARDENING", hardening.as_str());
     if stale {
@@ -719,9 +790,18 @@ fn setup_nohup(ctx: &SetupContext, fallback: &str) -> anyhow::Result<StepOutcome
     let script = nohup_wrapper(&spec_for(ctx, Hardening::None))?;
     write_atomic(&path, script.as_bytes(), Some(0o755))?;
     tracing::info!(path = %path.display(), "Wrote nohup wrapper script");
+    // The wrapper from before the rename would start a second instance; the
+    // new one also stops a process recorded in the old PID file.
+    let legacy = legacy_nohup_wrapper_path(&ctx.project_root);
+    let legacy_removed = legacy.is_file();
+    if legacy_removed {
+        std::fs::remove_file(&legacy).with_context(|| format!("removing {}", legacy.display()))?;
+        tracing::info!(path = %legacy.display(), "Removed the pre-rename wrapper script");
+    }
     Ok(StepOutcome::ok(
         base_block(ctx, "nohup")
             .field("WRAPPER_PATH", path.display())
+            .field("LEGACY_SERVICE_REMOVED", legacy_removed)
             .field("SERVICE_LOADED", false)
             .field("FALLBACK", fallback)
             .field("STATUS", "success")
@@ -738,8 +818,8 @@ mod tests {
 
     fn spec(hardening: Hardening, system: bool) -> ServiceSpec {
         ServiceSpec {
-            binary: PathBuf::from("/opt/talon/bin/talon"),
-            project_root: PathBuf::from("/home/user/talon"),
+            binary: PathBuf::from("/opt/talahon/bin/talahon"),
+            project_root: PathBuf::from("/home/user/talahon"),
             home_dir: PathBuf::from("/home/user"),
             system_unit: system,
             hardening,
@@ -772,10 +852,10 @@ mod tests {
     #[test]
     fn unit_exec_start_runs_talon() {
         let unit = systemd_unit(&spec(Hardening::Strict, false)).unwrap();
-        assert!(unit.contains("ExecStart=/opt/talon/bin/talon run\n"));
-        assert!(unit.contains("WorkingDirectory=/home/user/talon\n"));
-        assert!(unit.contains("StandardOutput=append:/home/user/talon/logs/talon.log"));
-        assert!(unit.contains("StandardError=append:/home/user/talon/logs/talon.error.log"));
+        assert!(unit.contains("ExecStart=/opt/talahon/bin/talahon run\n"));
+        assert!(unit.contains("WorkingDirectory=/home/user/talahon\n"));
+        assert!(unit.contains("StandardOutput=append:/home/user/talahon/logs/talahon.log"));
+        assert!(unit.contains("StandardError=append:/home/user/talahon/logs/talahon.error.log"));
         assert!(unit.contains("Environment=HOME=/home/user\n"));
     }
 
@@ -785,8 +865,8 @@ mod tests {
         for directive in [
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",
-            "ReadWritePaths=/home/user/talon/store /home/user/talon/data /home/user/talon/groups /home/user/talon/logs\n",
-            "ReadWritePaths=-/home/user/.docker -/home/user/talon/mempalace-data\n",
+            "ReadWritePaths=/home/user/talahon/store /home/user/talahon/data /home/user/talahon/groups /home/user/talahon/logs\n",
+            "ReadWritePaths=-/home/user/.docker -/home/user/talahon/mempalace-data\n",
             "PrivateTmp=yes",
             "ProtectKernelTunables=yes",
             "ProtectControlGroups=yes",
@@ -796,8 +876,8 @@ mod tests {
         ] {
             assert!(unit.contains(directive), "missing {directive}\n{unit}");
         }
-        // The mount allowlist (~/.config/talon) must stay read-only.
-        assert!(!unit.contains(".config/talon"));
+        // The mount allowlist (~/.config/talahon) must stay read-only.
+        assert!(!unit.contains(".config/talahon"));
     }
 
     #[test]
@@ -830,11 +910,11 @@ mod tests {
     #[test]
     fn unit_escapes_hostile_paths() {
         let mut s = spec(Hardening::Strict, false);
-        s.binary = PathBuf::from("/opt/my talon/%h/$HOME/talon");
+        s.binary = PathBuf::from("/opt/my talahon/%h/$HOME/talahon");
         s.project_root = PathBuf::from("/srv/t%n");
         let unit = systemd_unit(&s).unwrap();
         assert!(
-            unit.contains("ExecStart=\"/opt/my talon/%%h/$$HOME/talon\" run"),
+            unit.contains("ExecStart=\"/opt/my talahon/%%h/$$HOME/talahon\" run"),
             "{unit}"
         );
         assert!(unit.contains("WorkingDirectory=/srv/t%%n"));
@@ -847,10 +927,10 @@ mod tests {
     #[test]
     fn whitespace_project_logs_to_journal() {
         let mut s = spec(Hardening::Strict, false);
-        s.project_root = PathBuf::from("/srv/my talon");
+        s.project_root = PathBuf::from("/srv/my talahon");
         let unit = systemd_unit(&s).unwrap();
         assert!(!unit.contains("StandardOutput=append"));
-        assert!(unit.contains("ReadWritePaths=\"/srv/my talon/store\""));
+        assert!(unit.contains("ReadWritePaths=\"/srv/my talahon/store\""));
     }
 
     #[test]
@@ -867,13 +947,15 @@ mod tests {
     #[test]
     fn plist_contents() {
         let plist = launchd_plist(&spec(Hardening::None, false)).unwrap();
-        assert!(plist.contains("<string>com.talon</string>"));
+        assert!(plist.contains("<string>com.talahon</string>"));
         assert!(
-            plist.contains("<string>/opt/talon/bin/talon</string>\n        <string>run</string>")
+            plist.contains(
+                "<string>/opt/talahon/bin/talahon</string>\n        <string>run</string>"
+            )
         );
-        assert!(plist.contains("<string>/home/user/talon</string>"));
-        assert!(plist.contains("talon.log"));
-        assert!(plist.contains("talon.error.log"));
+        assert!(plist.contains("<string>/home/user/talahon</string>"));
+        assert!(plist.contains("talahon.log"));
+        assert!(plist.contains("talahon.error.log"));
         assert!(plist.contains("<key>KeepAlive</key>"));
     }
 
@@ -914,12 +996,14 @@ mod tests {
     fn wrapper_script() {
         let script = nohup_wrapper(&spec(Hardening::None, false)).unwrap();
         assert!(script.starts_with("#!/bin/bash\n"));
-        assert!(script.contains("BIN='/opt/talon/bin/talon'"));
-        assert!(script.contains("nohup \"$BIN\" run >> '/home/user/talon/logs/talon.log'"));
-        assert!(script.contains("talon.pid"));
-        // A recorded PID is only stopped while it still is Talon.
+        assert!(script.contains("BIN='/opt/talahon/bin/talahon'"));
+        assert!(script.contains("nohup \"$BIN\" run >> '/home/user/talahon/logs/talahon.log'"));
+        assert!(script.contains("talahon.pid"));
+        // A recorded PID is only stopped while it still is Talahon.
         assert!(
-            script.contains("ps -p \"$OLD_PID\" -o args= 2>/dev/null | grep -qF -- \"$BIN run\"")
+            script.contains(
+            "ps -p \"$OLD_PID\" -o args= 2>/dev/null | grep -qF -e \"$BIN run\" -e \"$LEGACY_BIN run\""
+        )
         );
         assert!(!script.contains("kill -0 \"$OLD_PID\""));
         // An instance that dies at once is reported, not announced as started.
@@ -961,7 +1045,7 @@ mod tests {
 
     #[test]
     fn ere_escaping() {
-        assert_eq!(ere_escape("/opt/t.x/talon+1"), "/opt/t\\.x/talon\\+1");
+        assert_eq!(ere_escape("/opt/t.x/talahon+1"), "/opt/t\\.x/talahon\\+1");
     }
 
     #[test]
@@ -976,7 +1060,7 @@ mod tests {
 
     fn ctx_with_binary(dir: &Path, runner: Arc<MockRunner>) -> SetupContext {
         let mut ctx = SetupContext::new(&dir.join("proj"), &dir.join("home"), runner);
-        let bin = dir.join("bin/talon");
+        let bin = dir.join("bin/talahon");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, "#!/bin/sh\n").unwrap();
         {
@@ -1021,10 +1105,10 @@ mod tests {
         runner.on("systemctl --user daemon-reload", CommandOutput::ok(""));
         runner.on("systemd-run", CommandOutput::ok("ok"));
         runner.on("loginctl enable-linger", CommandOutput::ok(""));
-        runner.on("systemctl --user enable talon", CommandOutput::ok(""));
-        runner.on("systemctl --user restart talon", CommandOutput::ok(""));
+        runner.on("systemctl --user enable talahon", CommandOutput::ok(""));
+        runner.on("systemctl --user restart talahon", CommandOutput::ok(""));
         runner.on(
-            "systemctl --user is-active talon",
+            "systemctl --user is-active talahon",
             CommandOutput::ok("active"),
         );
         let mut ctx = ctx_with_binary(dir.path(), runner.clone());
@@ -1038,8 +1122,9 @@ mod tests {
         assert_eq!(b.get("HARDENING"), Some("strict"));
         assert_eq!(b.get("LINGER_ENABLED"), Some("true"));
         assert_eq!(b.get("DOCKER_GROUP_STALE"), None);
-        let unit = std::fs::read_to_string(ctx.home_dir.join(".config/systemd/user/talon.service"))
-            .unwrap();
+        let unit =
+            std::fs::read_to_string(ctx.home_dir.join(".config/systemd/user/talahon.service"))
+                .unwrap();
         assert!(unit.contains(&format!("ExecStart={} run", ctx.talon_binary.display())));
         assert!(unit.contains("ProtectSystem=strict"));
         assert!(runner.called("pkill -f ^"));
@@ -1069,8 +1154,9 @@ mod tests {
         assert_eq!(b.get("STATUS"), Some("failed"));
         assert_eq!(b.get("ERROR"), Some("service_not_running"));
         assert_eq!(out.exit_code, 1);
-        let unit = std::fs::read_to_string(ctx.home_dir.join(".config/systemd/user/talon.service"))
-            .unwrap();
+        let unit =
+            std::fs::read_to_string(ctx.home_dir.join(".config/systemd/user/talahon.service"))
+                .unwrap();
         assert!(!unit.contains("ProtectSystem"));
         assert!(unit.contains("NoNewPrivileges=yes"));
         // The downgraded unit keeps the resource limits.
@@ -1080,7 +1166,7 @@ mod tests {
             runner
                 .calls()
                 .iter()
-                .filter(|c| c.contains("restart talon"))
+                .filter(|c| c.contains("restart talahon"))
                 .count(),
             2
         );
@@ -1107,7 +1193,7 @@ mod tests {
             runner
                 .calls()
                 .iter()
-                .filter(|c| c.contains("restart talon"))
+                .filter(|c| c.contains("restart talahon"))
                 .count(),
             1
         );
@@ -1138,7 +1224,7 @@ mod tests {
         let runner = Arc::new(MockRunner::new());
         runner.on("systemctl --user daemon-reload", CommandOutput::ok(""));
         runner.on(
-            "systemctl --user is-active talon",
+            "systemctl --user is-active talahon",
             CommandOutput::ok("active"),
         );
         let mut ctx = ctx_with_binary(dir.path(), runner);
@@ -1158,13 +1244,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn systemd_install_replaces_the_pre_rename_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(MockRunner::new());
+        runner.on("systemctl --user daemon-reload", CommandOutput::ok(""));
+        runner.on("systemd-run", CommandOutput::ok("ok"));
+        runner.on(
+            "systemctl --user disable --now talon",
+            CommandOutput::ok(""),
+        );
+        runner.on("systemctl --user enable talahon", CommandOutput::ok(""));
+        runner.on("systemctl --user restart talahon", CommandOutput::ok(""));
+        runner.on(
+            "systemctl --user is-active talahon",
+            CommandOutput::ok("active"),
+        );
+        let mut ctx = ctx_with_binary(dir.path(), runner.clone());
+        ctx.platform.has_systemd = true;
+        ctx.platform.uid = Some(1000);
+        // The unit of a 2.x installation.
+        let unit_dir = ctx.home_dir.join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let legacy = unit_dir.join("talon.service");
+        std::fs::write(&legacy, "[Service]\nExecStart=/opt/talon/bin/talon run\n").unwrap();
+        assert_eq!(LEGACY_SERVICE_NAME, "talon");
+
+        let out = run(&StepArgs::default(), &ctx).await.unwrap();
+        let b = out.block.unwrap();
+        assert_eq!(b.get("SERVICE_LOADED"), Some("true"));
+        assert_eq!(b.get("LEGACY_SERVICE_REMOVED"), Some("true"));
+        assert!(!legacy.exists(), "the old unit file must be gone");
+        assert!(unit_dir.join("talahon.service").is_file());
+
+        let calls = runner.calls();
+        let pos = |needle: &str| {
+            calls
+                .iter()
+                .position(|c| c == needle)
+                .unwrap_or_else(|| panic!("{needle} not run: {calls:?}"))
+        };
+        // Stopped and disabled before the new service starts.
+        assert!(
+            pos("systemctl --user disable --now talon") < pos("systemctl --user restart talahon")
+        );
+        // A manually started instance of either binary name is stopped too.
+        let dir_re = ere_escape(&dir.path().join("bin").display().to_string());
+        assert!(calls.contains(&format!("pkill -f ^{dir_re}/talahon run")));
+        assert!(calls.contains(&format!("pkill -f ^{dir_re}/talon run")));
+
+        // Nothing to migrate the second time.
+        let out = run(&StepArgs::default(), &ctx).await.unwrap();
+        assert_eq!(
+            out.block.unwrap().get("LEGACY_SERVICE_REMOVED"),
+            Some("false")
+        );
+        assert_eq!(
+            runner
+                .calls()
+                .iter()
+                .filter(|c| c.as_str() == "systemctl --user disable --now talon")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn launchd_install_replaces_the_pre_rename_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(MockRunner::new());
+        runner.on("launchctl ", CommandOutput::ok(""));
+        runner.on(
+            "launchctl list",
+            CommandOutput::ok("PID\tStatus\tLabel\n123\t0\tcom.talahon\n"),
+        );
+        let mut ctx = ctx_with_binary(dir.path(), runner.clone());
+        ctx.platform.platform = Platform::MacOs;
+        let agents = ctx.home_dir.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let legacy = agents.join("com.talon.plist");
+        std::fs::write(&legacy, "<plist/>").unwrap();
+        assert_eq!(LEGACY_LAUNCHD_LABEL, "com.talon");
+
+        let out = run(&StepArgs::default(), &ctx).await.unwrap();
+        let b = out.block.unwrap();
+        assert_eq!(b.get("SERVICE_LOADED"), Some("true"));
+        assert_eq!(b.get("LEGACY_SERVICE_REMOVED"), Some("true"));
+        assert!(!legacy.exists());
+        assert!(agents.join("com.talahon.plist").is_file());
+        let calls = runner.calls();
+        let unload_old = calls
+            .iter()
+            .position(|c| c == &format!("launchctl unload -w {}", legacy.display()))
+            .expect("old agent unloaded");
+        let load_new = calls
+            .iter()
+            .position(|c| c.starts_with("launchctl load -w "))
+            .expect("new agent loaded");
+        assert!(unload_old < load_new);
+    }
+
+    #[tokio::test]
+    async fn nohup_install_replaces_the_pre_rename_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_binary(dir.path(), Arc::new(MockRunner::new()));
+        std::fs::create_dir_all(&ctx.project_root).unwrap();
+        let legacy = legacy_nohup_wrapper_path(&ctx.project_root);
+        assert!(legacy.ends_with("start-talon.sh"));
+        std::fs::write(&legacy, "#!/bin/bash\n").unwrap();
+        let out = run(&StepArgs::default(), &ctx).await.unwrap();
+        let b = out.block.unwrap();
+        assert_eq!(b.get("SERVICE_TYPE"), Some("nohup"));
+        assert_eq!(b.get("LEGACY_SERVICE_REMOVED"), Some("true"));
+        assert!(!legacy.exists());
+        // The new wrapper stops an instance recorded in the old PID file.
+        let script = std::fs::read_to_string(nohup_wrapper_path(&ctx.project_root)).unwrap();
+        let old_pid = legacy_pid_file_path(&ctx.project_root);
+        assert!(old_pid.ends_with("talon.pid"));
+        assert!(script.contains(&format!("LEGACY_PID_FILE='{}'", old_pid.display())));
+        assert!(script.contains(&format!(
+            "LEGACY_BIN='{}'",
+            dir.path().join("bin/talon").display()
+        )));
+        assert!(script.contains("-e \"$BIN run\" -e \"$LEGACY_BIN run\""));
+        assert!(script.contains("rm -f \"$LEGACY_PID_FILE\""));
+    }
+
+    #[tokio::test]
     async fn launchd_flow() {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(MockRunner::new());
         runner.on("launchctl load", CommandOutput::ok(""));
         runner.on(
             "launchctl list",
-            CommandOutput::ok("PID\tStatus\tLabel\n123\t0\tcom.talon\n-\t0\tcom.talonx\n"),
+            CommandOutput::ok("PID\tStatus\tLabel\n123\t0\tcom.talahon\n-\t0\tcom.talahonx\n"),
         );
         let mut ctx = ctx_with_binary(dir.path(), runner);
         ctx.platform.platform = Platform::MacOs;
@@ -1174,7 +1386,7 @@ mod tests {
         assert_eq!(b.get("SERVICE_LOADED"), Some("true"));
         assert!(
             ctx.home_dir
-                .join("Library/LaunchAgents/com.talon.plist")
+                .join("Library/LaunchAgents/com.talahon.plist")
                 .exists()
         );
     }

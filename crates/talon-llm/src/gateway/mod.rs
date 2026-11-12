@@ -6,7 +6,7 @@
 //! and revokes it when the run ends.
 //!
 //! ```text
-//! container ──Bearer tlgw_…──▶ gateway ──Bearer <TALON_VLLM_API_KEY>──▶ vLLM
+//! container ──Bearer tlgw_…──▶ gateway ──Bearer <TALAHON_VLLM_API_KEY>──▶ vLLM
 //!                              │ talon-net: header-read timeout, connection caps
 //!                              │ token digest lookup + TTL
 //!                              │ per-token rate limit + in-flight cap (429)
@@ -91,7 +91,7 @@ use policy::{CacheSaltKey, PolicyOutcome, RequestPolicy};
 use stats::StatsRecorder;
 use tokens::{AuthDecision, InFlightGuard, TokenStore, extract_token};
 
-/// Default gateway port (`TALON_LLM_GATEWAY_PORT`).
+/// Default gateway port (`TALAHON_LLM_GATEWAY_PORT`).
 pub const DEFAULT_GATEWAY_PORT: u16 = 3001;
 /// Default request body limit. 4 MiB is roughly a million tokens of text —
 /// far beyond any served context window — including 100+ tool schemas, and
@@ -145,11 +145,11 @@ pub struct GatewayConfig {
     pub upstream_kind: UpstreamKind,
     /// Upstream base URL, with or without `/v1`.
     pub upstream_base_url: String,
-    /// vLLM `--api-key` (`TALON_VLLM_API_KEY`) or the Anthropic API key
-    /// (`TALON_ANTHROPIC_API_KEY`). Injected upstream; never visible to
+    /// vLLM `--api-key` (`TALAHON_VLLM_API_KEY`) or the Anthropic API key
+    /// (`TALAHON_ANTHROPIC_API_KEY`). Injected upstream; never visible to
     /// containers.
     pub upstream_api_key: Option<String>,
-    /// Anthropic only: allow adaptive thinking (`TALON_ANTHROPIC_THINKING`).
+    /// Anthropic only: allow adaptive thinking (`TALAHON_ANTHROPIC_THINKING`).
     pub anthropic_thinking: bool,
     /// Models containers may use (in addition to `default_model`).
     pub allowed_models: Vec<String>,
@@ -404,7 +404,7 @@ impl LlmGateway {
         };
         if config.upstream_kind == UpstreamKind::Anthropic && upstream_auth.is_none() {
             return Err(LlmError::Config(
-                "the Anthropic provider needs an API key (TALON_ANTHROPIC_API_KEY)".into(),
+                "the Anthropic provider needs an API key (TALAHON_ANTHROPIC_API_KEY)".into(),
             ));
         }
         let mut builder = reqwest::Client::builder()
@@ -1115,7 +1115,7 @@ fn upstream_auth_failure(
     tracing::error!(
         route,
         status = status.as_u16(),
-        "LLM gateway: upstream rejected the gateway's API key — check TALON_VLLM_API_KEY"
+        "LLM gateway: upstream rejected the gateway's API key — check TALAHON_VLLM_API_KEY"
     );
     state.audit_request(
         label,

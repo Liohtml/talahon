@@ -10,7 +10,7 @@ license = "MIT"
 repository = "https://github.com/Liohtml/talahon"
 homepage = "https://github.com/Liohtml/talahon"
 readme = "README.md"
-authors = ["Talon contributors"]
+authors = ["Talahon contributors"]
 keywords = ["soc", "security", "siem", "llm", "agent"]
 
 [workspace.dependencies]

@@ -1,4 +1,4 @@
-//! MCP protocol types (spec 2025-06-18) — only the parts Talon needs:
+//! MCP protocol types (spec 2025-06-18) — only the parts Talahon needs:
 //! lifecycle, tools, and tool results. Deserialization is lenient: unknown
 //! fields are ignored and malformed optional members degrade to `None`
 //! instead of failing the whole message.
@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Protocol revisions this crate accepts, newest first. The older revisions
-/// are wire-compatible for everything Talon uses (tools only).
+/// are wire-compatible for everything Talahon uses (tools only).
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// True if `version` is one of [`SUPPORTED_PROTOCOL_VERSIONS`].

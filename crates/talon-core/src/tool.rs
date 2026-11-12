@@ -1,7 +1,7 @@
 //! The tool abstraction used by the in-container agent loop.
 //!
 //! Built-in tools (`talon-tools`), threat-intel tools (`talon-intel`) and
-//! remote MCP tools (wrapped by `talon-agent`) all implement [`Tool`], so the
+//! remote MCP tools (wrapped by `talahon-agent`) all implement [`Tool`], so the
 //! agent loop treats them uniformly.
 
 use std::path::PathBuf;

@@ -6,7 +6,7 @@ use talon_core::types::NewMessage;
 
 /// Escape the XML special characters `&`, `<`, `>` and `"`.
 ///
-/// Single quotes are left alone because every attribute Talon emits is
+/// Single quotes are left alone because every attribute Talahon emits is
 /// double-quoted.
 pub fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 8);

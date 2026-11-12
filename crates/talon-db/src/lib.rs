@@ -151,14 +151,14 @@ pub struct IocSighting {
 pub struct DbOptions {
     /// Assistant name used by the one-time `is_bot_message` backfill when a
     /// pre-migration database is upgraded (`content LIKE '<name>:%'`).
-    /// Defaults to `Talon`, the default `ASSISTANT_NAME`.
+    /// Defaults to `Talahon`, the default `ASSISTANT_NAME`.
     pub assistant_name: String,
 }
 
 impl Default for DbOptions {
     fn default() -> Self {
         Self {
-            assistant_name: "Talon".to_string(),
+            assistant_name: "Talahon".to_string(),
         }
     }
 }
@@ -569,7 +569,7 @@ mod tests {
     fn escape_like_escapes_wildcards() {
         assert_eq!(escape_like("T_lon%"), "T\\_lon\\%");
         assert_eq!(escape_like("a\\b"), "a\\\\b");
-        assert_eq!(bot_prefix_pattern("Talon"), "Talon:%");
+        assert_eq!(bot_prefix_pattern("Talahon"), "Talahon:%");
     }
 
     #[test]
@@ -626,7 +626,9 @@ mod tests {
             t.join().unwrap();
         }
 
-        let msgs = db.get_messages_since("c@g.us", "", "Talon", 1000).unwrap();
+        let msgs = db
+            .get_messages_since("c@g.us", "", "Talahon", 1000)
+            .unwrap();
         assert_eq!(msgs.len(), 200);
         assert_eq!(db.recent_audit(1000, Some("test.")).unwrap().len(), 200);
         assert_eq!(db.verify_audit_chain().unwrap(), None);
@@ -809,9 +811,9 @@ mod tests {
         assert_eq!(db.get_all_chats().unwrap().len(), 1);
         assert!(db.get_chat("c@g.us").unwrap().is_some());
         db.get_last_group_sync().unwrap();
-        db.get_new_messages(&jids, "", "Talon").unwrap();
-        db.get_messages_since("c@g.us", "", "Talon", 10).unwrap();
-        db.get_last_bot_message_timestamp("c@g.us", "Talon")
+        db.get_new_messages(&jids, "", "Talahon").unwrap();
+        db.get_messages_since("c@g.us", "", "Talahon", 10).unwrap();
+        db.get_last_bot_message_timestamp("c@g.us", "Talahon")
             .unwrap();
 
         db.get_registered_group("c@g.us").unwrap();

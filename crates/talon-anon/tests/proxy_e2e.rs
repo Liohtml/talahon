@@ -1,4 +1,4 @@
-//! End-to-end tests: the `talon-anon-proxy` binary driven over stdio, with a
+//! End-to-end tests: the `talahon-anon-proxy` binary driven over stdio, with a
 //! fake upstream MCP server written in Python (skipped if `python3` is not
 //! installed).
 
@@ -103,7 +103,7 @@ impl Proxy {
     fn start(dir: &Path, map: &Path) -> Proxy {
         let script = dir.join("fake_upstream.py");
         fs::write(&script, FAKE_UPSTREAM).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_talon-anon-proxy"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_talahon-anon-proxy"))
             .arg("--fields")
             .arg(fields_yaml())
             .arg("--map")
@@ -114,12 +114,12 @@ impl Proxy {
             .arg("-I")
             .arg(&script)
             .arg(dir.join("received.log"))
-            .env("TALON_ANON_LOG", "debug")
+            .env("TALAHON_ANON_LOG", "debug")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn talon-anon-proxy");
+            .expect("spawn talahon-anon-proxy");
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -334,7 +334,7 @@ fn upstream_crash_answers_pending_requests_and_exits_with_its_code() {
 #[test]
 fn bad_invocations_fail_fast() {
     let dir = tempfile::tempdir().unwrap();
-    let bin = env!("CARGO_BIN_EXE_talon-anon-proxy");
+    let bin = env!("CARGO_BIN_EXE_talahon-anon-proxy");
     let map = dir.path().join("t.json");
 
     let missing = Command::new(bin)

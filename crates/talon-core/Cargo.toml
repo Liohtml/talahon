@@ -1,6 +1,6 @@
 [package]
 name = "talahon-core"
-description = "Shared types, configuration, wire protocol and traits for Talon"
+description = "Shared types, configuration, wire protocol and traits for Talahon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

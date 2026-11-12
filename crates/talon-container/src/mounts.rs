@@ -377,7 +377,7 @@ pub fn mcp_staging_path(id: &str, file: &str) -> String {
 /// Host directories the mounts are built from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountLayout {
-    /// Talon checkout (main's `/workspace/project`).
+    /// Talahon checkout (main's `/workspace/project`).
     pub project_root: PathBuf,
     /// `groups/`.
     pub groups_dir: PathBuf,
@@ -1134,7 +1134,7 @@ impl MountGuard {
     fn refusal(&self, host: &Path, container_path: &str) -> Option<String> {
         if within_ci(&self.project, host) {
             return Some(format!(
-                "mount exposes the Talon project root {} (it is the root or an ancestor of it)",
+                "mount exposes the Talahon project root {} (it is the root or an ancestor of it)",
                 self.project.display()
             ));
         }
@@ -1159,12 +1159,12 @@ impl MountGuard {
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().starts_with(".env"));
         if is_project_env {
-            return Some("mount is a Talon .env file".to_string());
+            return Some("mount is a Talahon .env file".to_string());
         }
         for secret in &self.secret_files {
             if within_ci(secret, host) {
                 return Some(format!(
-                    "mount exposes Talon secret file {}",
+                    "mount exposes Talahon secret file {}",
                     secret.display()
                 ));
             }
@@ -1750,7 +1750,7 @@ mod tests {
         RegisteredGroup {
             name: format!("Group {folder}"),
             folder: folder.into(),
-            trigger: "@Talon".into(),
+            trigger: "@Talahon".into(),
             added_at: "2026-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,
@@ -1836,7 +1836,7 @@ mod tests {
         assert!(find(&mounts, "/workspace/project/.env").is_none());
         assert!(find(&mounts, "/workspace/project/store").is_none());
 
-        fs::write(fx.root.join(".env"), "TALON_VLLM_API_KEY=x").unwrap();
+        fs::write(fx.root.join(".env"), "TALAHON_VLLM_API_KEY=x").unwrap();
         fs::write(fx.root.join(".env.local"), "X=1").unwrap();
         let mounts = build(&fx, &g, true, &DenyAllMounts, None).unwrap();
         let shadow = find(&mounts, "/workspace/project/.env").unwrap();
@@ -2914,7 +2914,7 @@ mod tests {
     #[test]
     fn project_root_and_its_ancestors_are_refused() {
         let fx = fixture();
-        fs::write(fx.root.join(".env"), "TALON_VLLM_API_KEY=x").unwrap();
+        fs::write(fx.root.join(".env"), "TALAHON_VLLM_API_KEY=x").unwrap();
         let parent = fx.root.parent().unwrap().to_path_buf();
         let g = with_extras(
             "team",
@@ -2951,9 +2951,9 @@ mod tests {
         // .env pointing outside the project: its real directory is refused.
         let vault = fx.root.join("docs/vault");
         fs::create_dir_all(&vault).unwrap();
-        fs::write(vault.join("talon-env"), "K=v").unwrap();
+        fs::write(vault.join("talahon-env"), "K=v").unwrap();
         fs::remove_file(fx.root.join(".env")).unwrap();
-        symlink(vault.join("talon-env"), fx.root.join(".env")).unwrap();
+        symlink(vault.join("talahon-env"), fx.root.join(".env")).unwrap();
         // An extra protected path (e.g. the host config dir).
         let cfgdir = fx.root.join("hostcfg");
         fs::create_dir_all(cfgdir.join("sub")).unwrap();
@@ -2968,7 +2968,7 @@ mod tests {
             ("othergroup", fx.root.join("groups/other")),
             ("envprod", fx.root.join(".env.production")),
             ("vault", vault.clone()),
-            ("vaultfile", vault.join("talon-env")),
+            ("vaultfile", vault.join("talahon-env")),
             ("cfg", cfgdir.clone()),
             ("cfgsub", cfgdir.join("sub")),
         ];

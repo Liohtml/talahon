@@ -22,7 +22,7 @@
 //! | `COPILOT_HTTP_AUTH_MAX_FAILURES` | `10` | Failed auths per IP before throttling |
 //! | `COPILOT_HTTP_AUTH_WINDOW_SECS` | `300` | Throttle window |
 //! | `COPILOT_PALACE_TIMEOUT_MS` | `30000` | Palace call timeout |
-//! | `TALON_PALACE_HOST_EXEC` | unset | `unsafe` runs `mempalace/palace-call.sh` **on the host** when no palace runner is supplied. DANGEROUS: agents can write `mempalace-data/`, so this allows host code execution (MYTH-01) |
+//! | `TALAHON_PALACE_HOST_EXEC` | unset | `unsafe` runs `mempalace/palace-call.sh` **on the host** when no palace runner is supplied. DANGEROUS: agents can write `mempalace-data/`, so this allows host code execution (MYTH-01) |
 //! | `COPILOT_HTTP_MAX_USER_LANES` | `256` | Cap on in-memory per-user lanes |
 //! | `COPILOT_HTTP_MAX_STREAMS` | `256` | Cap on concurrently open SSE streams |
 //! | `COPILOT_EVALS_LEGACY_GROUP_DIR` | `false` | Migration only: `GET /evals` also reads the old `groups/<folder>/evals/`, which every CoPilot lane can write (forgeable records, N-2) |
@@ -33,7 +33,7 @@
 //!
 //! `/palace/*` is disabled (503) unless the host supplies a palace runner
 //! (see [`crate::HttpDeps::with_palace`]) or the operator opts into host
-//! execution with `TALON_PALACE_HOST_EXEC=unsafe`.
+//! execution with `TALAHON_PALACE_HOST_EXEC=unsafe`.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
@@ -176,7 +176,7 @@ pub struct HttpConfig {
     /// Path of `mempalace/palace-call.sh` (only used with
     /// [`Self::palace_host_exec`]).
     pub palace_script: PathBuf,
-    /// `TALON_PALACE_HOST_EXEC=unsafe`: without an explicitly supplied
+    /// `TALAHON_PALACE_HOST_EXEC=unsafe`: without an explicitly supplied
     /// palace runner, run `palace_script` directly on the host. Dangerous
     /// (MYTH-01); off by default.
     pub palace_host_exec: bool,
@@ -377,7 +377,7 @@ impl HttpConfig {
     }
 }
 
-/// `TALON_PALACE_HOST_EXEC`: only the exact value `unsafe` enables host
+/// `TALAHON_PALACE_HOST_EXEC`: only the exact value `unsafe` enables host
 /// execution; common "off" spellings disable it; anything else is a
 /// configuration error rather than a silent guess.
 fn parse_host_exec(raw: Option<&str>) -> Result<bool> {
@@ -446,27 +446,27 @@ mod tests {
 
     #[test]
     fn defaults_match_the_ts_release() {
-        let cfg = HttpConfig::new("/opt/talon");
+        let cfg = HttpConfig::new("/opt/talahon");
         assert_eq!(cfg.port, 3100);
         assert_eq!(cfg.base_jid, "http:copilot");
         assert_eq!(cfg.group_folder, "copilot");
         assert_eq!(
             cfg.prompts_dir(),
-            PathBuf::from("/opt/talon/groups/copilot/prompts")
+            PathBuf::from("/opt/talahon/groups/copilot/prompts")
         );
-        assert_eq!(cfg.data_dir, PathBuf::from("/opt/talon/data"));
+        assert_eq!(cfg.data_dir, PathBuf::from("/opt/talahon/data"));
         assert_eq!(
             cfg.evals_dir(),
-            PathBuf::from("/opt/talon/data/sessions/copilot-investigate/evals")
+            PathBuf::from("/opt/talahon/data/sessions/copilot-investigate/evals")
         );
         assert_eq!(
             cfg.legacy_evals_dir(),
-            PathBuf::from("/opt/talon/groups/copilot/evals")
+            PathBuf::from("/opt/talahon/groups/copilot/evals")
         );
         assert!(!cfg.evals_legacy_group_dir);
         assert_eq!(
             cfg.palace_script,
-            PathBuf::from("/opt/talon/mempalace/palace-call.sh")
+            PathBuf::from("/opt/talahon/mempalace/palace-call.sh")
         );
         assert!(!cfg.api_key.is_configured());
         assert_eq!(cfg.dedup_window, Duration::from_secs(600));
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn default_bind_is_loopback() {
-        let cfg = HttpConfig::new("/opt/talon");
+        let cfg = HttpConfig::new("/opt/talahon");
         assert_eq!(cfg.bind, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert!(cfg.exposure_warning().is_none());
         if std::env::var("COPILOT_HTTP_BIND").is_err() {
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn wildcard_bind_without_tls_warns() {
-        let mut cfg = HttpConfig::new("/opt/talon");
+        let mut cfg = HttpConfig::new("/opt/talahon");
         for addr in ["0.0.0.0", "::"] {
             cfg.bind = addr.parse().unwrap();
             cfg.tls_terminated = false;
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn connection_limits_are_configurable() {
-        let cfg = HttpConfig::new("/opt/talon");
+        let cfg = HttpConfig::new("/opt/talahon");
         assert_eq!(cfg.max_connections, DEFAULT_MAX_CONNECTIONS);
         assert!(cfg.max_connections_per_ip > cfg.max_streams);
         assert_eq!(cfg.header_read_timeout, Duration::from_secs(15));
@@ -562,7 +562,7 @@ mod tests {
             let err = parse_host_exec(Some(bad)).unwrap_err().to_string();
             assert!(err.contains("DANGEROUS"), "{bad}: {err}");
         }
-        if std::env::var(HOST_EXEC_ENV).is_err() {
+        if !talon_core::env::process_var_is_set(HOST_EXEC_ENV) {
             let from = |content: &str| {
                 HttpConfig::from_env(
                     Path::new("/x"),
@@ -573,11 +573,11 @@ mod tests {
             };
             assert!(!from("").unwrap().palace_host_exec);
             assert!(
-                from("TALON_PALACE_HOST_EXEC=unsafe\n")
+                from("TALAHON_PALACE_HOST_EXEC=unsafe\n")
                     .unwrap()
                     .palace_host_exec
             );
-            assert!(from("TALON_PALACE_HOST_EXEC=true\n").is_err());
+            assert!(from("TALAHON_PALACE_HOST_EXEC=true\n").is_err());
         }
     }
 
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn data_dir_comes_from_the_host_config() {
-        let mut talon = TalonConfig::from_env(Path::new("/srv/talon"), env(""));
+        let mut talon = TalonConfig::from_env(Path::new("/srv/talahon"), env(""));
         talon.data_dir = PathBuf::from("/var/lib/talon-data");
         let Ok(cfg) = HttpConfig::from_talon_config(&talon) else {
             // A conflicting process env (e.g. COPILOT_HTTP_PORT) is not

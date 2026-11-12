@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Velociraptor MCP server wrapper for Talon.
+# Velociraptor MCP server wrapper for Talahon.
 #
 # Velociraptor uses mTLS for gRPC — api.config.yaml IS the client certificate
 # and key. Both .env (which references the cert path) and api.config.yaml are
@@ -7,7 +7,7 @@
 #
 # Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Talon agent container. `talon-agent supervise` starts this script
+#   1. Talahon agent container. `talahon-agent supervise` starts this script
 #      directly as `mcp-velociraptor` (`"runAs": "mcp-velociraptor"` in
 #      .mcp.json). The entrypoint staged
 #        /etc/mcp-secrets/velociraptor.env              (owner mcp-velociraptor, 0600)

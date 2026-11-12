@@ -346,14 +346,14 @@ fn prepare_group_dir(groups_dir: &Path) -> Result<PathBuf> {
              the non-main Emacs lane write another group's folder and instructions). Replace it \
              with a real directory: `rm {dir}` (removes only the link, not its target), copy \
              any instructions the Emacs lane should keep into {dir}/AGENT.md, then restart \
-             Talon. The bridge creates the folder itself when it is missing.",
+             Talahon. The bridge creates the folder itself when it is missing.",
             dir = dir.display()
         )));
     }
     if !meta.is_dir() {
         return Err(Error::Config(format!(
             "Emacs bridge not started: {} exists but is not a directory; move it away and \
-             restart Talon",
+             restart Talahon",
             dir.display()
         )));
     }

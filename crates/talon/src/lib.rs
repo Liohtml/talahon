@@ -1,20 +1,20 @@
 //! # talon — host orchestrator and CLI
 //!
-//! The `talon` binary is the long-running host process plus the operator
+//! The `talahon` binary is the long-running host process plus the operator
 //! CLI:
 //!
 //! | command | purpose |
 //! |---|---|
-//! | `talon run` (default) | orchestrator: channels, message loop, queue, scheduler, IPC watcher, LLM gateway |
-//! | `talon setup <step> [args]` | setup steps from `talon-setup` (machine-readable status blocks) |
-//! | `talon doctor` | environment, vLLM, container runtime and LLM gateway diagnostics |
-//! | `talon audit verify` | recompute the hash-chained audit log |
-//! | `talon audit tail [-n N] [--kind prefix]` | recent audit events as JSON lines |
-//! | `talon eval score --reports DIR` | score saved reports against the golden set (`evals/golden/`) |
-//! | `talon eval run` | investigate every golden case through a running Talon, then score |
-//! | `talon version` | print the version |
+//! | `talahon run` (default) | orchestrator: channels, message loop, queue, scheduler, IPC watcher, LLM gateway |
+//! | `talahon setup <step> [args]` | setup steps from `talon-setup` (machine-readable status blocks) |
+//! | `talahon doctor` | environment, vLLM, container runtime and LLM gateway diagnostics |
+//! | `talahon audit verify` | recompute the hash-chained audit log |
+//! | `talahon audit tail [-n N] [--kind prefix]` | recent audit events as JSON lines |
+//! | `talahon eval score --reports DIR` | score saved reports against the golden set (`evals/golden/`) |
+//! | `talahon eval run` | investigate every golden case through a running Talahon, then score |
+//! | `talahon version` | print the version |
 //!
-//! ## Architecture of `talon run`
+//! ## Architecture of `talahon run`
 //!
 //! ```text
 //!  channels (http, telegram, emacs, webhook)
@@ -46,6 +46,7 @@ pub mod app;
 pub mod audit_cmd;
 pub mod cli;
 pub mod doctor;
+pub mod entry;
 pub mod eval_cmd;
 pub mod investigation;
 pub mod logging;
@@ -58,5 +59,5 @@ pub mod secrets;
 #[cfg(test)]
 mod testutil;
 
-/// Version of the `talon` package (`CARGO_PKG_VERSION`).
+/// Version of the `talahon` package (`CARGO_PKG_VERSION`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
