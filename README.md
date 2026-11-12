@@ -221,6 +221,7 @@ reach.
 | Egress | `web_fetch` and webhooks check every hop against all special IPv4/IPv6 ranges, pin DNS to vetted addresses and refuse redirects to internal hosts |
 | HTTP API | Loopback by default, constant-time API key check, per-IP throttling, allowlist CORS, body limits, security headers; header-read timeouts and connection caps on every listener |
 | Memory | MemPalace data belongs to `mcp-palace`; agents can neither read nor plant files there, and host `/palace/*` calls run in a one-shot locked-down container |
+| Supply chain | Base images pinned by digest, every MCP server pinned to a commit SHA or exact version in [`container/mcp-versions.env`](container/mcp-versions.env), CI actions pinned by SHA; licenses, sources and banned crates enforced with `cargo deny`; the image is built and smoke-tested in CI |
 | Secrets in output | Logs and outbound messages pass through a redactor (bearer/JWT/vendor keys/PEM/basic auth + every configured secret value) |
 | Audit | Append-only SQLite audit log with a SHA-256 hash chain; `talon audit verify` detects tampering |
 
@@ -354,6 +355,11 @@ container they are readable only by that server's user.
 | `shuffle-mcp/` *(optional)* | `bash shuffle-mcp/setup.sh` | `SHUFFLE_URL`, `SHUFFLE_API_KEY` |
 | `cve-mcp/` *(optional)* | `bash cve-mcp/setup.sh` | `NVD_API_KEY`, optional VirusTotal/Shodan/AbuseIPDB/GreyNoise/urlscan keys |
 | `mempalace/` *(optional)* | `bash mempalace/setup.sh` | — (local ChromaDB + SQLite in `mempalace-data/`) |
+
+The versions of all MCP servers are pinned in
+[`container/mcp-versions.env`](container/mcp-versions.env), for the image and
+for the `setup.sh` scripts alike. To update one, review the upstream diff,
+change the pin and rebuild the image.
 
 Services on the Talon host are reachable from containers as
 `host.docker.internal`. Which servers a group uses, and as which user, is
@@ -492,11 +498,29 @@ to crates.io with the same version.
 
 Talon 2.0 is an independent Rust rewrite, but it stands on the work of others:
 
-- **[Talon](https://github.com/taylorwalton/talon)** by [SOCFortress](https://www.socfortress.co) (Taylor Walton) — the original AI SOC analyst for CoPilot. Its investigation workflow, alert-type prompt templates, MCP server wrappers, anonymizing proxy and MemPalace integration are the foundation of this project.
+- **[Talon](https://github.com/taylorwalton/talon)** by [SOCFortress](https://www.socfortress.co) (Taylor Walton) — the original AI SOC analyst for CoPilot (no longer maintained). Its investigation workflow, alert-type prompt templates, MCP server wrappers, anonymizing proxy and MemPalace integration are the foundation of this project.
 - **[NanoClaw](https://github.com/qwibitai/nanoclaw)** and its contributors — the container-isolated agent framework the original Talon was built on: per-group lanes, IPC, scheduled tasks and group memory.
 - **[CoPilot](https://github.com/socfortress/CoPilot)** by SOCFortress — the SOC platform Talon works for, continued in Rust at [Liohtml/CoPilot](https://github.com/Liohtml/CoPilot).
 - **MCP servers** Talon's agent uses: SOCFortress' [copilot](https://github.com/socfortress/copilot-mcp-server), [Wazuh](https://github.com/socfortress/wazuh-mcp-server), [Velociraptor](https://github.com/socfortress/velociraptor-mcp-server) and [Shuffle](https://github.com/socfortress/shuffle-mcp-server) servers, [cve-mcp-server](https://github.com/mukul975/cve-mcp-server), [opensearch-mcp-server](https://pypi.org/project/opensearch-mcp-server/), [mysql-mcp-server](https://pypi.org/project/mysql-mcp-server/) and [MemPalace](https://pypi.org/project/mempalace/).
 - **[vLLM](https://github.com/vllm-project/vllm)**, **[Wazuh](https://wazuh.com)**, **[OpenSearch](https://opensearch.org)** and **[Velociraptor](https://docs.velociraptor.app)**, which do the heavy lifting underneath.
+
+### What the rewrite changed
+
+The original Talon is a Node.js/TypeScript fork of NanoClaw that drives the
+Claude Agent SDK; its repository is no longer maintained. Talon 2.0 keeps its
+investigation workflow and replaces the runtime:
+
+| | Original Talon | Talon 2.0 |
+|---|---|---|
+| Runtime | Node.js host, Claude Agent SDK in the container | One Rust workspace: host, in-container agent loop, LLM gateway, anonymizer |
+| Model | Claude by default, Ollama through the SDK | vLLM on your own GPUs by default, Anthropic optional — always behind the host gateway |
+| Model credentials | Credential proxy, with an env-var fallback into the container | Key never leaves the host; a per-run token over stdin |
+| Anonymizing proxy | Python | Rust, with more PII coverage (lists, nested and dotted fields, free text) |
+
+New in the rewrite: privilege separation inside the container (root supervisor
+without LLM, every MCP server as its own user), per-lane isolation, the
+deterministic IOC / ATT&CK / triage engine with schema-validated verdicts, the
+hash-chained audit log, and three rounds of adversarial review.
 
 ## 📄 License
 

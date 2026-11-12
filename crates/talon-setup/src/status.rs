@@ -191,7 +191,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_like_typescript() {
+    fn renders_status_block() {
         let block = StatusBlock::new("TIMEZONE")
             .field("RESOLVED_TZ", "Europe/Berlin")
             .field("NEEDS_USER_INPUT", false)

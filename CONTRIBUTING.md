@@ -47,7 +47,15 @@ cargo fmt --all
 CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
 --locked -- -D warnings`, `cargo test --workspace --locked` and
 `cargo package --workspace --locked` (every crate must package and build on its
-own, as crates.io will); all four must pass.
+own, as crates.io will); all four must pass. It also checks the workspace with
+the minimum supported Rust version (`rust-version` in `Cargo.toml`), enforces
+the dependency policy in `deny.toml` (`cargo deny check bans licenses
+sources`) and, when `container/` or a crate changes, builds and smoke-tests
+the agent image.
+
+Third-party MCP servers and base images are pinned
+(`container/mcp-versions.env`, digests in `container/Dockerfile`). A pin
+update is its own PR: link the upstream diff you reviewed.
 
 Packages are named `talahon-*` (crates.io), the directories and Rust crate
 names `talon-*` / `talon_*`: `cargo test -p talahon-core` tests
