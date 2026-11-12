@@ -1,0 +1,42 @@
+{
+  "id": "sysmon10-lsass-memory-access",
+  "description": "True positive: a renamed dump tool in a user-writable directory opens lsass.exe with full access (credential dumping).",
+  "alert_type": "sysmon_event_10",
+  "request": {
+    "alert_id": 900003,
+    "customer_code": "golden"
+  },
+  "alert": {
+    "timestamp": "2026-03-05T16:48:21.770Z",
+    "agent_name": "WS-ENG-031",
+    "agent_ip": "192.0.2.131",
+    "rule_id": "92900",
+    "rule_level": 12,
+    "rule_description": "Sysmon - Lsass process was accessed by a suspicious process",
+    "rule_groups": "windows, sysmon, sysmon_event_10",
+    "rule_mitre_id": "T1003.001",
+    "data_win_system_eventID": "10",
+    "data_win_system_computer": "WS-ENG-031.corp.example.com",
+    "data_win_eventdata_utcTime": "2026-03-05 16:48:21.402",
+    "data_win_eventdata_sourceImage": "C:\\Users\\Public\\Documents\\dbgsvc.exe",
+    "data_win_eventdata_sourceProcessId": "6644",
+    "data_win_eventdata_sourceUser": "CORP\\t.nguyen",
+    "data_win_eventdata_targetImage": "C:\\Windows\\System32\\lsass.exe",
+    "data_win_eventdata_targetProcessId": "712",
+    "data_win_eventdata_targetUser": "NT AUTHORITY\\SYSTEM",
+    "data_win_eventdata_grantedAccess": "0x1FFFFF",
+    "data_win_eventdata_callTrace": "C:\\Windows\\SYSTEM32\\ntdll.dll+9d4c4|C:\\Windows\\SYSTEM32\\dbgcore.DLL+6c5e|C:\\Users\\Public\\Documents\\dbgsvc.exe+11f2a"
+  },
+  "expect": {
+    "verdict": "true_positive",
+    "also_acceptable": ["needs_escalation"],
+    "severity": { "min": "high", "max": "critical" },
+    "required_iocs": [
+      { "type": "process", "value": "dbgsvc.exe" }
+    ],
+    "forbidden_iocs": ["198.51.100.91"],
+    "forbidden_strings": ["mimikatz.exe"],
+    "forbidden_patterns": ["\\b(USER|HOST|IP_INT|EMAIL|DOMAIN_INT|SID|MAC)_\\d+\\b"],
+    "required_mitre": ["T1003"]
+  }
+}

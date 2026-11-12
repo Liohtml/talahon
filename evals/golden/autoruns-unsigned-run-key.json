@@ -1,0 +1,44 @@
+{
+  "id": "autoruns-unsigned-run-key",
+  "description": "Ambiguous, leaning suspicious: a new HKCU Run entry starts an unsigned, look-alike named binary from AppData\\Roaming. Persistence is real, intent is unproven; a human has to decide.",
+  "alert_type": "windows_autoruns",
+  "request": {
+    "alert_id": 900007,
+    "customer_code": "golden"
+  },
+  "alert": {
+    "timestamp": "2026-03-11T08:05:19.301Z",
+    "agent_name": "WS-HR-005",
+    "agent_ip": "192.0.2.205",
+    "rule_id": "100540",
+    "rule_level": 10,
+    "rule_description": "Windows Autoruns: new unsigned autostart entry",
+    "rule_groups": "windows, windows_autoruns",
+    "rule_mitre_id": "T1547.001",
+    "data_Time": "20260311-080233",
+    "data_EntryLocation": "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "data_Entry": "Windows Host Service",
+    "data_Enabled": "enabled",
+    "data_Category": "Logon",
+    "data_Profile": "CORP\\m.rossi",
+    "data_Description": "",
+    "data_Signer": "",
+    "data_Company": "",
+    "data_ImagePath": "c:\\users\\m.rossi\\appdata\\roaming\\svchosts.exe",
+    "data_Version": "",
+    "data_LaunchString": "\"C:\\Users\\m.rossi\\AppData\\Roaming\\svchosts.exe\" --background",
+    "data_MD5": "0CC175B9C0F1B6A831C399E269772661",
+    "data_SHA-256": "3C9A1F0E7B2D4C6A8E0F1B3D5C7A9E2F4B6D8C0A1E3F5B7D9C2A4E6F8B0D1C3E"
+  },
+  "expect": {
+    "verdict": "needs_escalation",
+    "also_acceptable": ["true_positive", "inconclusive"],
+    "severity": { "min": "medium", "max": "high" },
+    "required_iocs": [
+      { "type": "hash", "value": "3c9a1f0e7b2d4c6a8e0f1b3d5c7a9e2f4b6d8c0a1e3f5b7d9c2a4e6f8b0d1c3e" }
+    ],
+    "forbidden_iocs": ["198.51.100.23", "c2.example.org"],
+    "forbidden_patterns": ["\\b(USER|HOST|IP_INT|EMAIL|DOMAIN_INT|SID|MAC)_\\d+\\b"],
+    "required_mitre": ["T1547"]
+  }
+}

@@ -17,6 +17,7 @@
 //! | [`report`] | `TriageReport`, strict JSON schema, validation, Markdown |
 //! | [`hints`] | per-alert-type investigation guidance (prompt templates) |
 //! | [`analysis`] | one-shot [`analyze_alert`] combining all of the above |
+//! | [`eval`] | golden-set scoring of investigation verdicts (`talon eval`) |
 //! | [`tools`] | the agent tools |
 //!
 //! Quick start:
@@ -40,6 +41,7 @@ pub mod analysis;
 pub mod cmdline;
 mod common;
 pub mod correlate;
+pub mod eval;
 pub mod hints;
 pub mod ioc;
 pub mod mitre;

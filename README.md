@@ -426,9 +426,36 @@ interface if CoPilot runs on another host, and terminate TLS in front of it.
 | `talon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `egress`, `service`, `verify` |
 | `talon audit verify` | Recompute the audit hash chain (exit code 1 on tampering) |
 | `talon audit tail -n 50 --kind ipc.` | Recent audit events as JSON lines |
+| `talon eval score --reports <dir>` | Score saved verdicts against the golden set (offline) |
+| `talon eval run` | Investigate every golden case through a running Talon, then score |
 
 Logs: `RUST_LOG=info` (JSON with `TALON_LOG_FORMAT=json`); every line passes
 through the redactor.
+
+### Investigation quality (`talon eval`)
+
+[`evals/golden/`](evals/golden/README.md) holds synthetic alerts with a known
+expected outcome: verdict, severity range, indicators and ATT&CK techniques
+that must be reported, and content that must not appear (invented
+indicators, leaked anonymization tokens such as `USER_1`). Run it before and
+after a prompt, model or provider change.
+
+```bash
+# Offline: <dir>/<case id>.json is a verdict (TriageReport) or a
+# GET /investigations/{id} record.
+talon eval score --reports <dir> [--json] [--min-pass-rate 0.85]
+
+# Online: POST /investigate per case on a running Talon, wait, score.
+talon eval run --alert-map map.json --save-dir out/ [--url http://127.0.0.1:3100]
+```
+
+Both print a per-case table, the failed checks and a verdict confusion
+matrix (`--json` for the same as JSON), and exit `1` when the share of
+passing cases is below `--min-pass-rate` (default `1.0`), `2` on unusable
+input. `run` needs the cases' alerts seeded in the CoPilot stack the
+instance is connected to and performs real investigations with all their
+write-backs, so point it at a dedicated eval instance with
+`COPILOT_INVESTIGATION_DEDUP_MINUTES=0`; see the golden-set README.
 
 ### HTTP API
 

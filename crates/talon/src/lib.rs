@@ -10,6 +10,8 @@
 //! | `talon doctor` | environment, vLLM, container runtime and LLM gateway diagnostics |
 //! | `talon audit verify` | recompute the hash-chained audit log |
 //! | `talon audit tail [-n N] [--kind prefix]` | recent audit events as JSON lines |
+//! | `talon eval score --reports DIR` | score saved reports against the golden set (`evals/golden/`) |
+//! | `talon eval run` | investigate every golden case through a running Talon, then score |
 //! | `talon version` | print the version |
 //!
 //! ## Architecture of `talon run`
@@ -44,6 +46,7 @@ pub mod app;
 pub mod audit_cmd;
 pub mod cli;
 pub mod doctor;
+pub mod eval_cmd;
 pub mod investigation;
 pub mod logging;
 pub mod orchestrator;

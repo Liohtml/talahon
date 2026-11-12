@@ -1,0 +1,43 @@
+{
+  "id": "sysmon1-shadow-copy-deletion",
+  "description": "Clear true positive: an unsigned binary in C:\\Users\\Public deletes all volume shadow copies on a file server (ransomware precursor).",
+  "alert_type": "sysmon_event_1",
+  "request": {
+    "alert_id": 900002,
+    "customer_code": "golden"
+  },
+  "alert": {
+    "timestamp": "2026-03-04T02:31:55.008Z",
+    "agent_name": "SRV-FILE-02",
+    "agent_ip": "192.0.2.52",
+    "rule_id": "92032",
+    "rule_level": 14,
+    "rule_description": "Sysmon - Volume shadow copies deleted with vssadmin",
+    "rule_groups": "windows, sysmon, sysmon_event1, sysmon_eid1_detections",
+    "rule_mitre_id": "T1490",
+    "data_win_system_eventID": "1",
+    "data_win_system_computer": "SRV-FILE-02.corp.example.com",
+    "data_win_eventdata_utcTime": "2026-03-04 02:31:54.613",
+    "data_win_eventdata_image": "C:\\Windows\\System32\\vssadmin.exe",
+    "data_win_eventdata_commandLine": "vssadmin.exe delete shadows /all /quiet",
+    "data_win_eventdata_currentDirectory": "C:\\Users\\Public\\",
+    "data_win_eventdata_user": "CORP\\svc-backup",
+    "data_win_eventdata_integrityLevel": "High",
+    "data_win_eventdata_hashes": "MD5=B58073DB8892B67A672906C9358020EC,SHA256=4A1D7C0B3F5E6D8A9B2C1E0F7A6B5C4D3E2F1A0B9C8D7E6F5A4B3C2D1E0F9A8B",
+    "data_win_eventdata_parentImage": "C:\\Users\\Public\\winupd64.exe",
+    "data_win_eventdata_parentCommandLine": "C:\\Users\\Public\\winupd64.exe -m local -p C:\\Shares",
+    "data_win_eventdata_processId": "9084",
+    "data_win_eventdata_parentProcessId": "8832"
+  },
+  "expect": {
+    "verdict": "true_positive",
+    "also_acceptable": ["needs_escalation"],
+    "severity": { "min": "high", "max": "critical" },
+    "required_iocs": [
+      { "type": "process", "value": "winupd64.exe" }
+    ],
+    "forbidden_iocs": ["203.0.113.66", "c2.example.org"],
+    "forbidden_patterns": ["\\b(USER|HOST|IP_INT|EMAIL|DOMAIN_INT|SID|MAC)_\\d+\\b"],
+    "required_mitre": ["T1490"]
+  }
+}

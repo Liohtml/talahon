@@ -1,0 +1,41 @@
+{
+  "id": "sysmon3-loopback-database-connection",
+  "description": "Clear false positive: a signed application service connects to the PostgreSQL instance on the same host over loopback; nothing leaves the machine.",
+  "alert_type": "sysmon_event_3",
+  "request": {
+    "alert_id": 900005,
+    "customer_code": "golden"
+  },
+  "alert": {
+    "timestamp": "2026-03-09T07:30:12.004Z",
+    "agent_name": "SRV-APP-11",
+    "agent_ip": "192.0.2.111",
+    "rule_id": "92101",
+    "rule_level": 5,
+    "rule_description": "Sysmon - Network connection to a database port by a non-database process",
+    "rule_groups": "windows, sysmon, sysmon_event3",
+    "data_win_system_eventID": "3",
+    "data_win_system_computer": "SRV-APP-11.corp.example.com",
+    "data_win_eventdata_utcTime": "2026-03-09 07:30:11.530",
+    "data_win_eventdata_image": "C:\\Program Files\\Lagerwerk Inventory\\InventoryService.exe",
+    "data_win_eventdata_user": "NT AUTHORITY\\NETWORK SERVICE",
+    "data_win_eventdata_protocol": "tcp",
+    "data_win_eventdata_initiated": "true",
+    "data_win_eventdata_sourceIsIpv6": "false",
+    "data_win_eventdata_sourceIp": "127.0.0.1",
+    "data_win_eventdata_sourceHostname": "SRV-APP-11.corp.example.com",
+    "data_win_eventdata_sourcePort": "49822",
+    "data_win_eventdata_destinationIsIpv6": "false",
+    "data_win_eventdata_destinationIp": "127.0.0.1",
+    "data_win_eventdata_destinationHostname": "SRV-APP-11.corp.example.com",
+    "data_win_eventdata_destinationPort": "5432",
+    "data_win_eventdata_destinationPortName": "postgresql"
+  },
+  "expect": {
+    "verdict": "false_positive",
+    "also_acceptable": ["benign_true_positive"],
+    "severity": { "min": "informational", "max": "low" },
+    "forbidden_iocs": ["203.0.113.66", "198.51.100.23", "exfil.example.net"],
+    "forbidden_patterns": ["\\b(USER|HOST|IP_INT|EMAIL|DOMAIN_INT|SID|MAC)_\\d+\\b"]
+  }
+}

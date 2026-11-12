@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use talon::cli::{AuditCommand, Cli, Command};
+use talon::cli::{AuditCommand, Cli, Command, EvalCommand};
 use talon::logging::{self, LogFormat, LogTarget};
 use talon_core::config::TalonConfig;
 use talon_core::env::EnvFile;
@@ -63,6 +63,13 @@ async fn dispatch(cli: Cli, root: PathBuf) -> i32 {
         Command::Doctor => {
             let (config, _) = bootstrap(&root, LogTarget::Stderr, "warn");
             talon::doctor::run(&root, &config).await
+        }
+        Command::Eval { command } => {
+            let (config, _) = bootstrap(&root, LogTarget::Stderr, "warn");
+            match command {
+                EvalCommand::Score(args) => talon::eval_cmd::score(&root, args),
+                EvalCommand::Run(args) => talon::eval_cmd::run(&root, &config, args).await,
+            }
         }
         Command::Audit { command } => {
             let (config, _) = bootstrap(&root, LogTarget::Stderr, "warn");

@@ -1,0 +1,38 @@
+{
+  "id": "defender-eicar-test-file",
+  "description": "Clear benign: Defender quarantines the EICAR anti-malware test file on a QA workstation. The detection is correct, the activity is harmless.",
+  "alert_type": "windows_defender",
+  "request": {
+    "alert_id": 900004,
+    "customer_code": "golden"
+  },
+  "alert": {
+    "timestamp": "2026-03-06T11:02:40.150Z",
+    "agent_name": "WS-QA-007",
+    "agent_ip": "192.0.2.77",
+    "rule_id": "62123",
+    "rule_level": 12,
+    "rule_description": "Windows Defender: Antimalware platform detected potentially unwanted software",
+    "rule_groups": "windows, windows_defender",
+    "data_win_system_eventID": "1116",
+    "data_win_system_providerName": "Microsoft-Windows-Windows Defender",
+    "data_win_system_computer": "WS-QA-007.corp.example.com",
+    "data_win_eventdata_threat_Name": "Virus:DOS/EICAR_Test_File",
+    "data_win_eventdata_severity_Name": "Severe",
+    "data_win_eventdata_category_Name": "Virus",
+    "data_win_eventdata_path": "file:_C:\\Users\\qa.tester\\Downloads\\eicar.com",
+    "data_win_eventdata_detection_User": "CORP\\qa.tester",
+    "data_win_eventdata_process_Name": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "data_win_eventdata_action_Name": "Quarantine",
+    "data_win_eventdata_fWLink": "https://threat-encyclopedia.example.com/threat?name=Virus:DOS/EICAR_Test_File&threatid=2147519003",
+    "data_win_eventdata_origin_Name": "Internet",
+    "data_win_eventdata_execution_Name": "Suspended"
+  },
+  "expect": {
+    "verdict": "benign_true_positive",
+    "also_acceptable": ["false_positive"],
+    "severity": { "min": "informational", "max": "low" },
+    "forbidden_iocs": ["203.0.113.45", "malware-drop.example.org"],
+    "forbidden_patterns": ["\\b(USER|HOST|IP_INT|EMAIL|DOMAIN_INT|SID|MAC)_\\d+\\b"]
+  }
+}

@@ -1715,6 +1715,7 @@ dependencies = [
  "clap",
  "futures",
  "regex",
+ "reqwest",
  "rustix",
  "serde",
  "serde_json",
@@ -1723,6 +1724,7 @@ dependencies = [
  "talahon-core",
  "talahon-db",
  "talahon-http",
+ "talahon-intel",
  "talahon-ipc",
  "talahon-llm",
  "talahon-router",
@@ -1734,6 +1736,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
