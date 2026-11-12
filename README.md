@@ -187,6 +187,7 @@ Each crate lives in `crates/talon-*` and is published on crates.io as
 | `talon-tools` | [`talahon-tools`](https://crates.io/crates/talahon-tools) | Built-in agent tools with path guard and SSRF-safe `web_fetch` |
 | `talon-intel` | [`talahon-intel`](https://crates.io/crates/talahon-intel) | IOC / MITRE / command-line / triage / correlation engine + report schema |
 | `talon-anon` | [`talahon-anon`](https://crates.io/crates/talahon-anon) | PII anonymizer and `talon-anon-proxy` |
+| `talon-mcp-opensearch` | [`talahon-mcp-opensearch`](https://crates.io/crates/talahon-mcp-opensearch) | Native read-only OpenSearch MCP server `talon-opensearch-mcp` (opt-in) |
 | `talon-security` | [`talahon-security`](https://crates.io/crates/talahon-security) | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
 | `talon-container` | [`talahon-container`](https://crates.io/crates/talahon-container) | Hardened docker/podman launcher, mounts, output parser |
 | `talon-net` | [`talahon-net`](https://crates.io/crates/talahon-net) | Hardened HTTP serving: header timeouts, connection caps |
@@ -347,7 +348,7 @@ container they are readable only by that server's user.
 
 | Directory | Setup | Credentials |
 |---|---|---|
-| `siem/` | `bash siem/setup.sh` | `OPENSEARCH_HOSTS`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD` |
+| `siem/` | `bash siem/setup.sh` | `OPENSEARCH_HOSTS`, `OPENSEARCH_USERNAME`, `OPENSEARCH_PASSWORD`; optional `TALON_OPENSEARCH_MCP=rust` |
 | `mysql/` | `bash mysql/setup.sh` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB` |
 | `copilot-mcp/` | `bash copilot-mcp/setup.sh` | `COPILOT_URL`, `COPILOT_USERNAME`, `COPILOT_PASSWORD` |
 | `wazuh-mcp/` | `bash wazuh-mcp/setup.sh` | `WAZUH_PROD_URL`, `WAZUH_PROD_USERNAME`, `WAZUH_PROD_PASSWORD` |
@@ -360,6 +361,10 @@ The versions of all MCP servers are pinned in
 [`container/mcp-versions.env`](container/mcp-versions.env), for the image and
 for the `setup.sh` scripts alike. To update one, review the upstream diff,
 change the pin and rebuild the image.
+
+`TALON_OPENSEARCH_MCP=rust` in `siem/.env` (opt-in) serves the SIEM tools from
+the native `talon-opensearch-mcp` binary (read-only, no Python cold start)
+instead of the Python `opensearch-mcp-server`, which stays the default.
 
 Services on the Talon host are reachable from containers as
 `host.docker.internal`. Which servers a group uses, and as which user, is

@@ -1995,6 +1995,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "talahon-mcp-opensearch"
+version = "2.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "talahon-core",
+ "talahon-mcp",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "talahon-net"
 version = "2.1.0"
 dependencies = [

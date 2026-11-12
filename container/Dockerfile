@@ -10,7 +10,8 @@
 # sent — never .env, store/, data/, groups/ or target/).
 #
 # Stages
-#   rust-builder  compiles talon-agent + talon-anon-proxy from the workspace
+#   rust-builder  compiles talon-agent, talon-anon-proxy and talon-opensearch-mcp
+#                 from the workspace
 #   py-builder    builds the Python MCP server virtualenvs under /opt
 #   runtime       debian:bookworm-slim: no compilers, no node, no sudo
 #
@@ -44,9 +45,11 @@ COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     set -eux; \
-    cargo build --release --locked --bin talon-agent --bin talon-anon-proxy; \
+    cargo build --release --locked --bin talon-agent --bin talon-anon-proxy \
+        --bin talon-opensearch-mcp; \
     install -D -m 0755 target/release/talon-agent /out/talon-agent; \
-    install -D -m 0755 target/release/talon-anon-proxy /out/talon-anon-proxy
+    install -D -m 0755 target/release/talon-anon-proxy /out/talon-anon-proxy; \
+    install -D -m 0755 target/release/talon-opensearch-mcp /out/talon-opensearch-mcp
 
 # ---------------------------------------------------------------------------
 # 2. Python MCP servers (built here so the runtime has no compilers)
@@ -184,6 +187,9 @@ RUN set -eux; \
 COPY --from=py-builder /opt/ /opt/
 COPY --from=rust-builder /out/talon-agent /usr/local/bin/talon-agent
 COPY --from=rust-builder /out/talon-anon-proxy /usr/local/bin/talon-anon-proxy
+# Native OpenSearch MCP server; used instead of the Python one only when
+# siem.env sets TALON_OPENSEARCH_MCP=rust (siem/opensearch-mcp.sh).
+COPY --from=rust-builder /out/talon-opensearch-mcp /usr/local/bin/talon-opensearch-mcp
 COPY container/entrypoint.sh /usr/local/bin/talon-entrypoint
 COPY container/mysql-tools/mysql_query.py /opt/mysql-tools/lib/mysql_query.py
 COPY container/mysql-tools/mysql-query /usr/local/bin/mysql-query
@@ -191,7 +197,8 @@ COPY container/mysql-tools/mysql-query /usr/local/bin/mysql-query
 RUN set -eux; \
     chown -R root:root /usr/local/bin /opt; \
     chmod 0755 /usr/local/bin/talon-entrypoint /usr/local/bin/talon-agent \
-        /usr/local/bin/talon-anon-proxy /usr/local/bin/mysql-query; \
+        /usr/local/bin/talon-anon-proxy /usr/local/bin/talon-opensearch-mcp \
+        /usr/local/bin/mysql-query; \
     chmod -R go-w /opt; \
     # pymysql + helper usable by mcp-mysql only.
     chown -R mcp-mysql:mcp-mysql /opt/mysql-tools; \
