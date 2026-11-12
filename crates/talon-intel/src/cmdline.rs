@@ -1144,7 +1144,9 @@ fn bytes_to_text(b: &[u8]) -> Option<String> {
         let zero_high = b.iter().skip(1).step_by(2).filter(|&&x| x == 0).count();
         if zero_high * 10 >= (b.len() / 2) * 7 {
             let units: Vec<u16> = b
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
             let s = String::from_utf16_lossy(&units);
