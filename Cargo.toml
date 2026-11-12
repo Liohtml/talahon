@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "2.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/Liohtml/talahon"
 homepage = "https://github.com/Liohtml/talahon"
@@ -59,7 +59,7 @@ chrono-tz = "0.10"
 croner = "2"
 
 # --- storage ---
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 
 # --- networking ---
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }

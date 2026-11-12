@@ -10,7 +10,7 @@ Written in Rust · powered by your own vLLM · built to survive hostile input.
 [![CI](https://github.com/Liohtml/talahon/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/talahon/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/talahon?logo=rust&label=crates.io)](https://crates.io/crates/talahon)
 [![docs.rs](https://img.shields.io/docsrs/talahon?label=docs.rs)](https://docs.rs/talahon)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-B7410E?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![LLM: vLLM](https://img.shields.io/badge/LLM-vLLM%20%C2%B7%20self--hosted-6E56CF)](docs/PROVIDER_SELECTION.md)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-2EA44F)](Cargo.toml)
 [![Security review](https://img.shields.io/badge/security-adversarially%20reviewed-0A7BBB)](docs/MYTHOS_REVIEW.md)
@@ -255,7 +255,7 @@ egress firewall and service installation, which a production setup needs.
 ### Prerequisites
 
 - Linux host (macOS works for development) with Docker or Podman
-- Rust 1.85+ (`rustup`) to build the host binary
+- Rust 1.89+ (`rustup`) to build the host binary
 - A **vLLM** server reachable from the host ([docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md))
 - OpenSearch/Wazuh SIEM and a [CoPilot](https://github.com/Liohtml/CoPilot) instance with its MySQL/MariaDB database
 

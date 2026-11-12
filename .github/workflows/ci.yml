@@ -83,10 +83,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      # Libraries and binaries only: dev-dependencies (wiremock) need a newer
-      # compiler, and the MSRV is a promise about building, not about testing.
       - name: Check with the minimum supported Rust version
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --all-targets --locked
 
   policy:
     name: dependency policy (licenses / bans / sources)
