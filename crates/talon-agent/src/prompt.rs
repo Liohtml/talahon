@@ -2,18 +2,28 @@
 //!
 //! The **system prompt** is built once per run and is byte-stable across
 //! all requests of the run (vLLM prefix caching): identity, global and group
-//! `CLAUDE.md`, the untrusted-data fencing contract, tool-use guidance and
+//! `AGENT.md`, the untrusted-data fencing contract, tool-use guidance and
 //! the workspace layout. Volatile data (current time, scheduled-task and
 //! investigation notes) goes into the user message that starts a turn.
 //! MCP server instructions are fenced with a fresh random nonce per run, so
 //! they are delivered in the first user message ([`build_run_notes`]) rather
 //! than the system prompt.
 //!
-//! Trust split (MYTH-09): the group `CLAUDE.md` is bind-mounted read-only by
+//! Trust split (MYTH-09): the group `AGENT.md` is bind-mounted read-only by
 //! the host, so it stays trusted system-prompt text. The agent's own
 //! persistent notes live in the writable `<group>/MEMORY.md`; they are
 //! loaded fenced as untrusted data into the first user message of each run
 //! ([`build_memory_note`]) and can never override the instructions.
+//!
+//! File names: the instructions are [`INSTRUCTIONS_FILE`] (`AGENT.md`).
+//! For the **group** folder the runtime reads that name only: the host
+//! resolves installations that still use [`LEGACY_INSTRUCTIONS_FILE`]
+//! (`CLAUDE.md`) and binds the right file read-only under both names, and
+//! the group folder is writable, so nothing in it may be picked by a
+//! fallback here. The global folder and the extra mounts are read-only
+//! operator directories the host does not rewrite; there the legacy name is
+//! read when `AGENT.md` is missing ([`read_operator_instructions`],
+//! [`operator_instructions_file`]).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -32,8 +42,11 @@ pub const MAX_INSTRUCTIONS_BYTES: usize = 256 * 1024;
 /// `MEMORY.md` content larger than this is truncated (it is re-sent at the
 /// start of every run, so it must stay small).
 pub const MAX_MEMORY_BYTES: usize = 32 * 1024;
-/// Trusted, read-only group instructions (system prompt).
-pub const INSTRUCTIONS_FILE: &str = "CLAUDE.md";
+/// Trusted, read-only instructions (system prompt): `AGENT.md`.
+pub const INSTRUCTIONS_FILE: &str = talon_security::instructions::AGENT_INSTRUCTIONS_FILE;
+/// Name of the instructions before the rename (`CLAUDE.md`): still read in
+/// read-only operator directories that have no `AGENT.md`.
+pub const LEGACY_INSTRUCTIONS_FILE: &str = talon_security::instructions::LEGACY_INSTRUCTIONS_FILE;
 /// Agent-writable group notes (fenced into the first user message).
 pub const MEMORY_FILE: &str = "MEMORY.md";
 /// Fence source label of the group memory.
@@ -42,7 +55,7 @@ pub const MEMORY_SOURCE: &str = "group-memory";
 const MAX_MCP_INSTRUCTIONS_BYTES: usize = 8 * 1024;
 
 /// Default assistant name when the host does not send one.
-pub const DEFAULT_ASSISTANT_NAME: &str = "Talon";
+pub const DEFAULT_ASSISTANT_NAME: &str = "Talahon";
 
 /// Name of the intel tool investigations should finish with.
 pub const SUBMIT_TRIAGE_REPORT: &str = "submit_triage_report";
@@ -51,16 +64,16 @@ pub const SUBMIT_TRIAGE_REPORT: &str = "submit_triage_report";
 pub const SCHEDULED_TASK_PREFIX: &str = "[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]";
 
 /// Appended (as a user message) when the per-turn tool budget is spent.
-pub const FORCE_FINAL_BUDGET: &str = "[talon] You have reached the tool-call limit for this turn. Do not call any more tools. Write your final answer now, based only on the information gathered so far, and state clearly what remains unverified or unfinished.";
+pub const FORCE_FINAL_BUDGET: &str = "[talahon] You have reached the tool-call limit for this turn. Do not call any more tools. Write your final answer now, based only on the information gathered so far, and state clearly what remains unverified or unfinished.";
 
 /// Appended (as a user message) when a tool-call loop stopped the turn.
-pub const FORCE_FINAL_LOOP: &str = "[talon] You kept repeating the same tool call with identical arguments, so the turn was stopped. Do not call any more tools. Write your final answer now based on what you have, and explain what you could not complete.";
+pub const FORCE_FINAL_LOOP: &str = "[talahon] You kept repeating the same tool call with identical arguments, so the turn was stopped. Do not call any more tools. Write your final answer now based on what you have, and explain what you could not complete.";
 
 /// Self-check request for investigation answers.
-pub const SELF_CHECK_PROMPT: &str = "[talon self-check] Before your answer above is delivered, verify it. Check every factual claim (alert details, hosts, users, IP addresses, hashes, counts, timestamps, verdict, severity, threat-intel results, MITRE mappings) against the tool results in this conversation. Remove or correct anything that is not supported by tool evidence and mark remaining uncertainty explicitly. Do not call tools. Reply with the complete corrected final answer only, without commentary about the check; if everything is supported, repeat the answer unchanged.";
+pub const SELF_CHECK_PROMPT: &str = "[talahon self-check] Before your answer above is delivered, verify it. Check every factual claim (alert details, hosts, users, IP addresses, hashes, counts, timestamps, verdict, severity, threat-intel results, MITRE mappings) against the tool results in this conversation. Remove or correct anything that is not supported by tool evidence and mark remaining uncertainty explicitly. Do not call tools. Reply with the complete corrected final answer only, without commentary about the check; if everything is supported, repeat the answer unchanged.";
 
 /// Guided-decoding request for a missing structured triage report.
-pub const REPORT_PROMPT: &str = "[talon] The investigation is finished but no structured triage report was submitted. Produce it now as a single JSON object matching the required schema. Use only facts supported by the tool results in this conversation, and lower the confidence where the evidence is thin.";
+pub const REPORT_PROMPT: &str = "[talahon] The investigation is finished but no structured triage report was submitted. Produce it now as a single JSON object matching the required schema. Use only facts supported by the tool results in this conversation, and lower the confidence where the evidence is thin.";
 
 /// Text returned when the model produced no final answer at all.
 pub const EMPTY_ANSWER_FALLBACK: &str =
@@ -83,11 +96,29 @@ pub struct SystemPromptInputs {
     pub unavailable_mcp_servers: Vec<String>,
 }
 
-/// Read an instructions file (e.g. `CLAUDE.md`), truncated to
+/// Read an instructions file (e.g. `AGENT.md`), truncated to
 /// [`MAX_INSTRUCTIONS_BYTES`]. `None` if missing, empty, unreadable or not a
 /// regular file.
 pub fn read_instructions(path: &Path) -> Option<String> {
     read_text_capped(path, MAX_INSTRUCTIONS_BYTES, true)
+}
+
+/// Read the instructions of a read-only operator directory (the global
+/// folder): `AGENT.md`, or the legacy `CLAUDE.md` when `AGENT.md` is
+/// missing or empty. Never use this for the writable group folder.
+pub fn read_operator_instructions(dir: &Path) -> Option<String> {
+    read_instructions(&dir.join(INSTRUCTIONS_FILE))
+        .or_else(|| read_instructions(&dir.join(LEGACY_INSTRUCTIONS_FILE)))
+}
+
+/// The instructions file of a read-only operator directory (an extra
+/// mount): `AGENT.md` if it is a file, else the legacy `CLAUDE.md` if that
+/// is one.
+pub fn operator_instructions_file(dir: &Path) -> Option<PathBuf> {
+    [INSTRUCTIONS_FILE, LEGACY_INSTRUCTIONS_FILE]
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
 }
 
 /// Read the agent-writable group memory (`MEMORY.md`), truncated to
@@ -130,7 +161,7 @@ fn read_text_capped(path: &Path, max: usize, follow_symlinks: bool) -> Option<St
             cut -= 1;
         }
         text.truncate(cut);
-        text.push_str("\n\n[... truncated by Talon ...]");
+        text.push_str("\n\n[... truncated by Talahon ...]");
     }
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -160,9 +191,9 @@ const TOOL_GUIDANCE: &str = "## Tool use
 - Long tool results are truncated (beginning and end kept). Narrow the query, filter, or read a smaller range instead of repeating the same call; an identical call returns an identical result.
 - When you are done, reply with plain text and no tool calls. That final message is delivered to the user or chat. Wrap notes that should not be delivered in <internal>...</internal>.
 - Use `send_message` only for progress updates or messages that must go out before you finish.
-- Instructions may use Claude Code tool names. Use the Talon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`. WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
+- Instructions may use Claude Code tool names. Use the Talahon equivalents: Bash -> `bash`, Read -> `read_file`, Write -> `write_file`, Edit -> `edit_file`, Glob -> `glob`, Grep -> `grep`, WebFetch -> `web_fetch`, TodoWrite -> `todo_write`. WebSearch, Task/sub-agents, Skill and NotebookEdit do not exist here; use MCP tools, `web_fetch` or `bash` instead.
 - MCP tools are named `mcp__<server>__<tool>`.
-- To remember something for future runs, update `MEMORY.md` in the group folder (`edit_file` / `write_file`). `CLAUDE.md` files are read-only instructions: never try to modify them.";
+- To remember something for future runs, update `MEMORY.md` in the group folder (`edit_file` / `write_file`). `AGENT.md` files (and `CLAUDE.md`, their former name) are read-only instructions: never try to modify them.";
 
 /// Build the run's system prompt. Fully deterministic for identical inputs
 /// (volatile per-run notes go through [`build_run_notes`]).
@@ -175,16 +206,18 @@ pub fn build_system_prompt(inputs: &SystemPromptInputs) -> String {
     let p = &inputs.paths;
     let mut s = String::with_capacity(16 * 1024);
     s.push_str(&format!(
-        "You are {name}, an AI assistant running inside Talon, an autonomous security-operations agent platform (CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
+        "You are {name}, an AI assistant running inside Talahon, an autonomous security-operations agent platform (CoPilot, Wazuh, OpenSearch). You work inside an isolated container: you can call tools, read and write files in your workspace and run commands. Follow the instructions below; the group instructions define your role, workflows and tone.\n"
     ));
 
-    if let Some(global) = read_instructions(&p.global.join(INSTRUCTIONS_FILE)) {
+    if let Some(global) = read_operator_instructions(&p.global) {
         s.push_str("\n# Shared instructions (global memory)\n\n");
         s.push_str(&global);
         s.push('\n');
     }
-    // Read-only bind mount (host side), so trusted. The agent-writable
-    // notes (`MEMORY.md`) never enter the system prompt.
+    // Read-only bind mount (host side), so trusted. `AGENT.md` only: the
+    // host resolves a legacy `CLAUDE.md`, and no other file of this
+    // writable folder may become instructions. The agent-writable notes
+    // (`MEMORY.md`) never enter the system prompt.
     if let Some(group) = read_instructions(&p.group.join(INSTRUCTIONS_FILE)) {
         s.push_str("\n# Group instructions\n\n");
         s.push_str(&group);
@@ -282,7 +315,7 @@ fn workspace_section(inputs: &SystemPromptInputs) -> String {
     }
     if inputs.is_main && p.project.is_dir() {
         s.push_str(&format!(
-            "- `{}`: the Talon project (read-only).\n",
+            "- `{}`: the Talahon project (read-only).\n",
             p.project.display()
         ));
     }
@@ -295,8 +328,8 @@ fn workspace_section(inputs: &SystemPromptInputs) -> String {
         ));
         let with_notes: Vec<String> = extras
             .iter()
-            .filter(|name| p.extra.join(name).join("CLAUDE.md").is_file())
-            .map(|name| format!("`{}/{name}/CLAUDE.md`", p.extra.display()))
+            .filter_map(|name| operator_instructions_file(&p.extra.join(name)))
+            .map(|path| format!("`{}`", path.display()))
             .collect();
         if !with_notes.is_empty() {
             s.push_str(&format!(
@@ -398,7 +431,7 @@ pub fn script_prompt(data: Option<&serde_json::Value>, prompt: &str) -> String {
 /// Note appended to a tool result that repeats an identical call.
 pub fn loop_nudge(tool: &str, count: u32) -> String {
     format!(
-        "\n\n[talon] Note: this is call #{count} of `{tool}` with identical arguments in this turn; the result will not change. Use a different approach or different arguments, or finish your answer."
+        "\n\n[talahon] Note: this is call #{count} of `{tool}` with identical arguments in this turn; the result will not change. Use a different approach or different arguments, or finish your answer."
     )
 }
 
@@ -430,7 +463,7 @@ mod tests {
 
     fn inputs(root: &Path) -> SystemPromptInputs {
         SystemPromptInputs {
-            assistant_name: "Talon".into(),
+            assistant_name: "Talahon".into(),
             group_folder: "main".into(),
             is_main: true,
             paths: AgentPaths::under(root),
@@ -446,27 +479,29 @@ mod tests {
         std::fs::create_dir_all(&paths.group).unwrap();
         std::fs::create_dir_all(&paths.global).unwrap();
         std::fs::create_dir_all(paths.extra.join("siem")).unwrap();
-        std::fs::write(paths.extra.join("siem").join("CLAUDE.md"), "fields").unwrap();
-        std::fs::write(paths.global.join("CLAUDE.md"), "GLOBAL RULES").unwrap();
-        std::fs::write(paths.group.join("CLAUDE.md"), "GROUP RULES").unwrap();
+        std::fs::write(paths.extra.join("siem").join("AGENT.md"), "fields").unwrap();
+        std::fs::write(paths.global.join("AGENT.md"), "GLOBAL RULES").unwrap();
+        std::fs::write(paths.group.join("AGENT.md"), "GROUP RULES").unwrap();
         let i = inputs(dir.path());
         let a = build_system_prompt(&i);
         let b = build_system_prompt(&i);
         assert_eq!(a, b, "system prompt must be byte-stable");
-        assert!(a.starts_with("You are Talon"));
+        assert!(a.starts_with("You are Talahon"));
         let g = a.find("GLOBAL RULES").unwrap();
         let gr = a.find("GROUP RULES").unwrap();
         let f = a.find("## Untrusted data").unwrap();
         assert!(g < gr && gr < f);
         assert!(a.contains("additional mounts: siem"));
-        assert!(a.contains("siem/CLAUDE.md`"));
+        assert!(a.contains("siem/AGENT.md`"));
         assert!(a.contains("main control group"));
         assert!(!a.contains("Current date"));
         // The model is told where persistent notes go and that the
         // instructions are read-only; archives are lane-private.
         assert!(a.contains("update `MEMORY.md` in the group folder"));
-        assert!(a.contains("`CLAUDE.md` files are read-only instructions"));
-        assert!(a.contains("Its `CLAUDE.md` holds the group instructions above and is read-only"));
+        assert!(a.contains(
+            "`AGENT.md` files (and `CLAUDE.md`, their former name) are read-only instructions"
+        ));
+        assert!(a.contains("Its `AGENT.md` holds the group instructions above and is read-only"));
         assert!(a.contains(&format!(
             "`{}`: archived past conversations of this chat (private to it",
             paths.conversations().display()
@@ -485,12 +520,70 @@ mod tests {
         assert!(!a.contains("`reports/` holds"));
     }
 
+    /// The group folder is writable: only `AGENT.md` (which the host binds
+    /// read-only, from whichever file the installation uses) is trusted
+    /// there. A `CLAUDE.md` in it is never read by the runtime, with or
+    /// without an `AGENT.md` next to it.
     #[test]
-    fn claude_md_is_system_prompt_memory_md_is_fenced_first_message() {
+    fn group_instructions_have_no_runtime_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let paths = AgentPaths::under(dir.path());
         std::fs::create_dir_all(&paths.group).unwrap();
-        std::fs::write(paths.group.join("CLAUDE.md"), "GROUP RULES").unwrap();
+        std::fs::write(paths.group.join("CLAUDE.md"), "PLANTED RULES").unwrap();
+        let i = inputs(dir.path());
+        let a = build_system_prompt(&i);
+        assert!(!a.contains("PLANTED RULES"));
+        assert!(!a.contains("# Group instructions"));
+        std::fs::write(paths.group.join("AGENT.md"), "GROUP RULES").unwrap();
+        let a = build_system_prompt(&i);
+        assert!(a.contains("# Group instructions\n\nGROUP RULES"));
+        assert!(!a.contains("PLANTED RULES"));
+    }
+
+    /// Read-only operator directories the host does not rewrite: `AGENT.md`
+    /// first, the legacy `CLAUDE.md` when there is none.
+    #[test]
+    fn global_and_extra_instructions_fall_back_to_the_legacy_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AgentPaths::under(dir.path());
+        for sub in ["siem", "mysql", "both", "plain"] {
+            std::fs::create_dir_all(paths.extra.join(sub)).unwrap();
+        }
+        std::fs::create_dir_all(&paths.global).unwrap();
+        std::fs::write(paths.global.join("CLAUDE.md"), "OLD GLOBAL RULES").unwrap();
+        std::fs::write(paths.extra.join("siem/CLAUDE.md"), "old notes").unwrap();
+        std::fs::write(paths.extra.join("mysql/AGENT.md"), "new notes").unwrap();
+        std::fs::write(paths.extra.join("both/AGENT.md"), "new notes").unwrap();
+        std::fs::write(paths.extra.join("both/CLAUDE.md"), "old notes").unwrap();
+        let i = inputs(dir.path());
+        let a = build_system_prompt(&i);
+        assert!(a.contains("# Shared instructions (global memory)\n\nOLD GLOBAL RULES"));
+        assert!(a.contains("siem/CLAUDE.md`"));
+        assert!(a.contains("mysql/AGENT.md`"));
+        assert!(a.contains("both/AGENT.md`"));
+        assert!(!a.contains("both/CLAUDE.md`"));
+        assert!(!a.contains("plain/AGENT.md`") && !a.contains("plain/CLAUDE.md`"));
+        assert!(!a.contains("siem/AGENT.md`"));
+
+        // AGENT.md wins over CLAUDE.md; an empty AGENT.md is no instructions.
+        std::fs::write(paths.global.join("AGENT.md"), "NEW GLOBAL RULES").unwrap();
+        let a = build_system_prompt(&i);
+        assert!(a.contains("NEW GLOBAL RULES") && !a.contains("OLD GLOBAL RULES"));
+        std::fs::write(paths.global.join("AGENT.md"), "  \n").unwrap();
+        assert!(build_system_prompt(&i).contains("OLD GLOBAL RULES"));
+        assert_eq!(
+            operator_instructions_file(&paths.extra.join("both")),
+            Some(paths.extra.join("both/AGENT.md"))
+        );
+        assert_eq!(operator_instructions_file(&paths.extra.join("plain")), None);
+    }
+
+    #[test]
+    fn agent_md_is_system_prompt_memory_md_is_fenced_first_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AgentPaths::under(dir.path());
+        std::fs::create_dir_all(&paths.group).unwrap();
+        std::fs::write(paths.group.join("AGENT.md"), "GROUP RULES").unwrap();
         let i = inputs(dir.path());
         let without_memory = build_system_prompt(&i);
         assert!(build_memory_note(&paths).is_none());
@@ -501,7 +594,7 @@ mod tests {
         )
         .unwrap();
         let system = build_system_prompt(&i);
-        // CLAUDE.md stays trusted system-prompt text; MEMORY.md never enters
+        // AGENT.md stays trusted system-prompt text; MEMORY.md never enters
         // the system prompt (which stays byte-identical).
         assert!(system.contains("# Group instructions\n\nGROUP RULES"));
         assert!(!system.contains("MEMO-7731"));
@@ -534,7 +627,7 @@ mod tests {
         std::fs::write(paths.memory(), "ü".repeat(MAX_MEMORY_BYTES)).unwrap();
         let m = read_group_memory(&paths.memory()).unwrap();
         assert!(m.len() <= MAX_MEMORY_BYTES + 64);
-        assert!(m.ends_with("[... truncated by Talon ...]"));
+        assert!(m.ends_with("[... truncated by Talahon ...]"));
         assert!(build_memory_note(&paths).unwrap().len() < MAX_MEMORY_BYTES + 4096);
 
         // A symlink is refused even when it points at a readable file.
@@ -575,7 +668,7 @@ mod tests {
         ];
         i.unavailable_mcp_servers = vec!["wazuh".into()];
         let s = build_system_prompt(&i);
-        assert!(s.starts_with("You are Talon"));
+        assert!(s.starts_with("You are Talahon"));
         // Per-run data never reaches the system prompt (prefix-cache stable).
         assert_eq!(s, baseline);
         assert!(!s.contains("untrusted_data source=\"mcp:"));
@@ -592,11 +685,11 @@ mod tests {
     #[test]
     fn instructions_are_capped() {
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("CLAUDE.md");
+        let f = dir.path().join("AGENT.md");
         std::fs::write(&f, "é".repeat(MAX_INSTRUCTIONS_BYTES)).unwrap();
         let t = read_instructions(&f).unwrap();
         assert!(t.len() <= MAX_INSTRUCTIONS_BYTES + 64);
-        assert!(t.ends_with("[... truncated by Talon ...]"));
+        assert!(t.ends_with("[... truncated by Talahon ...]"));
         std::fs::write(&f, "   ").unwrap();
         assert!(read_instructions(&f).is_none());
         assert!(read_instructions(&dir.path().join("missing")).is_none());

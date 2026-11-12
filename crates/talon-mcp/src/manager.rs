@@ -23,7 +23,7 @@ pub enum LaunchMode {
     /// Spawn each server as a child process (dev / degraded mode).
     Spawn,
     /// Connect to `<dir>/<server>.sock` exposed by the privileged
-    /// supervisor (`TALON_MCP_SOCKET_DIR`).
+    /// supervisor (`TALAHON_MCP_SOCKET_DIR`).
     UnixSockets {
         /// Socket directory.
         dir: PathBuf,
@@ -63,7 +63,7 @@ impl Default for ManagerOptions {
 
 impl ManagerOptions {
     /// Spawn mode when `socket_dir` is `None`, socket mode otherwise
-    /// (convenience for `TALON_MCP_SOCKET_DIR`).
+    /// (convenience for `TALAHON_MCP_SOCKET_DIR`).
     pub fn with_socket_dir(mut self, socket_dir: Option<PathBuf>) -> Self {
         self.launch = match socket_dir {
             Some(dir) => LaunchMode::UnixSockets { dir },

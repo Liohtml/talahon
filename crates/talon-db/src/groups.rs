@@ -270,7 +270,7 @@ mod tests {
         RegisteredGroup {
             name: "Family Chat".into(),
             folder: folder.into(),
-            trigger: "@Talon".into(),
+            trigger: "@Talahon".into(),
             added_at: "2024-01-01T00:00:00.000Z".into(),
             container_config: None,
             requires_trigger: None,

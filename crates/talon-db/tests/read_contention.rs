@@ -66,7 +66,7 @@ fn seed(db: &Db) {
             &RegisteredGroup {
                 name: format!("Chat {chat}"),
                 folder: format!("chat{chat}"),
-                trigger: "@Talon".into(),
+                trigger: "@Talahon".into(),
                 added_at: "2024-01-01T00:00:00.000Z".into(),
                 container_config: None,
                 requires_trigger: None,
@@ -119,7 +119,9 @@ fn read_round(db: &Db, chat: usize, out: &mut Vec<Duration>) {
         out.push(start.elapsed());
     };
     timed(&|| {
-        let msgs = db.get_messages_since(&jid(chat), "", "Talon", 50).unwrap();
+        let msgs = db
+            .get_messages_since(&jid(chat), "", "Talahon", 50)
+            .unwrap();
         assert_eq!(msgs.len(), 50);
     });
     timed(&|| assert!(db.get_registered_group(&jid(chat)).unwrap().is_some()));

@@ -1,4 +1,4 @@
-//! Process-wide configuration for the host (`talon`).
+//! Process-wide configuration for the host (`talahon`).
 //!
 //! Resolved once at startup from the process environment and `.env`
 //! (process env wins for non-secret keys). Secrets are *not* stored here;
@@ -29,7 +29,7 @@ pub struct TalonConfig {
     pub groups_dir: PathBuf,
     /// Runtime data: IPC namespaces, sessions (`data/`).
     pub data_dir: PathBuf,
-    /// `~/.config/talon`.
+    /// `~/.config/talahon`.
     pub config_dir: PathBuf,
     pub mount_allowlist_path: PathBuf,
     pub sender_allowlist_path: PathBuf,
@@ -71,12 +71,36 @@ impl TalonConfig {
         Self::from_env(project_root, env)
     }
 
+    /// True while `ASSISTANT_NAME` is not set (process environment or
+    /// `.env`): the assistant goes by the built-in default name, and default
+    /// triggers also accept the name it had before the rename
+    /// ([`crate::trigger::trigger_pattern`]).
+    pub fn assistant_name_is_default(&self) -> bool {
+        self.env.get("ASSISTANT_NAME").is_none()
+    }
+
+    /// The trigger regex of a group with trigger `trigger` (empty: the
+    /// default trigger) under this configuration.
+    pub fn trigger_pattern(&self, trigger: &str) -> regex::Regex {
+        crate::trigger::trigger_pattern(
+            trigger,
+            &self.assistant_name,
+            self.assistant_name_is_default(),
+        )
+    }
+
+    /// Resolve the configuration for `project_root` from an already loaded
+    /// `.env`.
     pub fn from_env(project_root: &Path, env: EnvFile) -> Self {
-        let assistant_name = env.get("ASSISTANT_NAME").unwrap_or_else(|| "Talon".into());
+        let assistant_name = env
+            .get("ASSISTANT_NAME")
+            .unwrap_or_else(|| crate::trigger::DEFAULT_ASSISTANT_NAME.into());
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| "/root".into());
-        let config_dir = home.join(".config").join("talon");
+        // `~/.config/talahon`, or the pre-rename `~/.config/talon` when only
+        // that exists; never both (see `paths::resolve_config_dir`).
+        let config_dir = crate::paths::resolve_config_dir(&home).path;
 
         let process_tz = std::env::var("TZ").ok();
         let tz_name = resolve_timezone(env.file_value("TZ"), process_tz.as_deref());
@@ -97,7 +121,7 @@ impl TalonConfig {
             config_dir,
             container_image: env
                 .get("CONTAINER_IMAGE")
-                .unwrap_or_else(|| "talon-agent:latest".into()),
+                .unwrap_or_else(|| "talahon-agent:latest".into()),
             container_runtime: env
                 .get("CONTAINER_RUNTIME")
                 .unwrap_or_else(|| "docker".into()),
@@ -115,9 +139,9 @@ impl TalonConfig {
             ipc_poll_interval: ms("IPC_POLL_INTERVAL", 1_000, 100),
             timezone: parse_tz(&tz_name),
             timezone_name: tz_name,
-            llm_gateway_port: env.get_u64("TALON_LLM_GATEWAY_PORT", 3001, 1) as u16,
+            llm_gateway_port: env.get_u64("TALAHON_LLM_GATEWAY_PORT", 3001, 1) as u16,
             llm_gateway_bind: env
-                .get("TALON_LLM_GATEWAY_BIND")
+                .get("TALAHON_LLM_GATEWAY_BIND")
                 .unwrap_or_else(|| "127.0.0.1".into()),
             onecli_url: env
                 .get("ONECLI_URL")
@@ -129,7 +153,7 @@ impl TalonConfig {
     }
 }
 
-/// The timezone Talon runs in: `TZ` from `.env` (what `talon setup
+/// The timezone Talahon runs in: `TZ` from `.env` (what `talahon setup
 /// timezone` writes), else the process's `TZ`, else UTC — the first one
 /// that is a valid IANA name, so an invalid value never hides a valid one.
 /// Same precedence as the setup step.
@@ -167,9 +191,51 @@ mod tests {
     }
 
     #[test]
+    fn default_triggers_accept_the_old_name_only_while_no_name_is_set() {
+        if std::env::var("ASSISTANT_NAME").is_ok_and(|v| !v.is_empty()) {
+            return; // the process environment overrides `.env`
+        }
+        let cfg = |content: &str| {
+            TalonConfig::from_env(
+                Path::new("/opt/talahon"),
+                EnvFile::from_str_content(content),
+            )
+        };
+        // ASSISTANT_NAME not set: the assistant is "Talahon", and chats that
+        // address "@Talon" (no trigger, or registered as `@Talon` /
+        // `@Talahon`) keep working.
+        let unset = cfg("");
+        assert_eq!(unset.assistant_name, "Talahon");
+        assert_eq!(unset.default_trigger, "@Talahon");
+        assert!(unset.assistant_name_is_default());
+        for trigger in ["", "@Talon", "@Talahon"] {
+            let re = unset.trigger_pattern(trigger);
+            assert!(re.is_match("@Talahon status"), "{trigger:?}");
+            assert!(re.is_match("@talon status"), "{trigger:?}");
+        }
+        assert!(!unset.trigger_pattern("@soc").is_match("@Talon status"));
+
+        // Set explicitly — to the new name, the old one or anything else:
+        // exactly the configured trigger, as before.
+        let new = cfg("ASSISTANT_NAME=Talahon\n");
+        assert!(!new.assistant_name_is_default());
+        assert!(new.trigger_pattern("").is_match("@Talahon status"));
+        assert!(!new.trigger_pattern("").is_match("@Talon status"));
+        assert!(!new.trigger_pattern("@Talon").is_match("@Talahon status"));
+        let old = cfg("ASSISTANT_NAME=Talon\n");
+        assert_eq!(old.default_trigger, "@Talon");
+        assert!(old.trigger_pattern("").is_match("@Talon status"));
+        assert!(!old.trigger_pattern("").is_match("@Talahon status"));
+        let nova = cfg("ASSISTANT_NAME=Nova\n");
+        assert!(nova.trigger_pattern("").is_match("@Nova status"));
+        assert!(!nova.trigger_pattern("").is_match("@Talon status"));
+        assert!(!nova.trigger_pattern("").is_match("@Talahon status"));
+    }
+
+    #[test]
     fn defaults_are_sane() {
-        let cfg = TalonConfig::from_env(Path::new("/opt/talon"), EnvFile::from_str_content(""));
-        assert_eq!(cfg.groups_dir, PathBuf::from("/opt/talon/groups"));
+        let cfg = TalonConfig::from_env(Path::new("/opt/talahon"), EnvFile::from_str_content(""));
+        assert_eq!(cfg.groups_dir, PathBuf::from("/opt/talahon/groups"));
         assert!(cfg.max_concurrent_containers >= 1);
         assert!(cfg.default_trigger.starts_with('@'));
     }

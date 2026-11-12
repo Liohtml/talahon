@@ -53,7 +53,7 @@ async fn trigger_gating_accumulates_context_until_trigger() {
 
     h.launcher.push(Script::reply("on it"));
     h.orch
-        .accept_message(TEAM, msg(TEAM, "2", "bob", "@Talon please look", &ts(2)));
+        .accept_message(TEAM, msg(TEAM, "2", "bob", "@Talahon please look", &ts(2)));
     assert!(h.orch.process_group_messages(TEAM).await);
     let prompts = h.launcher.prompts();
     assert_eq!(prompts.len(), 1);
@@ -76,7 +76,7 @@ async fn a_trigger_followed_by_a_busy_chat_is_still_answered() {
         .unwrap();
     h.orch.accept_message(
         TEAM,
-        msg(TEAM, "1", "alice", "@Talon check host web-01", &ts(1)),
+        msg(TEAM, "1", "alice", "@Talahon check host web-01", &ts(1)),
     );
     // More chatter than fits in one prompt (MAX_MESSAGES_PER_PROMPT = 10).
     for i in 2..=13u32 {
@@ -114,12 +114,12 @@ async fn trigger_from_disallowed_sender_is_ignored() {
         .register_group_inner(TEAM, group("Team", "team", false), true, false)
         .unwrap();
     h.orch
-        .accept_message(TEAM, msg(TEAM, "1", "mallory", "@Talon do it", &ts(1)));
+        .accept_message(TEAM, msg(TEAM, "1", "mallory", "@Talahon do it", &ts(1)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert!(h.launcher.calls().is_empty());
 
     h.orch
-        .accept_message(TEAM, msg(TEAM, "2", "alice", "@Talon do it", &ts(2)));
+        .accept_message(TEAM, msg(TEAM, "2", "alice", "@Talahon do it", &ts(2)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert_eq!(h.launcher.calls().len(), 1);
 }
@@ -227,7 +227,7 @@ async fn cursor_recovered_from_last_bot_message() {
         .unwrap();
     h.orch
         .accept_message(MAIN, msg(MAIN, "1", "me", "old question", &ts(1)));
-    let mut bot = msg(MAIN, "2", "Talon", "old answer", &ts(2));
+    let mut bot = msg(MAIN, "2", "Talahon", "old answer", &ts(2));
     bot.is_bot_message = true;
     h.orch.accept_message(MAIN, bot);
     h.orch
@@ -703,7 +703,7 @@ async fn gateway_token_label_is_the_lanes_ipc_key() {
         h.launcher.push(Script::reply("ok"));
         let n = u32::try_from(i).unwrap() + 1;
         h.orch
-            .accept_message(jid, msg(jid, &n.to_string(), "u", "@Talon hi", &ts(n)));
+            .accept_message(jid, msg(jid, &n.to_string(), "u", "@Talahon hi", &ts(n)));
         assert!(h.orch.process_group_messages(jid).await);
     }
     let labels: Vec<String> = h
@@ -807,7 +807,7 @@ async fn session_command_from_untrusted_sender_is_denied() {
         .register_group_inner(TEAM, group("Team", "team", false), true, false)
         .unwrap();
     h.orch
-        .accept_message(TEAM, msg(TEAM, "1", "bob", "@Talon /compact", &ts(1)));
+        .accept_message(TEAM, msg(TEAM, "1", "bob", "@Talahon /compact", &ts(1)));
     assert!(h.orch.process_group_messages(TEAM).await);
     assert!(h.launcher.calls().is_empty());
     assert_eq!(
@@ -1201,7 +1201,7 @@ async fn on_message_stores_and_wakes_the_loop() {
     tokio::time::timeout(Duration::from_secs(1), h.orch.wake.notified())
         .await
         .expect("loop woken");
-    let stored = h.db.get_messages_since(MAIN, "", "Talon", 10).unwrap();
+    let stored = h.db.get_messages_since(MAIN, "", "Talahon", 10).unwrap();
     assert_eq!(stored.len(), 1, "stored under the channel's JID");
 }
 
@@ -1254,7 +1254,7 @@ async fn drop_mode_discards_denied_senders_before_storage() {
     let mut mine = msg(TEAM, "3", "operator", "note", &ts(3));
     mine.is_from_me = true;
     assert!(h.orch.accept_message(TEAM, mine));
-    let stored = h.db.get_messages_since(TEAM, "", "Talon", 10).unwrap();
+    let stored = h.db.get_messages_since(TEAM, "", "Talahon", 10).unwrap();
     let ids: Vec<&str> = stored.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, vec!["2", "3"]);
 }
@@ -1370,7 +1370,7 @@ async fn persisted_groups_survive_a_restart() {
 }
 
 #[tokio::test]
-async fn ipc_registration_installs_claude_md_without_following_symlinks() {
+async fn ipc_registration_installs_agent_md_without_following_symlinks() {
     let h = harness_with(HarnessOptions {
         env: format!("{}ASSISTANT_NAME=Nova\n", crate::testutil::VLLM_ENV),
         ..HarnessOptions::default()
@@ -1379,8 +1379,8 @@ async fn ipc_registration_installs_claude_md_without_following_symlinks() {
     let groups = h.root().join("groups");
     std::fs::create_dir_all(groups.join("global")).unwrap();
     std::fs::write(
-        groups.join("global/CLAUDE.md"),
-        "# Talon\n\nYou are Talon, a SOC analyst.\n",
+        groups.join("global/AGENT.md"),
+        "# Talahon\n\nYou are Talahon, a SOC analyst.\n",
     )
     .unwrap();
 
@@ -1389,19 +1389,96 @@ async fn ipc_registration_installs_claude_md_without_following_symlinks() {
     IpcHost::register_group(h.orch.as_ref(), "fake:ops", g)
         .await
         .unwrap();
-    let md = std::fs::read_to_string(groups.join("ops/CLAUDE.md")).unwrap();
+    let md = std::fs::read_to_string(groups.join("ops/AGENT.md")).unwrap();
     assert!(md.starts_with(&format!("# {name}\n")), "{md}");
     assert!(md.contains(&format!("You are {name},")));
+    assert!(!groups.join("ops/CLAUDE.md").exists());
     assert!(h.db.get_registered_group("fake:ops").unwrap().is_some());
 
-    // A planted (dangling) symlink is never written through.
-    let target = h.root().join("outside.md");
-    std::fs::create_dir_all(groups.join("sym")).unwrap();
-    std::os::unix::fs::symlink(&target, groups.join("sym/CLAUDE.md")).unwrap();
-    IpcHost::register_group(h.orch.as_ref(), "fake:sym", group("Sym", "sym", false))
+    // A planted (dangling) symlink is never written through, under either
+    // name, and the other name is not created next to it.
+    for (folder, planted, other) in [
+        ("sym", "AGENT.md", "CLAUDE.md"),
+        ("sym2", "CLAUDE.md", "AGENT.md"),
+    ] {
+        let target = h.root().join(format!("outside-{folder}.md"));
+        std::fs::create_dir_all(groups.join(folder)).unwrap();
+        std::os::unix::fs::symlink(&target, groups.join(folder).join(planted)).unwrap();
+        IpcHost::register_group(
+            h.orch.as_ref(),
+            &format!("fake:{folder}"),
+            group("Sym", folder, false),
+        )
         .await
         .unwrap();
-    assert!(!target.exists());
+        assert!(!target.exists());
+        assert!(std::fs::symlink_metadata(groups.join(folder).join(other)).is_err());
+    }
+}
+
+/// The legacy name keeps working on both sides of a template copy: a
+/// `CLAUDE.md` template is still read, and a folder that already has a
+/// `CLAUDE.md` never gets an `AGENT.md` put next to it (which would take
+/// precedence over the operator's file).
+#[tokio::test]
+async fn group_bootstrap_honours_legacy_claude_md() {
+    let h = harness();
+    let groups = h.root().join("groups");
+    let register = |jid: &'static str, folder: &'static str| {
+        let orch = h.orch.clone();
+        async move {
+            IpcHost::register_group(orch.as_ref(), jid, group("G", folder, false))
+                .await
+                .unwrap();
+        }
+    };
+    let read = |rel: &str| std::fs::read_to_string(groups.join(rel)).unwrap();
+
+    // Template still under the legacy name: copied, as AGENT.md.
+    std::fs::create_dir_all(groups.join("global")).unwrap();
+    std::fs::write(groups.join("global/CLAUDE.md"), "# Talahon\nold global\n").unwrap();
+    register("fake:a", "a").await;
+    assert_eq!(read("a/AGENT.md"), "# Talahon\nold global\n");
+    assert!(!groups.join("a/CLAUDE.md").exists());
+
+    // Both names with content in the template folder: no side is picked,
+    // nothing is copied.
+    std::fs::write(groups.join("global/AGENT.md"), "# Talahon\nnew global\n").unwrap();
+    register("fake:b", "b").await;
+    assert!(!groups.join("b/AGENT.md").exists());
+    assert!(!groups.join("b/CLAUDE.md").exists());
+
+    // Destination with both names with content: both left untouched.
+    std::fs::create_dir_all(groups.join("both")).unwrap();
+    std::fs::write(groups.join("both/AGENT.md"), "new rules").unwrap();
+    std::fs::write(groups.join("both/CLAUDE.md"), "old rules").unwrap();
+    register("fake:both", "both").await;
+    assert_eq!(read("both/AGENT.md"), "new rules");
+    assert_eq!(read("both/CLAUDE.md"), "old rules");
+
+    // An inert AGENT.md (the mount-point stub of a legacy folder) is not a
+    // template; the CLAUDE.md next to it is.
+    std::fs::write(
+        groups.join("global/AGENT.md"),
+        talon_security::instructions::AGENT_MOUNT_STUB,
+    )
+    .unwrap();
+    register("fake:c", "c").await;
+    assert_eq!(read("c/AGENT.md"), "# Talahon\nold global\n");
+
+    // Destination already uses CLAUDE.md: untouched, no AGENT.md.
+    std::fs::create_dir_all(groups.join("legacy")).unwrap();
+    std::fs::write(groups.join("legacy/CLAUDE.md"), "operator rules").unwrap();
+    register("fake:legacy", "legacy").await;
+    assert_eq!(read("legacy/CLAUDE.md"), "operator rules");
+    assert!(!groups.join("legacy/AGENT.md").exists());
+
+    // Destination already has AGENT.md (even a placeholder): untouched.
+    std::fs::create_dir_all(groups.join("kept")).unwrap();
+    std::fs::write(groups.join("kept/AGENT.md"), "").unwrap();
+    register("fake:kept", "kept").await;
+    assert_eq!(read("kept/AGENT.md"), "");
+    assert!(!groups.join("kept/CLAUDE.md").exists());
 }
 
 #[tokio::test]
@@ -1409,9 +1486,9 @@ async fn group_bootstrap_never_follows_symlinked_folders_or_templates() {
     let h = harness();
     let groups = h.root().join("groups");
 
-    // A symlinked group folder: neither logs/ nor CLAUDE.md land outside.
+    // A symlinked group folder: neither logs/ nor AGENT.md land outside.
     std::fs::create_dir_all(groups.join("global")).unwrap();
-    std::fs::write(groups.join("global/CLAUDE.md"), "# Talon\n").unwrap();
+    std::fs::write(groups.join("global/AGENT.md"), "# Talahon\n").unwrap();
     let outside = h.root().join("outside-dir");
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, groups.join("evil")).unwrap();
@@ -1419,10 +1496,11 @@ async fn group_bootstrap_never_follows_symlinked_folders_or_templates() {
         .await
         .unwrap();
     assert!(!outside.join("logs").exists());
+    assert!(!outside.join("AGENT.md").exists());
     assert!(!outside.join("CLAUDE.md").exists());
 
     // A symlinked template (main agent pointing it at a host secret) is
-    // not copied into the new group.
+    // not copied into the new group: under the legacy name, ...
     let secret = h.root().join("secret.txt");
     std::fs::write(&secret, "TOP-SECRET").unwrap();
     std::fs::create_dir_all(groups.join("main")).unwrap();
@@ -1431,24 +1509,48 @@ async fn group_bootstrap_never_follows_symlinked_folders_or_templates() {
         .register_group_inner("fake:m2", group("M2", "m2", true), true, true)
         .unwrap();
     assert!(groups.join("m2/logs").is_dir());
+    assert!(!groups.join("m2/AGENT.md").exists());
     assert!(!groups.join("m2/CLAUDE.md").exists());
+    // ... under the new name, and when only the name that is not in use is
+    // a symlink (no template is read from a tampered folder at all).
+    std::fs::remove_file(groups.join("main/CLAUDE.md")).unwrap();
+    std::os::unix::fs::symlink(&secret, groups.join("main/AGENT.md")).unwrap();
+    h.orch
+        .register_group_inner("fake:m3", group("M3", "m3", true), true, true)
+        .unwrap();
+    assert!(!groups.join("m3/AGENT.md").exists());
+    std::fs::write(groups.join("main/CLAUDE.md"), "real main rules").unwrap();
+    h.orch
+        .register_group_inner("fake:m4", group("M4", "m4", true), true, true)
+        .unwrap();
+    assert!(!groups.join("m4/AGENT.md").exists());
+    assert!(!groups.join("m4/CLAUDE.md").exists());
 
-    // A FIFO template cannot block registration.
-    std::fs::remove_file(groups.join("global/CLAUDE.md")).unwrap();
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        groups.join("global/CLAUDE.md"),
-        rustix::fs::Mode::from_raw_mode(0o600),
-    )
-    .unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        IpcHost::register_group(h.orch.as_ref(), "fake:f", group("F", "fifo", false)),
-    )
-    .await
-    .expect("a FIFO template must not block")
-    .unwrap();
-    assert!(!groups.join("fifo/CLAUDE.md").exists());
+    // A FIFO template cannot block registration (either name).
+    for (i, name) in ["AGENT.md", "CLAUDE.md"].into_iter().enumerate() {
+        let _ = std::fs::remove_file(groups.join("global/AGENT.md"));
+        let _ = std::fs::remove_file(groups.join("global/CLAUDE.md"));
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            groups.join("global").join(name),
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .unwrap();
+        let folder = format!("fifo{i}");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            IpcHost::register_group(
+                h.orch.as_ref(),
+                &format!("fake:f{i}"),
+                group("F", &folder, false),
+            ),
+        )
+        .await
+        .expect("a FIFO template must not block")
+        .unwrap();
+        assert!(!groups.join(&folder).join("AGENT.md").exists());
+        assert!(!groups.join(&folder).join("CLAUDE.md").exists());
+    }
 }
 
 #[tokio::test]

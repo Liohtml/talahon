@@ -1,4 +1,4 @@
-//! `talon eval score` and `talon eval run`: the golden-set regression
+//! `talahon eval score` and `talahon eval run`: the golden-set regression
 //! harness for investigation quality.
 //!
 //! The scoring itself is pure and lives in [`talon_intel::eval`]; this
@@ -7,10 +7,10 @@
 //! - loading golden cases (`evals/golden/<case id>.json`),
 //! - `score`: reading one already-produced report per case from a
 //!   directory and printing the summary,
-//! - `run`: submitting every case to a running Talon through the CoPilot
+//! - `run`: submitting every case to a running Talahon through the CoPilot
 //!   HTTP API (`POST /investigate`, then polling
 //!   `GET /investigations/{id}`), i.e. the same path CoPilot uses, and
-//!   scoring the verdict Talon recorded.
+//!   scoring the verdict Talahon recorded.
 //!
 //! Reports are agent output: they are read without following symlinks and
 //! with a size cap ([`crate::safe_fs`]), parsed as data only, and whatever
@@ -52,7 +52,7 @@ pub const MAX_REPORT_BYTES: u64 = 2 * 1024 * 1024;
 pub const TRIGGERED_BY: &str = "manual";
 /// Consecutive failed status polls after which a case is given up.
 pub const MAX_POLL_ERRORS: u32 = 3;
-/// Timeout of one HTTP request to Talon.
+/// Timeout of one HTTP request to Talahon.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Exit code: the pass rate is below the threshold.
@@ -174,7 +174,7 @@ fn report(summary: &Summary, common: &EvalCommonArgs) -> i32 {
         match serde_json::to_string_pretty(summary) {
             Ok(text) => println!("{text}"),
             Err(e) => {
-                eprintln!("talon eval: cannot serialize the summary: {e}");
+                eprintln!("talahon eval: cannot serialize the summary: {e}");
                 return EXIT_USAGE;
             }
         }
@@ -185,7 +185,7 @@ fn report(summary: &Summary, common: &EvalCommonArgs) -> i32 {
         0
     } else {
         eprintln!(
-            "talon eval: pass rate {:.1}% is below the required {:.1}%",
+            "talahon eval: pass rate {:.1}% is below the required {:.1}%",
             summary.pass_rate * 100.0,
             common.min_pass_rate * 100.0
         );
@@ -194,11 +194,11 @@ fn report(summary: &Summary, common: &EvalCommonArgs) -> i32 {
 }
 
 fn usage_error(e: &anyhow::Error) -> i32 {
-    eprintln!("talon eval: {e:#}");
+    eprintln!("talahon eval: {e:#}");
     EXIT_USAGE
 }
 
-/// `talon eval score`: returns the process exit code.
+/// `talahon eval score`: returns the process exit code.
 pub fn score(root: &Path, args: &EvalScoreArgs) -> i32 {
     let result = load_cases(&cases_dir(root, &args.common))
         .and_then(|cases| score_reports(&cases, &args.reports));
@@ -217,7 +217,7 @@ pub fn score(root: &Path, args: &EvalScoreArgs) -> i32 {
 pub struct Submission {
     /// Investigation job id.
     pub job_id: String,
-    /// Talon returned an existing job instead of starting a new one.
+    /// Talahon returned an existing job instead of starting a new one.
     pub deduplicated: bool,
 }
 
@@ -231,7 +231,7 @@ pub trait InvestigationApi: Send + Sync {
     async fn fetch(&self, job_id: &str) -> anyhow::Result<Value>;
 }
 
-/// [`InvestigationApi`] over HTTP against a running Talon.
+/// [`InvestigationApi`] over HTTP against a running Talahon.
 pub struct HttpInvestigationApi {
     client: reqwest::Client,
     base: String,
@@ -239,7 +239,7 @@ pub struct HttpInvestigationApi {
 }
 
 impl HttpInvestigationApi {
-    /// Client for the Talon HTTP API at `base_url`, authenticating with
+    /// Client for the Talahon HTTP API at `base_url`, authenticating with
     /// `api_key` (`X-Api-Key`). Redirects are not followed, so the key is
     /// never forwarded to another origin.
     ///
@@ -248,9 +248,9 @@ impl HttpInvestigationApi {
     /// cannot be built.
     pub fn new(base_url: &str, api_key: impl Into<String>) -> anyhow::Result<Self> {
         let url = reqwest::Url::parse(base_url.trim())
-            .map_err(|e| anyhow!("invalid Talon URL {base_url:?}: {e}"))?;
+            .map_err(|e| anyhow!("invalid Talahon URL {base_url:?}: {e}"))?;
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            bail!("the Talon URL must be http(s)://host[:port], got {base_url:?}");
+            bail!("the Talahon URL must be http(s)://host[:port], got {base_url:?}");
         }
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -386,7 +386,7 @@ impl CaseRun {
 ///
 /// Never returns an error: a rejected submission, a de-duplicated trigger
 /// (unless allowed), repeated poll failures and a timeout all become
-/// [`Outcome::Failed`]. A job that times out here keeps running in Talon —
+/// [`Outcome::Failed`]. A job that times out here keeps running in Talahon —
 /// the HTTP API has no cancel operation.
 pub async fn investigate_case(
     api: &dyn InvestigationApi,
@@ -402,7 +402,7 @@ pub async fn investigate_case(
         return CaseRun::failed(
             Some(job_id.clone()),
             format!(
-                "Talon de-duplicated the trigger to the existing job {job_id}; its verdict may \
+                "Talahon de-duplicated the trigger to the existing job {job_id}; its verdict may \
                  predate the change under test (set COPILOT_INVESTIGATION_DEDUP_MINUTES=0 on \
                  the eval instance, or pass --allow-deduplicated)"
             ),
@@ -447,7 +447,7 @@ pub async fn investigate_case(
                 Some(job_id.clone()),
                 format!(
                     "no verdict within {}s (last status: {last_status}); job {job_id} may \
-                     still be running in Talon",
+                     still be running in Talahon",
                     options.timeout.as_secs()
                 ),
             );
@@ -556,7 +556,7 @@ pub async fn run_cases(
 }
 
 /// Write each finished run's investigation record to
-/// `<dir>/<case id>.json` (the layout `talon eval score --reports` reads).
+/// `<dir>/<case id>.json` (the layout `talahon eval score --reports` reads).
 /// Cases without a record (submission failed, timed out) get no file and
 /// score as missing.
 fn save_records(dir: &Path, cases: &[GoldenCase], runs: &[CaseRun]) -> anyhow::Result<()> {
@@ -607,7 +607,7 @@ async fn run_inner(root: &Path, config: &TalonConfig, args: &EvalRunArgs) -> any
     let http = HttpConfig::from_talon_config(config).map_err(|e| anyhow!("{e}"))?;
     if !http.api_key.is_configured() {
         bail!(
-            "HTTP_API_KEY is not set in the project's .env; the Talon HTTP API rejects every request without it"
+            "HTTP_API_KEY is not set in the project's .env; the Talahon HTTP API rejects every request without it"
         );
     }
     let base = match &args.url {
@@ -616,7 +616,7 @@ async fn run_inner(root: &Path, config: &TalonConfig, args: &EvalRunArgs) -> any
     };
     if is_cleartext_remote(&base) {
         eprintln!(
-            "talon eval: warning: sending the API key over plain HTTP to a non-loopback host"
+            "talahon eval: warning: sending the API key over plain HTTP to a non-loopback host"
         );
     }
     let api = HttpInvestigationApi::new(&base, http.api_key.expose())?;
@@ -633,7 +633,7 @@ async fn run_inner(root: &Path, config: &TalonConfig, args: &EvalRunArgs) -> any
     Ok(report(&summary, &args.common))
 }
 
-/// `talon eval run`: returns the process exit code.
+/// `talahon eval run`: returns the process exit code.
 pub async fn run(root: &Path, config: &TalonConfig, args: &EvalRunArgs) -> i32 {
     match run_inner(root, config, args).await {
         Ok(code) => code,
@@ -1163,7 +1163,7 @@ mod tests {
         ] {
             assert!(!is_cleartext_remote(fine), "{fine}");
         }
-        let mut http = HttpConfig::new("/srv/talon");
+        let mut http = HttpConfig::new("/srv/talahon");
         assert_eq!(default_base_url(&http), "http://127.0.0.1:3100");
         http.bind = "0.0.0.0".parse().unwrap();
         http.port = 3200;

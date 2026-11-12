@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Talon agent container image.
+# Build the Talahon agent container image.
 #
 #   ./container/build.sh [tag]
 #
@@ -8,7 +8,7 @@
 #
 # Environment:
 #   CONTAINER_RUNTIME  docker (default) | podman | <path>
-#   TALON_IMAGE_NAME   image name (default: talon-agent)
+#   TALAHON_IMAGE_NAME image name (default: talahon-agent)
 #   INSTALL_CHROMIUM   true | false (default: false)
 #   http_proxy / https_proxy / no_proxy (and upper-case) are forwarded as
 #   build args when set (e.g. inside Docker Sandboxes).
@@ -18,7 +18,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-IMAGE_NAME="${TALON_IMAGE_NAME:-talon-agent}"
+# TALON_IMAGE_NAME is the pre-rename spelling of TALAHON_IMAGE_NAME: still
+# read (the new name wins), removed in the next major version.
+if [[ -z "${TALAHON_IMAGE_NAME:-}" && -n "${TALON_IMAGE_NAME:-}" ]]; then
+    echo "build.sh: TALON_IMAGE_NAME is deprecated, use TALAHON_IMAGE_NAME" >&2
+fi
+IMAGE_NAME="${TALAHON_IMAGE_NAME:-${TALON_IMAGE_NAME:-talahon-agent}}"
 TAG="${1:-latest}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 INSTALL_CHROMIUM="${INSTALL_CHROMIUM:-false}"
@@ -65,7 +70,7 @@ case "$(basename "$CONTAINER_RUNTIME")" in
         ;;
 esac
 
-echo "Building Talon agent image ${IMAGE_NAME}:${TAG}"
+echo "Building Talahon agent image ${IMAGE_NAME}:${TAG}"
 echo "  runtime:  ${CONTAINER_RUNTIME}"
 echo "  context:  ${REPO_ROOT}"
 echo "  chromium: ${INSTALL_CHROMIUM}"
@@ -81,7 +86,7 @@ cat <<EOF
 
 Build complete: ${IMAGE_NAME}:${TAG}
 
-The image expects the hardened launch done by the Talon host (talon-container).
+The image expects the hardened launch done by the Talahon host (talon-container).
 Quick smoke test (degraded: no LLM endpoint in the input):
   echo '{"prompt":"What is 2+2?","groupFolder":"test","chatJid":"test@g.us","isMain":false}' | \\
     ${CONTAINER_RUNTIME} run -i --rm --read-only --cap-drop=ALL \\

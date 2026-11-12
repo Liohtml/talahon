@@ -18,7 +18,7 @@ use crate::runner::{CommandRunner, CommandSpec};
 /// group workspaces and the SQLite store need room.
 pub const MIN_FREE_DISK_MB: u64 = 2048;
 
-/// Container runtimes Talon supports.
+/// Container runtimes Talahon supports.
 pub const SUPPORTED_RUNTIMES: &[&str] = &["docker", "podman"];
 
 // ---------------------------------------------------------------------------
@@ -115,6 +115,35 @@ pub async fn image_present(runner: &dyn CommandRunner, runtime: &str, image: &st
         .success()
 }
 
+/// Repository name of the agent image (`CONTAINER_IMAGE` default).
+pub const DEFAULT_IMAGE_REPO: &str = "talahon-agent";
+/// Its name up to 2.x.
+pub const LEGACY_IMAGE_REPO: &str = "talon-agent";
+
+/// The name `image` had before the rename: `talahon-agent[:tag]` →
+/// `talon-agent[:tag]`. `None` for any other repository (a registry path or
+/// a custom name was chosen by the operator and never renamed).
+pub fn legacy_image_name(image: &str) -> Option<String> {
+    let rest = image.strip_prefix(DEFAULT_IMAGE_REPO)?;
+    (rest.is_empty() || rest.starts_with(':') || rest.starts_with('@'))
+        .then(|| format!("{LEGACY_IMAGE_REPO}{rest}"))
+}
+
+/// When `image` is missing: the pre-rename image of the same tag, if that
+/// one exists locally. It is only reported, never run in place of `image`:
+/// the operator rebuilds (`./container/build.sh`) or selects the old image
+/// deliberately with `CONTAINER_IMAGE`.
+pub async fn legacy_image_present(
+    runner: &dyn CommandRunner,
+    runtime: &str,
+    image: &str,
+) -> Option<String> {
+    let legacy = legacy_image_name(image)?;
+    image_present(runner, runtime, &legacy)
+        .await
+        .then_some(legacy)
+}
+
 // ---------------------------------------------------------------------------
 // vLLM
 // ---------------------------------------------------------------------------
@@ -124,13 +153,13 @@ pub async fn image_present(runner: &dyn CommandRunner, runtime: &str, image: &st
 pub enum VllmStatus {
     /// Reachable and the configured model is served.
     Ok,
-    /// `TALON_VLLM_BASE_URL` / `TALON_VLLM_MODEL` not set.
+    /// `TALAHON_VLLM_BASE_URL` / `TALAHON_VLLM_MODEL` not set.
     NotConfigured,
     /// The base URL is not a valid http(s) URL.
     InvalidUrl,
     /// Connection failed or timed out.
     Unreachable,
-    /// 401 / 403 — `TALON_VLLM_API_KEY` missing or wrong.
+    /// 401 / 403 — `TALAHON_VLLM_API_KEY` missing or wrong.
     AuthFailed,
     /// Any other non-2xx status.
     HttpError,
@@ -348,7 +377,7 @@ pub async fn check_provider(
     check
 }
 
-/// Probe the vLLM server configured in the context (`TALON_VLLM_*`, API
+/// Probe the vLLM server configured in the context (`TALAHON_VLLM_*`, API
 /// key from `.env` only).
 pub async fn check_configured_vllm(
     ctx: &SetupContext,
@@ -382,7 +411,7 @@ pub async fn check_configured_vllm(
 pub enum PortStatus {
     /// Bind succeeded.
     Free,
-    /// Address already in use (Talon itself, or another service).
+    /// Address already in use (Talahon itself, or another service).
     InUse,
     /// The bind address is not local / not permitted.
     Unavailable(String),
@@ -411,7 +440,7 @@ pub async fn check_port(bind: &str, port: u16) -> PortStatus {
     }
 }
 
-/// Directories Talon writes at runtime.
+/// Directories Talahon writes at runtime.
 pub fn runtime_dirs(ctx: &SetupContext) -> Vec<PathBuf> {
     vec![
         ctx.config.store_dir.clone(),
@@ -456,7 +485,7 @@ pub fn parse_df_available_kb(output: &str) -> Option<u64> {
 // Exposure to agent containers (MYTH-05)
 // ---------------------------------------------------------------------------
 
-/// Issue code: `TALON_VLLM_API_KEY` is unset.
+/// Issue code: `TALAHON_VLLM_API_KEY` is unset.
 pub const ISSUE_VLLM_API_KEY_UNSET: &str = "vllm_api_key_unset";
 /// Issue code: `COPILOT_HTTP_BIND` listens on every interface.
 pub const ISSUE_HTTP_BIND_ALL_INTERFACES: &str = "http_bind_all_interfaces";
@@ -468,10 +497,10 @@ pub fn api_key_env(ctx: &SetupContext) -> &'static str {
         .api_key_env()
 }
 
-/// `TALON_VLLM_API_KEY` is set (non-blank) in `.env` — the only place the
+/// `TALAHON_VLLM_API_KEY` is set (non-blank) in `.env` — the only place the
 /// secret is read from.
 pub fn vllm_api_key_set(env: &EnvFile) -> bool {
-    env.file_value("TALON_VLLM_API_KEY")
+    env.file_value("TALAHON_VLLM_API_KEY")
         .is_some_and(|k| !k.trim().is_empty())
 }
 
@@ -490,7 +519,7 @@ pub fn binds_all_interfaces(value: &str) -> bool {
 ///
 /// - [`ISSUE_VLLM_API_KEY_UNSET`]: without an API key on the vLLM server,
 ///   anything that can reach it — agent containers included, if egress is
-///   not firewalled (`talon setup egress`) — can call the model directly,
+///   not firewalled (`talahon setup egress`) — can call the model directly,
 ///   bypassing the LLM gateway's token, model and parameter checks.
 /// - [`ISSUE_HTTP_BIND_ALL_INTERFACES`]: `COPILOT_HTTP_BIND` is `0.0.0.0` /
 ///   `::`, so the HTTP API also listens on the docker bridge (reachable from
@@ -532,10 +561,10 @@ mod tests {
 
     #[test]
     fn exposure_issues_from_env() {
-        let env = EnvFile::from_str_content("TALON_VLLM_API_KEY=k\n");
+        let env = EnvFile::from_str_content("TALAHON_VLLM_API_KEY=k\n");
         assert!(vllm_api_key_set(&env));
         assert!(!exposure_issues(&env).contains(&ISSUE_VLLM_API_KEY_UNSET));
-        for unset in ["", "TALON_VLLM_API_KEY=\n", "TALON_VLLM_API_KEY=   \n"] {
+        for unset in ["", "TALAHON_VLLM_API_KEY=\n", "TALAHON_VLLM_API_KEY=   \n"] {
             let env = EnvFile::from_str_content(unset);
             assert!(!vllm_api_key_set(&env), "{unset:?}");
             assert!(exposure_issues(&env).contains(&ISSUE_VLLM_API_KEY_UNSET));
@@ -543,14 +572,14 @@ mod tests {
         // COPILOT_HTTP_BIND may come from the process env, which wins.
         if std::env::var_os("COPILOT_HTTP_BIND").is_none() {
             let env =
-                EnvFile::from_str_content("TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=0.0.0.0\n");
+                EnvFile::from_str_content("TALAHON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=0.0.0.0\n");
             assert_eq!(exposure_issues(&env), vec![ISSUE_HTTP_BIND_ALL_INTERFACES]);
-            let env = EnvFile::from_str_content("TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=::\n");
+            let env = EnvFile::from_str_content("TALAHON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=::\n");
             assert_eq!(exposure_issues(&env), vec![ISSUE_HTTP_BIND_ALL_INTERFACES]);
             let env =
-                EnvFile::from_str_content("TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n");
+                EnvFile::from_str_content("TALAHON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n");
             assert!(exposure_issues(&env).is_empty());
-            let env = EnvFile::from_str_content("TALON_VLLM_API_KEY=k\n");
+            let env = EnvFile::from_str_content("TALAHON_VLLM_API_KEY=k\n");
             assert!(exposure_issues(&env).is_empty());
         }
     }
@@ -768,7 +797,43 @@ mod tests {
     async fn image_presence() {
         let runner = Arc::new(MockRunner::new());
         runner.on("docker image inspect", CommandOutput::ok("sha256:abc"));
-        assert!(image_present(runner.as_ref(), "docker", "talon-agent:latest").await);
-        assert!(!image_present(runner.as_ref(), "podman", "talon-agent:latest").await);
+        assert!(image_present(runner.as_ref(), "docker", "talahon-agent:latest").await);
+        assert!(!image_present(runner.as_ref(), "podman", "talahon-agent:latest").await);
+    }
+
+    #[tokio::test]
+    async fn a_pre_rename_image_is_reported_only_for_the_default_repository() {
+        assert_eq!(
+            legacy_image_name("talahon-agent:latest").as_deref(),
+            Some("talon-agent:latest")
+        );
+        assert_eq!(
+            legacy_image_name("talahon-agent").as_deref(),
+            Some("talon-agent")
+        );
+        assert_eq!(legacy_image_name("talahon-agent-dev:1"), None);
+        assert_eq!(legacy_image_name("ghcr.io/org/talahon-agent:1"), None);
+        assert_eq!(legacy_image_name("talon-agent:latest"), None);
+
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "docker image inspect --format {{.Id}} talon-agent:latest",
+            CommandOutput::ok("sha256:old"),
+        );
+        assert!(!image_present(runner.as_ref(), "docker", "talahon-agent:latest").await);
+        assert_eq!(
+            legacy_image_present(runner.as_ref(), "docker", "talahon-agent:latest")
+                .await
+                .as_deref(),
+            Some("talon-agent:latest")
+        );
+        assert_eq!(
+            legacy_image_present(runner.as_ref(), "docker", "talahon-agent:v2").await,
+            None
+        );
+        assert_eq!(
+            legacy_image_present(runner.as_ref(), "docker", "custom:latest").await,
+            None
+        );
     }
 }

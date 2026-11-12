@@ -57,7 +57,7 @@ fn register(jid: &str, folder: &str) -> IpcTask {
         jid: jid.into(),
         name: "New Group".into(),
         folder: folder.into(),
-        trigger: "@Talon".into(),
+        trigger: "@Talahon".into(),
         requires_trigger: None,
         container_config: None,
         timestamp: None,
@@ -346,7 +346,7 @@ async fn main_group_can_register_a_new_group() {
         .unwrap();
     assert_eq!(g.name, "New Group");
     assert_eq!(g.folder, "new-group");
-    assert_eq!(g.trigger, "@Talon");
+    assert_eq!(g.trigger, "@Talahon");
     assert!(!g.is_main);
     let ev = h.audit.snapshot();
     assert!(
@@ -391,13 +391,13 @@ async fn register_group_preserves_lane_fields_and_strips_container_config() {
         jid: "other@g.us".into(),
         name: "Other renamed".into(),
         folder: "other-group".into(),
-        trigger: "@Talon".into(),
+        trigger: "@Talahon".into(),
         requires_trigger: Some(true),
         container_config: Some(cfg),
         timestamp: None,
     };
     let mount = AdditionalMount {
-        host_path: "/srv/talon".into(),
+        host_path: "/srv/talahon".into(),
         container_path: Some("project".into()),
         readonly: false,
     };
@@ -453,7 +453,7 @@ async fn register_group_never_applies_container_config_to_new_groups() {
                 jid: "new@g.us".into(),
                 name: "New".into(),
                 folder: "new-group".into(),
-                trigger: "@Talon".into(),
+                trigger: "@Talahon".into(),
                 requires_trigger: None,
                 container_config: Some(ContainerConfig {
                     additional_mounts: vec![AdditionalMount {

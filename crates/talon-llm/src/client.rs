@@ -139,7 +139,7 @@ impl ClientConfig {
         cfg
     }
 
-    /// Config for direct host-side access (e.g. `talon setup verify`).
+    /// Config for direct host-side access (e.g. `talahon setup verify`).
     pub fn from_vllm(cfg: &VllmConfig, api_key: Option<String>) -> Self {
         let mut out = Self::new(cfg.base_url.clone(), cfg.model.clone());
         out.api_key = api_key.filter(|k| !k.trim().is_empty());

@@ -387,7 +387,7 @@ pub fn truncate_head_tail(text: &str, max_bytes: usize) -> Cow<'_, str> {
         .map_or(tail_start, |nl| tail_start + nl + 1);
     let omitted = tail_start.saturating_sub(head_end);
     Cow::Owned(format!(
-        "{}\n[... {omitted} bytes omitted by Talon to fit the context window; narrow the query or read a smaller range ...]\n{}",
+        "{}\n[... {omitted} bytes omitted by Talahon to fit the context window; narrow the query or read a smaller range ...]\n{}",
         &text[..head_end],
         &text[tail_start..]
     ))
@@ -819,7 +819,7 @@ mod tests {
         assert!(out.len() <= 2_000, "{}", out.len());
         assert!(out.starts_with("line 0\n"));
         assert!(out.trim_end().ends_with("line 1999"));
-        assert!(out.contains("bytes omitted by Talon"));
+        assert!(out.contains("bytes omitted by Talahon"));
         assert!(matches!(truncate_head_tail("short", 100), Cow::Borrowed(_)));
         // Multi-byte safety.
         let wide = "é".repeat(5_000);

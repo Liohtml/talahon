@@ -101,7 +101,7 @@ impl HttpDeps {
     /// The palace is **disabled** (`/palace/*` answers 503) until a runner is
     /// supplied with [`Self::with_palace`] — normally a
     /// [`crate::CommandPalaceRunner`] that runs the palace in a hardened
-    /// container. Only if the operator set `TALON_PALACE_HOST_EXEC=unsafe`
+    /// container. Only if the operator set `TALAHON_PALACE_HOST_EXEC=unsafe`
     /// ([`HttpConfig::palace_host_exec`]) does the default become a
     /// [`ScriptPalaceRunner`] executing `palace-call.sh` on the host
     /// (dangerous, MYTH-01).
@@ -121,7 +121,7 @@ impl HttpDeps {
     }
 
     /// Use `palace` for the `/palace/*` endpoints (replaces the default,
-    /// including the `TALON_PALACE_HOST_EXEC=unsafe` script runner).
+    /// including the `TALAHON_PALACE_HOST_EXEC=unsafe` script runner).
     pub fn with_palace(mut self, palace: Arc<dyn PalaceRunner>) -> Self {
         self.palace = palace;
         self
@@ -136,7 +136,7 @@ fn default_palace_runner(config: &HttpConfig) -> Arc<dyn PalaceRunner> {
     }
     tracing::warn!(
         script = %config.palace_script.display(),
-        "TALON_PALACE_HOST_EXEC=unsafe: MemPalace calls run palace-call.sh ON THE HOST against \
+        "TALAHON_PALACE_HOST_EXEC=unsafe: MemPalace calls run palace-call.sh ON THE HOST against \
          agent-writable mempalace-data; a compromised agent can get code executed as this user. \
          Use a containerized palace runner instead"
     );

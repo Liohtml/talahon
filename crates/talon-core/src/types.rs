@@ -34,7 +34,7 @@ pub struct AdditionalMount {
 }
 
 /// Tamper-proof mount policy. Lives outside the project root
-/// (`~/.config/talon/mount-allowlist.json`) and is never mounted into a
+/// (`~/.config/talahon/mount-allowlist.json`) and is never mounted into a
 /// container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,8 +95,8 @@ impl ProviderKind {
     /// by the host (gateway, setup, doctor); never enters a container.
     pub fn api_key_env(&self) -> &'static str {
         match self {
-            ProviderKind::Anthropic => "TALON_ANTHROPIC_API_KEY",
-            ProviderKind::Vllm | ProviderKind::Unsupported => "TALON_VLLM_API_KEY",
+            ProviderKind::Anthropic => "TALAHON_ANTHROPIC_API_KEY",
+            ProviderKind::Vllm | ProviderKind::Unsupported => "TALAHON_VLLM_API_KEY",
         }
     }
 }
@@ -109,7 +109,7 @@ impl ProviderKind {
 /// `claude-sonnet-5-5`), and `enable_thinking` switches adaptive thinking.
 ///
 /// The API key is intentionally *not* part of this struct: it is read by the
-/// host from `.env` (`TALON_VLLM_API_KEY`) and only ever held by the host-side
+/// host from `.env` (`TALAHON_VLLM_API_KEY`) and only ever held by the host-side
 /// LLM gateway. Containers authenticate to the gateway with a short-lived,
 /// per-run token instead (see [`crate::protocol::LlmEndpoint`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,7 +181,7 @@ pub struct ContainerConfig {
 // Groups / lanes
 // ---------------------------------------------------------------------------
 
-/// A chat (JID) Talon answers in, bound to a group folder on disk.
+/// A chat (JID) Talahon answers in, bound to a group folder on disk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisteredGroup {
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn registered_group_json_is_ts_compatible() {
         let g: RegisteredGroup = serde_json::from_str(
-            r#"{"name":"Main","folder":"main","trigger":"@Talon","added_at":"2024-01-01T00:00:00.000Z","isMain":true,"requiresTrigger":false}"#,
+            r#"{"name":"Main","folder":"main","trigger":"@Talahon","added_at":"2024-01-01T00:00:00.000Z","isMain":true,"requiresTrigger":false}"#,
         )
         .unwrap();
         assert!(g.is_main);

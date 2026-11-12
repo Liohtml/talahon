@@ -840,8 +840,8 @@ mod tests {
             "api_key=[REDACTED:api_key]&user=bob"
         );
         assert_eq!(
-            r("TALON_VLLM_API_KEY=abcdef"),
-            "TALON_VLLM_API_KEY=[REDACTED:api_key]"
+            r("TALAHON_VLLM_API_KEY=abcdef"),
+            "TALAHON_VLLM_API_KEY=[REDACTED:api_key]"
         );
         assert_eq!(
             r("client_secret = 'abc def'"),

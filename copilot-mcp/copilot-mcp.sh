@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# CoPilot MCP server wrapper for Talon.
+# CoPilot MCP server wrapper for Talahon.
 #
 # Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Talon agent container. `talon-agent supervise` starts this script
+#   1. Talahon agent container. `talahon-agent supervise` starts this script
 #      directly as `mcp-copilot` (`"runAs": "mcp-copilot"` in .mcp.json). The
 #      credentials were staged at /etc/mcp-secrets/copilot.env (owner
 #      mcp-copilot, mode 0600); the visible copilot-mcp/.env is shadowed with

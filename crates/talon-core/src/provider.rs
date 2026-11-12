@@ -1,7 +1,7 @@
 //! Model provider configuration: `.env` defaults merged with per-group
 //! overrides.
 //!
-//! `TALON_PROVIDER` selects the upstream the host LLM gateway talks to:
+//! `TALAHON_PROVIDER` selects the upstream the host LLM gateway talks to:
 //! `vllm` (default) or `anthropic`. The agent in the container is unaware
 //! of the choice — it always speaks the OpenAI-compatible API to the
 //! gateway.
@@ -10,30 +10,30 @@
 //!
 //! | key                         | meaning                                         |
 //! |-----------------------------|-------------------------------------------------|
-//! | `TALON_VLLM_BASE_URL`       | e.g. `http://vllm.internal:8000` (required)     |
-//! | `TALON_VLLM_MODEL`          | served model name (required)                    |
-//! | `TALON_VLLM_FAST_MODEL`     | optional auxiliary model                        |
-//! | `TALON_VLLM_MAX_CONTEXT`    | context window in tokens (default 32768)        |
-//! | `TALON_VLLM_MAX_OUTPUT`     | max output tokens per completion                |
-//! | `TALON_VLLM_TEMPERATURE`    | sampling temperature                            |
-//! | `TALON_VLLM_TOP_P`          | nucleus sampling                                |
-//! | `TALON_VLLM_ENABLE_THINKING`| `true`/`false` for reasoning chat templates     |
-//! | `TALON_VLLM_TIMEOUT_SECS`   | per-request timeout                             |
-//! | `TALON_BLOCKED_HOSTS`       | comma-separated hosts routed to 127.0.0.1       |
+//! | `TALAHON_VLLM_BASE_URL`       | e.g. `http://vllm.internal:8000` (required)     |
+//! | `TALAHON_VLLM_MODEL`          | served model name (required)                    |
+//! | `TALAHON_VLLM_FAST_MODEL`     | optional auxiliary model                        |
+//! | `TALAHON_VLLM_MAX_CONTEXT`    | context window in tokens (default 32768)        |
+//! | `TALAHON_VLLM_MAX_OUTPUT`     | max output tokens per completion                |
+//! | `TALAHON_VLLM_TEMPERATURE`    | sampling temperature                            |
+//! | `TALAHON_VLLM_TOP_P`          | nucleus sampling                                |
+//! | `TALAHON_VLLM_ENABLE_THINKING`| `true`/`false` for reasoning chat templates     |
+//! | `TALAHON_VLLM_TIMEOUT_SECS`   | per-request timeout                             |
+//! | `TALAHON_BLOCKED_HOSTS`       | comma-separated hosts routed to 127.0.0.1       |
 //!
 //! Recognised `.env` keys for `anthropic` (non-secret):
 //!
 //! | key                              | meaning                                                |
 //! |----------------------------------|--------------------------------------------------------|
-//! | `TALON_ANTHROPIC_MODEL`          | model id, e.g. `claude-sonnet-5-5` (required)          |
-//! | `TALON_ANTHROPIC_FAST_MODEL`     | optional auxiliary model                               |
-//! | `TALON_ANTHROPIC_BASE_URL`       | default `https://api.anthropic.com`                    |
-//! | `TALON_ANTHROPIC_MAX_CONTEXT`    | context window in tokens (default 200000)              |
-//! | `TALON_ANTHROPIC_MAX_OUTPUT`     | max output tokens per completion                       |
-//! | `TALON_ANTHROPIC_THINKING`       | `true` = adaptive thinking (off by default)            |
-//! | `TALON_ANTHROPIC_TIMEOUT_SECS`   | per-request timeout                                    |
+//! | `TALAHON_ANTHROPIC_MODEL`          | model id, e.g. `claude-sonnet-5-5` (required)          |
+//! | `TALAHON_ANTHROPIC_FAST_MODEL`     | optional auxiliary model                               |
+//! | `TALAHON_ANTHROPIC_BASE_URL`       | default `https://api.anthropic.com`                    |
+//! | `TALAHON_ANTHROPIC_MAX_CONTEXT`    | context window in tokens (default 200000)              |
+//! | `TALAHON_ANTHROPIC_MAX_OUTPUT`     | max output tokens per completion                       |
+//! | `TALAHON_ANTHROPIC_THINKING`       | `true` = adaptive thinking (off by default)            |
+//! | `TALAHON_ANTHROPIC_TIMEOUT_SECS`   | per-request timeout                                    |
 //!
-//! The secrets `TALON_VLLM_API_KEY` / `TALON_ANTHROPIC_API_KEY` are read
+//! The secrets `TALAHON_VLLM_API_KEY` / `TALAHON_ANTHROPIC_API_KEY` are read
 //! separately by the host LLM gateway via
 //! [`crate::env::EnvFile::file_value`] and never enter a container.
 
@@ -49,13 +49,13 @@ pub const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Read provider defaults from the environment. Returns a config with
 /// `provider = Some(Vllm)` only when both base URL and model are present,
-/// or `Some(Anthropic)` when `TALON_PROVIDER=anthropic` and
-/// `TALON_ANTHROPIC_MODEL` is set.
+/// or `Some(Anthropic)` when `TALAHON_PROVIDER=anthropic` and
+/// `TALAHON_ANTHROPIC_MODEL` is set.
 pub fn load_provider_env_defaults(env: &EnvFile) -> ContainerConfig {
     let mut out = ContainerConfig::default();
 
     let provider = env
-        .get("TALON_PROVIDER")
+        .get("TALAHON_PROVIDER")
         .map(|p| p.trim().to_ascii_lowercase())
         .unwrap_or_else(|| "vllm".to_string());
     if provider == "anthropic" {
@@ -64,43 +64,43 @@ pub fn load_provider_env_defaults(env: &EnvFile) -> ContainerConfig {
         return out;
     }
 
-    let base_url = env.get("TALON_VLLM_BASE_URL");
-    let model = env.get("TALON_VLLM_MODEL");
+    let base_url = env.get("TALAHON_VLLM_BASE_URL");
+    let model = env.get("TALAHON_VLLM_MODEL");
     match (base_url, model) {
         (Some(base_url), Some(model)) => {
             out.provider = Some(ProviderKind::Vllm);
             out.vllm = Some(VllmConfig {
                 base_url,
                 model,
-                fast_model: env.get("TALON_VLLM_FAST_MODEL"),
+                fast_model: env.get("TALAHON_VLLM_FAST_MODEL"),
                 max_context_tokens: env
-                    .get("TALON_VLLM_MAX_CONTEXT")
+                    .get("TALAHON_VLLM_MAX_CONTEXT")
                     .and_then(|v| v.trim().parse().ok()),
                 max_output_tokens: env
-                    .get("TALON_VLLM_MAX_OUTPUT")
+                    .get("TALAHON_VLLM_MAX_OUTPUT")
                     .and_then(|v| v.trim().parse().ok()),
                 temperature: env
-                    .get("TALON_VLLM_TEMPERATURE")
+                    .get("TALAHON_VLLM_TEMPERATURE")
                     .and_then(|v| v.trim().parse().ok()),
                 top_p: env
-                    .get("TALON_VLLM_TOP_P")
+                    .get("TALAHON_VLLM_TOP_P")
                     .and_then(|v| v.trim().parse().ok()),
                 enable_thinking: env
-                    .get("TALON_VLLM_ENABLE_THINKING")
+                    .get("TALAHON_VLLM_ENABLE_THINKING")
                     .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on")),
                 request_timeout_secs: env
-                    .get("TALON_VLLM_TIMEOUT_SECS")
+                    .get("TALAHON_VLLM_TIMEOUT_SECS")
                     .and_then(|v| v.trim().parse().ok()),
             });
         }
         (None, None) => {}
         _ => tracing::warn!(
-            "TALON_VLLM_BASE_URL and TALON_VLLM_MODEL must both be set — vLLM provider disabled"
+            "TALAHON_VLLM_BASE_URL and TALAHON_VLLM_MODEL must both be set — vLLM provider disabled"
         ),
     }
 
     if provider != "vllm" {
-        tracing::warn!(%provider, "unknown TALON_PROVIDER; supported: \"vllm\", \"anthropic\"");
+        tracing::warn!(%provider, "unknown TALAHON_PROVIDER; supported: \"vllm\", \"anthropic\"");
     }
 
     load_blocked_hosts(env, &mut out);
@@ -109,29 +109,29 @@ pub fn load_provider_env_defaults(env: &EnvFile) -> ContainerConfig {
 
 fn load_anthropic(env: &EnvFile, out: &mut ContainerConfig) {
     let Some(model) = env
-        .get("TALON_ANTHROPIC_MODEL")
+        .get("TALAHON_ANTHROPIC_MODEL")
         .filter(|m| !m.trim().is_empty())
     else {
         tracing::warn!(
-            "TALON_PROVIDER=anthropic but TALON_ANTHROPIC_MODEL is not set — provider disabled"
+            "TALAHON_PROVIDER=anthropic but TALAHON_ANTHROPIC_MODEL is not set — provider disabled"
         );
         return;
     };
     out.provider = Some(ProviderKind::Anthropic);
     out.vllm = Some(VllmConfig {
         base_url: env
-            .get("TALON_ANTHROPIC_BASE_URL")
+            .get("TALAHON_ANTHROPIC_BASE_URL")
             .filter(|u| !u.trim().is_empty())
             .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_string()),
         model: model.trim().to_string(),
-        fast_model: env.get("TALON_ANTHROPIC_FAST_MODEL"),
+        fast_model: env.get("TALAHON_ANTHROPIC_FAST_MODEL"),
         max_context_tokens: Some(
-            env.get("TALON_ANTHROPIC_MAX_CONTEXT")
+            env.get("TALAHON_ANTHROPIC_MAX_CONTEXT")
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(ANTHROPIC_DEFAULT_MAX_CONTEXT_TOKENS),
         ),
         max_output_tokens: env
-            .get("TALON_ANTHROPIC_MAX_OUTPUT")
+            .get("TALAHON_ANTHROPIC_MAX_OUTPUT")
             .and_then(|v| v.trim().parse().ok()),
         // Current Claude models reject sampling parameters; the gateway
         // drops them anyway. Thinking is opt-in: with tool use the signed
@@ -140,16 +140,16 @@ fn load_anthropic(env: &EnvFile, out: &mut ContainerConfig) {
         temperature: None,
         top_p: None,
         enable_thinking: env
-            .get("TALON_ANTHROPIC_THINKING")
+            .get("TALAHON_ANTHROPIC_THINKING")
             .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on")),
         request_timeout_secs: env
-            .get("TALON_ANTHROPIC_TIMEOUT_SECS")
+            .get("TALAHON_ANTHROPIC_TIMEOUT_SECS")
             .and_then(|v| v.trim().parse().ok()),
     });
 }
 
 fn load_blocked_hosts(env: &EnvFile, out: &mut ContainerConfig) {
-    if let Some(hosts) = env.get("TALON_BLOCKED_HOSTS") {
+    if let Some(hosts) = env.get("TALAHON_BLOCKED_HOSTS") {
         out.blocked_hosts = hosts
             .split(',')
             .map(str::trim)
@@ -227,11 +227,11 @@ mod tests {
 
     #[test]
     fn env_defaults_require_url_and_model() {
-        let env = EnvFile::from_str_content("TALON_VLLM_BASE_URL=http://v:8000\n");
+        let env = EnvFile::from_str_content("TALAHON_VLLM_BASE_URL=http://v:8000\n");
         assert!(effective_vllm(&load_provider_env_defaults(&env)).is_none());
 
         let env = EnvFile::from_str_content(
-            "TALON_VLLM_BASE_URL=http://v:8000\nTALON_VLLM_MODEL=qwen\nTALON_VLLM_MAX_CONTEXT=131072\nTALON_BLOCKED_HOSTS=a.com, b.com\n",
+            "TALAHON_VLLM_BASE_URL=http://v:8000\nTALAHON_VLLM_MODEL=qwen\nTALAHON_VLLM_MAX_CONTEXT=131072\nTALAHON_BLOCKED_HOSTS=a.com, b.com\n",
         );
         let cfg = load_provider_env_defaults(&env);
         let v = effective_vllm(&cfg).unwrap();
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn anthropic_provider_from_env() {
         let env = EnvFile::from_str_content(
-            "TALON_PROVIDER=anthropic\nTALON_ANTHROPIC_MODEL=claude-sonnet-5-5\nTALON_ANTHROPIC_THINKING=true\n",
+            "TALAHON_PROVIDER=anthropic\nTALAHON_ANTHROPIC_MODEL=claude-sonnet-5-5\nTALAHON_ANTHROPIC_THINKING=true\n",
         );
         let cfg = load_provider_env_defaults(&env);
         assert_eq!(provider_kind(&cfg), Some(ProviderKind::Anthropic));
@@ -259,12 +259,12 @@ mod tests {
         assert_eq!(provider_fingerprint(&cfg), "anthropic:claude-sonnet-5-5");
         assert_eq!(
             ProviderKind::Anthropic.api_key_env(),
-            "TALON_ANTHROPIC_API_KEY"
+            "TALAHON_ANTHROPIC_API_KEY"
         );
 
         // Without a model the provider stays off, even when vLLM keys exist.
         let env = EnvFile::from_str_content(
-            "TALON_PROVIDER=anthropic\nTALON_VLLM_BASE_URL=http://v\nTALON_VLLM_MODEL=a\n",
+            "TALAHON_PROVIDER=anthropic\nTALAHON_VLLM_BASE_URL=http://v\nTALAHON_VLLM_MODEL=a\n",
         );
         assert!(provider_kind(&load_provider_env_defaults(&env)).is_none());
     }
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn group_overrides_and_unions() {
         let env = EnvFile::from_str_content(
-            "TALON_VLLM_BASE_URL=http://v\nTALON_VLLM_MODEL=a\nTALON_BLOCKED_HOSTS=x.com\n",
+            "TALAHON_VLLM_BASE_URL=http://v\nTALAHON_VLLM_MODEL=a\nTALAHON_BLOCKED_HOSTS=x.com\n",
         );
         let defaults = load_provider_env_defaults(&env);
         let mut group = ContainerConfig {

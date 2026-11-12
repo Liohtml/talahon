@@ -1,6 +1,6 @@
 //! # talon-mcp-opensearch — native OpenSearch MCP server
 //!
-//! A stdio MCP server (`talon-opensearch-mcp`) that gives the agent
+//! A stdio MCP server (`talahon-opensearch-mcp`) that gives the agent
 //! read-only access to an OpenSearch / Wazuh-indexer cluster. It is a
 //! drop-in for the read-only tools of the Python `opensearch-mcp-server`
 //! (same tool names, argument names, input schemas, result text and error
@@ -9,7 +9,7 @@
 //! under privilege separation.
 //!
 //! It is **opt-in**: `siem/opensearch-mcp.sh` starts it only when
-//! `TALON_OPENSEARCH_MCP=rust` is set; the Python server stays the default.
+//! `TALAHON_OPENSEARCH_MCP=rust` is set; the Python server stays the default.
 //!
 //! Module map:
 //! - [`config`] — environment variables (`OPENSEARCH_HOSTS`, `VERIFY_CERTS`, ...)
@@ -45,7 +45,8 @@ pub use config::{Config, ConfigError};
 pub use error::ToolError;
 use talon_mcp::McpServer;
 
-/// Name reported as `serverInfo.name` in `initialize`.
+/// Name reported as `serverInfo.name` in `initialize` (a protocol
+/// identifier: it keeps the pre-rename spelling).
 pub const SERVER_NAME: &str = "talon-opensearch-mcp";
 
 /// Build the MCP server for `config`. No request is made until a tool is

@@ -1,5 +1,5 @@
 //! Runtime configuration: filesystem layout, loop limits, and the CLI/env
-//! interface of the `talon-agent` binary.
+//! interface of the `talahon-agent` binary.
 //!
 //! Every path defaults to its container location
 //! (`talon_core::protocol::container_paths`) and can be overridden by a flag
@@ -7,20 +7,20 @@
 //!
 //! | flag | env | default |
 //! |------|-----|---------|
-//! | `--group-dir` | `TALON_AGENT_GROUP_DIR` | `/workspace/group` |
-//! | `--global-dir` | `TALON_AGENT_GLOBAL_DIR` | `/workspace/global` |
-//! | `--project-dir` | `TALON_AGENT_PROJECT_DIR` | `/workspace/project` |
-//! | `--extra-dir` | `TALON_AGENT_EXTRA_DIR` | `/workspace/extra` |
-//! | `--ipc-dir` | `TALON_AGENT_IPC_DIR` | `/workspace/ipc` |
-//! | `--state-dir` | `TALON_AGENT_STATE_DIR` | `/home/agent/.talon` |
-//! | `--mcp-config` | `TALON_AGENT_MCP_CONFIG` | `<group-dir>/.mcp.json` |
-//! | `--mcp-socket-dir` | `TALON_MCP_SOCKET_DIR` | unset (spawn MCP servers directly) |
-//! | `--max-iterations` | `TALON_AGENT_MAX_ITERATIONS` | `50` |
-//! | `--self-check` | `TALON_AGENT_SELF_CHECK` | `true` |
-//! | `--compact-threshold` | `TALON_AGENT_COMPACT_THRESHOLD` | `0.75` |
-//! | `--ipc-poll-ms` | `TALON_AGENT_IPC_POLL_MS` | `500` |
-//! | `--tool-timeout-secs` | `TALON_AGENT_TOOL_TIMEOUT_SECS` | `900` |
-//! | `--max-input-bytes` | `TALON_AGENT_MAX_INPUT_BYTES` | 16 MiB |
+//! | `--group-dir` | `TALAHON_AGENT_GROUP_DIR` | `/workspace/group` |
+//! | `--global-dir` | `TALAHON_AGENT_GLOBAL_DIR` | `/workspace/global` |
+//! | `--project-dir` | `TALAHON_AGENT_PROJECT_DIR` | `/workspace/project` |
+//! | `--extra-dir` | `TALAHON_AGENT_EXTRA_DIR` | `/workspace/extra` |
+//! | `--ipc-dir` | `TALAHON_AGENT_IPC_DIR` | `/workspace/ipc` |
+//! | `--state-dir` | `TALAHON_AGENT_STATE_DIR` | `/home/agent/.talon` |
+//! | `--mcp-config` | `TALAHON_AGENT_MCP_CONFIG` | `<group-dir>/.mcp.json` |
+//! | `--mcp-socket-dir` | `TALAHON_MCP_SOCKET_DIR` | unset (spawn MCP servers directly) |
+//! | `--max-iterations` | `TALAHON_AGENT_MAX_ITERATIONS` | `50` |
+//! | `--self-check` | `TALAHON_AGENT_SELF_CHECK` | `true` |
+//! | `--compact-threshold` | `TALAHON_AGENT_COMPACT_THRESHOLD` | `0.75` |
+//! | `--ipc-poll-ms` | `TALAHON_AGENT_IPC_POLL_MS` | `500` |
+//! | `--tool-timeout-secs` | `TALAHON_AGENT_TOOL_TIMEOUT_SECS` | `900` |
+//! | `--max-input-bytes` | `TALAHON_AGENT_MAX_INPUT_BYTES` | 16 MiB |
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -164,7 +164,7 @@ impl Default for LoopSettings {
     }
 }
 
-/// Everything `talon-agent run` needs besides the `ContainerInput`.
+/// Everything `talahon-agent run` needs besides the `ContainerInput`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunConfig {
     /// Filesystem layout.
@@ -189,50 +189,50 @@ impl Default for RunConfig {
     }
 }
 
-/// CLI/env options of `talon-agent run` (also accepted by `supervise`).
+/// CLI/env options of `talahon-agent run` (also accepted by `supervise`).
 #[derive(Debug, Clone, clap::Args)]
 pub struct RunArgs {
     /// Group folder (cwd of the agent and its tools).
-    #[arg(long, env = "TALON_AGENT_GROUP_DIR", default_value = container_paths::GROUP)]
+    #[arg(long, env = "TALAHON_AGENT_GROUP_DIR", default_value = container_paths::GROUP)]
     pub group_dir: PathBuf,
     /// Shared global memory (read-only).
-    #[arg(long, env = "TALON_AGENT_GLOBAL_DIR", default_value = container_paths::GLOBAL)]
+    #[arg(long, env = "TALAHON_AGENT_GLOBAL_DIR", default_value = container_paths::GLOBAL)]
     pub global_dir: PathBuf,
     /// Project root (main group only, read-only).
-    #[arg(long, env = "TALON_AGENT_PROJECT_DIR", default_value = container_paths::PROJECT)]
+    #[arg(long, env = "TALAHON_AGENT_PROJECT_DIR", default_value = container_paths::PROJECT)]
     pub project_dir: PathBuf,
     /// Additional mounts root.
-    #[arg(long, env = "TALON_AGENT_EXTRA_DIR", default_value = container_paths::EXTRA)]
+    #[arg(long, env = "TALAHON_AGENT_EXTRA_DIR", default_value = container_paths::EXTRA)]
     pub extra_dir: PathBuf,
     /// IPC namespace root.
-    #[arg(long, env = "TALON_AGENT_IPC_DIR", default_value = container_paths::IPC)]
+    #[arg(long, env = "TALAHON_AGENT_IPC_DIR", default_value = container_paths::IPC)]
     pub ipc_dir: PathBuf,
     /// Persistent per-lane agent state (sessions, conversation archives).
-    #[arg(long, env = "TALON_AGENT_STATE_DIR", default_value = container_paths::AGENT_STATE)]
+    #[arg(long, env = "TALAHON_AGENT_STATE_DIR", default_value = container_paths::AGENT_STATE)]
     pub state_dir: PathBuf,
     /// MCP server definitions (default `<group-dir>/.mcp.json`).
-    #[arg(long, env = "TALON_AGENT_MCP_CONFIG")]
+    #[arg(long, env = "TALAHON_AGENT_MCP_CONFIG")]
     pub mcp_config: Option<PathBuf>,
     /// Unix-socket directory of supervisor-managed MCP servers.
-    #[arg(long, env = "TALON_MCP_SOCKET_DIR")]
+    #[arg(long, env = "TALAHON_MCP_SOCKET_DIR")]
     pub mcp_socket_dir: Option<PathBuf>,
     /// Tool-calling iterations per turn before a final answer is forced.
-    #[arg(long, env = "TALON_AGENT_MAX_ITERATIONS", default_value_t = 50)]
+    #[arg(long, env = "TALAHON_AGENT_MAX_ITERATIONS", default_value_t = 50)]
     pub max_iterations: u32,
     /// Self-check pass for investigation answers.
-    #[arg(long, env = "TALON_AGENT_SELF_CHECK", default_value_t = true, value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    #[arg(long, env = "TALAHON_AGENT_SELF_CHECK", default_value_t = true, value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set)]
     pub self_check: bool,
     /// Compaction threshold as a fraction of the context window (0.3 - 0.95).
-    #[arg(long, env = "TALON_AGENT_COMPACT_THRESHOLD", default_value_t = 0.75)]
+    #[arg(long, env = "TALAHON_AGENT_COMPACT_THRESHOLD", default_value_t = 0.75)]
     pub compact_threshold: f64,
     /// IPC polling interval in milliseconds.
-    #[arg(long, env = "TALON_AGENT_IPC_POLL_MS", default_value_t = 500)]
+    #[arg(long, env = "TALAHON_AGENT_IPC_POLL_MS", default_value_t = 500)]
     pub ipc_poll_ms: u64,
     /// Safety-net timeout per tool call, seconds.
-    #[arg(long, env = "TALON_AGENT_TOOL_TIMEOUT_SECS", default_value_t = 900)]
+    #[arg(long, env = "TALAHON_AGENT_TOOL_TIMEOUT_SECS", default_value_t = 900)]
     pub tool_timeout_secs: u64,
     /// Maximum size of the stdin ContainerInput.
-    #[arg(long, env = "TALON_AGENT_MAX_INPUT_BYTES", default_value_t = DEFAULT_MAX_INPUT_BYTES)]
+    #[arg(long, env = "TALAHON_AGENT_MAX_INPUT_BYTES", default_value_t = DEFAULT_MAX_INPUT_BYTES)]
     pub max_input_bytes: usize,
 }
 

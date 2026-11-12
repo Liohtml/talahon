@@ -30,11 +30,11 @@ pub enum StdinSource {
 /// in the CLI, or [`SetupContext::new`] for a deterministic context.
 #[derive(Clone)]
 pub struct SetupContext {
-    /// Talon checkout / install directory (contains `.env`, `groups/`, ...).
+    /// Talahon checkout / install directory (contains `.env`, `groups/`, ...).
     pub project_root: PathBuf,
     /// The invoking user's home directory.
     pub home_dir: PathBuf,
-    /// `~/.config/talon` (mount allowlist, sender allowlist).
+    /// `~/.config/talahon` (mount allowlist, sender allowlist).
     pub config_dir: PathBuf,
     /// Resolved configuration (`.env` + process env).
     pub config: TalonConfig,
@@ -42,7 +42,7 @@ pub struct SetupContext {
     pub platform: PlatformInfo,
     /// Command runner (real or scripted).
     pub runner: Arc<dyn CommandRunner>,
-    /// The `talon` binary the service should run (`<binary> run`).
+    /// The `talahon` binary the service should run (`<binary> run`).
     pub talon_binary: PathBuf,
     /// Source of stdin for steps that read it (`mounts`).
     pub stdin: StdinSource,
@@ -79,13 +79,37 @@ impl std::fmt::Debug for SetupContext {
     }
 }
 
+/// Name of the host binary.
+pub const BINARY_NAME: &str = "talahon";
+/// Its name up to 2.x (still installed as an alias).
+pub const LEGACY_BINARY_NAME: &str = "talon";
+
+/// The binary units and scripts should point at: `exe`, or, when setup was
+/// started through the deprecated `talon` alias and `talahon` is installed
+/// next to it, that `talahon`. Generated units then keep working once the
+/// alias is gone.
+pub fn preferred_binary(exe: PathBuf) -> PathBuf {
+    if exe.file_name().and_then(|n| n.to_str()) != Some(LEGACY_BINARY_NAME) {
+        return exe;
+    }
+    let sibling = exe.with_file_name(BINARY_NAME);
+    if crate::runner::is_executable(&sibling) {
+        sibling
+    } else {
+        exe
+    }
+}
+
+/// `~/.config/talahon`, or the pre-rename `~/.config/talon` when only that
+/// exists (exactly one is authoritative, see
+/// [`talon_core::paths::resolve_config_dir`]).
 fn default_config_dir(home: &Path) -> PathBuf {
-    home.join(".config").join("talon")
+    talon_core::paths::resolve_config_dir(home).path
 }
 
 impl SetupContext {
     /// Context for the real host: detects the platform, uses the system
-    /// command runner, the current executable as the `talon` binary and the
+    /// command runner, the current executable as the `talahon` binary and the
     /// process stdin.
     pub fn detect(project_root: &Path) -> Self {
         let home_dir = platform::home_dir();
@@ -101,14 +125,14 @@ impl SetupContext {
         ];
         ctx.systemd_system_dir = PathBuf::from("/etc/systemd/system");
         if let Ok(exe) = std::env::current_exe() {
-            ctx.talon_binary = exe;
+            ctx.talon_binary = preferred_binary(exe);
         }
         ctx
     }
 
     /// Deterministic context: Linux without systemd, unknown uid, no
-    /// detected timezones, stdin empty, `talon` binary assumed at
-    /// `<project_root>/target/release/talon`.
+    /// detected timezones, stdin empty, `talahon` binary assumed at
+    /// `<project_root>/target/release/talahon`.
     pub fn new(project_root: &Path, home_dir: &Path, runner: Arc<dyn CommandRunner>) -> Self {
         let config = TalonConfig::from_env(project_root, EnvFile::load(project_root));
         Self {
@@ -124,7 +148,10 @@ impl SetupContext {
                 uid: None,
             },
             runner,
-            talon_binary: project_root.join("target").join("release").join("talon"),
+            talon_binary: project_root
+                .join("target")
+                .join("release")
+                .join(BINARY_NAME),
             stdin: StdinSource::Text(String::new()),
             env_tz: None,
             system_tz: None,
@@ -253,11 +280,54 @@ mod tests {
         assert_eq!(ctx.db_path(), dir.path().join("store").join("messages.db"));
         assert_eq!(
             ctx.mount_allowlist_path(),
-            home.join(".config/talon/mount-allowlist.json")
+            home.join(".config/talahon/mount-allowlist.json")
         );
         ctx.stdin = StdinSource::Text("abc".into());
         assert_eq!(ctx.read_stdin(10).await.unwrap(), "abc");
         assert!(ctx.read_stdin(2).await.is_err());
+    }
+
+    #[test]
+    fn setup_started_through_the_old_alias_points_units_at_the_new_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("talon");
+        let new = dir.path().join("talahon");
+        std::fs::write(&old, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Only the alias exists (e.g. a hand-made copy): keep it.
+        assert_eq!(preferred_binary(old.clone()), old);
+        // `talahon` installed next to it: units get the name that stays.
+        std::fs::write(&new, "#!/bin/sh\n").unwrap();
+        assert_eq!(preferred_binary(old.clone()), old, "not executable yet");
+        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(preferred_binary(old), new);
+        // Any other name is taken as it is.
+        assert_eq!(preferred_binary(new.clone()), new);
+        let other = dir.path().join("talon-dev");
+        assert_eq!(preferred_binary(other.clone()), other);
+    }
+
+    #[test]
+    fn config_dir_falls_back_to_the_pre_rename_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let runner = || Arc::new(crate::runner::mock::MockRunner::new());
+        // Fresh install.
+        let ctx = SetupContext::new(dir.path(), &home, runner());
+        assert_eq!(ctx.config_dir, home.join(".config/talahon"));
+        // Upgraded install: the allowlists stay where they are.
+        std::fs::create_dir_all(home.join(".config/talon")).unwrap();
+        let ctx = SetupContext::new(dir.path(), &home, runner());
+        assert_eq!(ctx.config_dir, home.join(".config/talon"));
+        assert_eq!(
+            ctx.mount_allowlist_path(),
+            home.join(".config/talon/mount-allowlist.json")
+        );
+        // Once ~/.config/talahon exists it alone is used.
+        std::fs::create_dir_all(home.join(".config/talahon")).unwrap();
+        let ctx = SetupContext::new(dir.path(), &home, runner());
+        assert_eq!(ctx.config_dir, home.join(".config/talahon"));
     }
 
     #[test]

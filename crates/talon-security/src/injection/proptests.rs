@@ -156,7 +156,7 @@ proptest! {
         prop_assert_eq!(out.matches("</untrusted_data").count(), 1);
     }
 
-    /// The only `[talon-guard]` line is the one Talon adds (directly after
+    /// The only `[talon-guard]` line is the one Talahon adds (directly after
     /// the opening tag, iff the report is suspicious), and stdout frame
     /// markers never survive.
     #[test]

@@ -103,7 +103,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.bump.outputs.tag }}
-        run: gh release create "$TAG" --verify-tag --title "Talon $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+        run: gh release create "$TAG" --verify-tag --title "Talahon $TAG" --notes-file "$RUNNER_TEMP/notes.md"
 
       - name: Publish to crates.io
         # Also runs when nothing new was tagged: finishes an interrupted publish.

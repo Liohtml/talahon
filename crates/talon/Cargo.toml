@@ -1,6 +1,6 @@
 [package]
 name = "talahon"
-description = "Talon — automated AI SOC analyst (host orchestrator)"
+description = "Talahon — automated AI SOC analyst (host orchestrator)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,21 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories = ["command-line-utilities"]
-default-run = "talon"
+default-run = "talahon"
 
 [lib]
 name = "talon"
 path = "src/lib.rs"
 
 [[bin]]
-name = "talon"
+name = "talahon"
 path = "src/main.rs"
+
+# The name of the binary up to 2.x: same code, prints a deprecation notice.
+# Removed in the next major version.
+[[bin]]
+name = "talon"
+path = "src/bin/talon.rs"
 
 [dependencies]
 talon-core = { workspace = true }
@@ -46,7 +52,7 @@ futures = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
-# `talon eval run`: client of the CoPilot HTTP API.
+# `talahon eval run`: client of the CoPilot HTTP API.
 reqwest = { workspace = true }
 # Descriptor-relative, symlink-safe reads of agent-written files (MYTH-10).
 rustix = { version = "1", features = ["fs"] }

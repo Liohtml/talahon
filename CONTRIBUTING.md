@@ -1,6 +1,6 @@
-# Contributing to Talon
+# Contributing to Talahon
 
-Talon processes live SOC alert data and runs with access to customer SIEM
+Talahon processes live SOC alert data and runs with access to customer SIEM
 environments. Contributions are welcome, and every change is reviewed with a
 security-first lens.
 
@@ -23,7 +23,7 @@ security-first lens.
 - Anonymizer improvements (`talon-anon`, `siem/anon_proxy/fields.yaml` and its
   embedded copy `crates/talon-anon/fields.yaml`)
 - New investigation templates in `groups/copilot/prompts/` (no code needed)
-- Investigation workflow improvements in `groups/copilot/CLAUDE.md`
+- Investigation workflow improvements in `groups/copilot/AGENT.md`
 - New channels or MCP integrations that follow the existing security contracts
 - Documentation fixes
 
@@ -41,7 +41,7 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
-./container/build.sh            # when you touch container/ or talon-agent
+./container/build.sh            # when you touch container/ or crates/talon-agent
 ```
 
 CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
@@ -71,7 +71,7 @@ names `talon-*` / `talon_*`: `cargo test -p talahon-core` tests
   and never derive identity or permissions from its contents.
 - Record security decisions through `talon_core::audit`.
 - `talon-core` is the host ↔ container contract. Change it deliberately and
-  update both the host (`talon`) and the agent (`talon-agent`) in the same PR.
+  update both the host (`talahon`) and the agent (`talahon-agent`) in the same PR.
 - Add tests for every behaviour change; security fixes need a regression test
   that fails without the fix.
 

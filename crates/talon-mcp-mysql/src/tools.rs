@@ -324,8 +324,8 @@ fn shape_of(query: &str) -> Shape {
 
 fn truncation_note(rows: &Rows) -> Option<String> {
     let limit = match rows.truncated? {
-        Truncation::Rows(n) => format!("{n} rows (TALON_MYSQL_MAX_ROWS)"),
-        Truncation::Bytes(n) => format!("{n} bytes (TALON_MYSQL_MAX_RESULT_BYTES)"),
+        Truncation::Rows(n) => format!("{n} rows (TALAHON_MYSQL_MAX_ROWS)"),
+        Truncation::Bytes(n) => format!("{n} bytes (TALAHON_MYSQL_MAX_RESULT_BYTES)"),
     };
     Some(format!(
         "[RESULT TRUNCATED: only the first {} rows are shown; the result exceeds the limit of \
@@ -747,13 +747,13 @@ mod tests {
         assert_eq!(
             text,
             "id\n1\n2\n[RESULT TRUNCATED: only the first 2 rows are shown; the result exceeds \
-             the limit of 2 rows (TALON_MYSQL_MAX_ROWS). Narrow the query with WHERE or LIMIT, \
+             the limit of 2 rows (TALAHON_MYSQL_MAX_ROWS). Narrow the query with WHERE or LIMIT, \
              or select fewer columns.]"
         );
         r.truncated = Some(Truncation::Bytes(4096));
         let text = format_outcome("SHOW TABLES", &Outcome::Rows(r.clone()), Some("d"));
         assert!(text.starts_with("Tables_in_d\n1\n2\n[RESULT TRUNCATED: only the first 2 rows"));
-        assert!(text.contains("4096 bytes (TALON_MYSQL_MAX_RESULT_BYTES)"));
+        assert!(text.contains("4096 bytes (TALAHON_MYSQL_MAX_RESULT_BYTES)"));
         // No row fitted: still the header and the marker, not "No results".
         r.rows.clear();
         let text = format_outcome("SELECT blob FROM t", &Outcome::Rows(r), None);

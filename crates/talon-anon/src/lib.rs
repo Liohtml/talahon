@@ -17,7 +17,7 @@
 //! - [`detect`] — IP classification helpers
 //! - [`jsonrpc`] — JSON-RPC 2.0 helpers on `serde_json::Value`
 //! - [`proxy`] — the line-delimited JSON-RPC proxy used by the
-//!   `talon-anon-proxy` binary
+//!   `talahon-anon-proxy` binary
 //!
 //! ```
 //! use std::sync::Arc;

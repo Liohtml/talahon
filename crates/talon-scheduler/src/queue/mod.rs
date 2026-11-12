@@ -80,7 +80,7 @@ pub trait RunningContainer: Send + Sync {
 pub struct QueueConfig {
     /// Global limit of concurrently running lane jobs (min 1).
     pub max_concurrent: usize,
-    /// Talon `data/` directory; IPC input files go to
+    /// Talahon `data/` directory; IPC input files go to
     /// `<data_dir>/ipc/<ipc_key>/input/`.
     pub data_dir: PathBuf,
     /// Backoff for failed message runs.

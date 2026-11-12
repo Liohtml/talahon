@@ -1,7 +1,7 @@
 #!/bin/bash -p
-# talon-entrypoint — agent container entrypoint (docs/RUST_ARCHITECTURE.md §3.3).
+# talahon-entrypoint — agent container entrypoint (docs/RUST_ARCHITECTURE.md §3.3).
 #
-# Installed as /usr/local/bin/talon-entrypoint. The host starts the container
+# Installed as /usr/local/bin/talahon-entrypoint. The host starts the container
 # as root with --cap-drop=ALL plus CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,KILL,
 # no-new-privileges and a read-only root filesystem. As root this script:
 #
@@ -19,10 +19,10 @@
 #   5. copies every staged secret /etc/mcp-staging/<id>.<file> (root-only
 #      host bind mounts) to /etc/mcp-secrets/<id>.<file>, owner mcp-<id>,
 #      mode 0600 — only that MCP's user can read it,
-#   6. execs `talon-agent supervise`, which reads the ContainerInput from
+#   6. execs `talahon-agent supervise`, which reads the ContainerInput from
 #      stdin, runs each MCP server as its mcp-* user and the agent as `agent`.
 #
-# Not root (dev / degraded mode): exec `talon-agent run` directly.
+# Not root (dev / degraded mode): exec `talahon-agent run` directly.
 #
 # This script never reads stdin (the supervisor does) and never writes to
 # stdout (stdout carries the output frames); diagnostics go to stderr.
@@ -40,14 +40,18 @@ unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT BASH_ENV ENV CDPATH GLOBIGNORE \
       PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE \
       PERL5LIB PERL5OPT RUBYOPT NODE_OPTIONS GLIBC_TUNABLES 2>/dev/null || true
 
-readonly AGENT_BIN=/usr/local/bin/talon-agent
+AGENT_BIN=/usr/local/bin/talahon-agent
+# The binary was called talon-agent up to 2.x; an image assembled around this
+# script that has only the old name still starts.
+[ -x "$AGENT_BIN" ] || [ ! -x /usr/local/bin/talon-agent ] || AGENT_BIN=/usr/local/bin/talon-agent
+readonly AGENT_BIN
 readonly STAGING_DIR=/etc/mcp-staging
 readonly SECRETS_DIR=/etc/mcp-secrets
 readonly PALACE_DATA=/workspace/extra/mempalace-data
 readonly PALACE_USER=mcp-palace
 readonly MAX_ID=4294967294
 
-log() { printf 'talon-entrypoint: %s\n' "$*" >&2; }
+log() { printf 'talahon-entrypoint: %s\n' "$*" >&2; }
 die() {
     log "FATAL: $*"
     exit 70

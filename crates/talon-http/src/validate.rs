@@ -164,7 +164,7 @@ mod tests {
     fn template_names() {
         assert!(is_valid_template_name("sysmon_event_1.txt"));
         assert!(is_valid_template_name("sysmon_event_1.v2.txt"));
-        assert!(!is_valid_template_name("../CLAUDE.md"));
+        assert!(!is_valid_template_name("../AGENT.md"));
         assert!(!is_valid_template_name("../../etc/passwd.txt"));
         assert!(!is_valid_template_name("a/b.txt"));
         assert!(!is_valid_template_name("a\\b.txt"));

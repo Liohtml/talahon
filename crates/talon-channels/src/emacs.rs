@@ -8,7 +8,7 @@
 //!   "timestamp"}]}` with every buffered reply newer than `since`.
 //! - Outbound replies are buffered (newest 200).
 //! - On connect the `emacs:default` group is auto-registered (persisted)
-//!   and a Markdown-formatting `CLAUDE.md` is bootstrapped in its folder.
+//!   and a Markdown-formatting `AGENT.md` is bootstrapped in its folder.
 //!
 //! Hardened: the listener is bound to loopback only, a bearer token is
 //! **required** (the bridge stays disabled without `EMACS_AUTH_TOKEN`)
@@ -21,14 +21,22 @@
 //!
 //! **Own folder.** The lane runs in its own real `groups/emacs` directory,
 //! never a link to the main group's folder (a non-main lane writing there
-//! could rewrite the `CLAUDE.md` that becomes main's system prompt). A leftover legacy symlink is never
-//! followed or deleted: the bridge refuses to start and tells the operator
-//! how to replace it. `CLAUDE.md` is created with `O_CREAT | O_EXCL`, so a
-//! planted (even dangling) symlink can never redirect the write to a host
-//! file.
+//! could rewrite the instructions that become main's system prompt). A
+//! leftover legacy symlink is never followed or deleted: the bridge refuses
+//! to start and tells the operator how to replace it.
+//!
+//! **Instructions.** `AGENT.md` is bootstrapped only while the folder has
+//! neither `AGENT.md` nor the legacy `CLAUDE.md` in any form
+//! (`talon_security::instructions`): an installation that still uses
+//! `CLAUDE.md` keeps it and gets no `AGENT.md` next to it (that would take
+//! precedence over the operator's file), and nothing is ever replaced. The
+//! file is created with `O_CREAT | O_EXCL | O_NOFOLLOW`, so a planted (even
+//! dangling) symlink under either name can never redirect the write to a
+//! host file.
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,6 +59,7 @@ use talon_core::env::EnvFile;
 use talon_core::time::now_iso;
 use talon_core::types::{ChatMetadata, NewMessage, RegisteredGroup};
 use talon_core::{Error, Result};
+use talon_security::instructions::{self, AGENT_INSTRUCTIONS_FILE, InstructionFiles};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -87,7 +96,7 @@ pub fn server_limits() -> talon_net::ServerLimits {
     }
 }
 
-const CLAUDE_MD: &str = "## Message Formatting
+const AGENT_MD: &str = "## Message Formatting
 
 This is an Emacs channel. Responses are automatically converted from markdown
 to org-mode by the bridge before display.
@@ -111,7 +120,7 @@ pub struct EmacsConfig {
     /// Bearer token the Emacs client must present. Required; never logged.
     pub auth_token: String,
     /// `groups/` directory holding the lane's own `emacs` folder and its
-    /// `CLAUDE.md`. `None` skips the filesystem bootstrap.
+    /// `AGENT.md`. `None` skips the filesystem bootstrap.
     pub groups_dir: Option<PathBuf>,
 }
 
@@ -272,7 +281,7 @@ impl EmacsBridgeChannel {
                 // the lane then does not use the folder prepared here.
                 warn!(
                     folder = %existing.folder,
-                    "Emacs lane is registered on a folder other than groups/emacs; it shares that folder's files and CLAUDE.md"
+                    "Emacs lane is registered on a folder other than groups/emacs; it shares that folder's files and instructions"
                 );
             }
             return;
@@ -334,52 +343,76 @@ fn prepare_group_dir(groups_dir: &Path) -> Result<PathBuf> {
             .unwrap_or_else(|_| "?".to_string());
         return Err(Error::Config(format!(
             "Emacs bridge not started: {dir} is a symlink to {target} (legacy layout that let \
-             the non-main Emacs lane write another group's folder and CLAUDE.md). Replace it \
+             the non-main Emacs lane write another group's folder and instructions). Replace it \
              with a real directory: `rm {dir}` (removes only the link, not its target), copy \
-             any instructions the Emacs lane should keep into {dir}/CLAUDE.md, then restart \
-             Talon. The bridge creates the folder itself when it is missing.",
+             any instructions the Emacs lane should keep into {dir}/AGENT.md, then restart \
+             Talahon. The bridge creates the folder itself when it is missing.",
             dir = dir.display()
         )));
     }
     if !meta.is_dir() {
         return Err(Error::Config(format!(
             "Emacs bridge not started: {} exists but is not a directory; move it away and \
-             restart Talon",
+             restart Talahon",
             dir.display()
         )));
     }
     Ok(dir)
 }
 
-/// Bootstrap `<dir>/CLAUDE.md` with the Emacs formatting instructions.
+/// Bootstrap `<dir>/AGENT.md` with the Emacs formatting instructions.
 ///
-/// The file is opened with `create_new` (`O_CREAT | O_EXCL`), which fails on
+/// Only when the folder has neither `AGENT.md` nor the legacy `CLAUDE.md`
+/// in any form (file, placeholder, symlink, ...): an existing file of
+/// either name is the operator's and is left untouched, and no `AGENT.md`
+/// is created next to a `CLAUDE.md` (it would take precedence over it).
+/// The file is opened with `O_CREAT | O_EXCL | O_NOFOLLOW`, which fails on
 /// any existing entry, including a dangling symlink: an agent-planted link
-/// can never redirect the write to a host file, and an existing file is
-/// left untouched.
-fn ensure_claude_md(dir: &Path) {
-    let path = dir.join("CLAUDE.md");
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, CLAUDE_MD.as_bytes()));
-    match written {
-        Ok(()) => info!("Emacs channel: wrote CLAUDE.md"),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let is_link = std::fs::symlink_metadata(&path)
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false);
-            if is_link {
-                warn!(
-                    path = %path.display(),
-                    "Emacs channel: CLAUDE.md is a symlink; left untouched (never written through)"
-                );
-            } else {
-                debug!("Emacs channel: CLAUDE.md already exists");
-            }
+/// can never redirect the write to a host file.
+fn ensure_instructions(dir: &Path) {
+    let fd = match instructions::open_dir(dir) {
+        Ok(fd) => fd,
+        Err(e) => {
+            warn!(err = %e, "Emacs channel: could not open the group folder");
+            return;
         }
-        Err(e) => warn!(err = %e, "Emacs channel: could not write CLAUDE.md"),
+    };
+    let files = match InstructionFiles::inspect_at(fd.as_fd()) {
+        Ok(files) => files,
+        Err(e) => {
+            warn!(err = %e, "Emacs channel: could not inspect the group instructions");
+            return;
+        }
+    };
+    if let Some(found) = files.unsafe_entry() {
+        warn!(
+            dir = %dir.display(),
+            reason = %found,
+            "Emacs channel: instructions left untouched (never written through); the lane will not start until this is a regular file"
+        );
+        return;
+    }
+    if files.is_conflict() {
+        warn!(
+            dir = %dir.display(),
+            fix = instructions::CONFLICT_FIX,
+            "Emacs channel: the folder has both AGENT.md and CLAUDE.md with content; both left untouched, the lane will not start until exactly one is kept"
+        );
+        return;
+    }
+    if !files.is_vacant() {
+        debug!(
+            legacy = files.uses_legacy(),
+            "Emacs channel: group instructions already exist"
+        );
+        return;
+    }
+    match instructions::create_new_at(fd.as_fd(), AGENT_INSTRUCTIONS_FILE, AGENT_MD.as_bytes()) {
+        Ok(()) => info!("Emacs channel: wrote AGENT.md"),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            debug!("Emacs channel: AGENT.md appeared concurrently; kept");
+        }
+        Err(e) => warn!(err = %e, "Emacs channel: could not write AGENT.md"),
     }
 }
 
@@ -404,7 +437,7 @@ impl Channel for EmacsBridgeChannel {
         // logs the returned error and keeps running without the bridge.
         if let Some(groups_dir) = &self.groups_dir {
             let dir = prepare_group_dir(groups_dir)?;
-            ensure_claude_md(&dir);
+            ensure_instructions(&dir);
         }
         self.ensure_group_registered().await;
 

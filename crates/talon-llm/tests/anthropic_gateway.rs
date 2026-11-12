@@ -92,7 +92,7 @@ async fn non_streaming_chat_is_translated_both_ways_with_the_api_key_on_the_host
     };
     let req = client
         .request(vec![
-            ChatMessage::system("You are Talon."),
+            ChatMessage::system("You are Talahon."),
             ChatMessage::user("alert 7"),
         ])
         .tools([&spec]);
@@ -111,7 +111,7 @@ async fn non_streaming_chat_is_translated_both_ways_with_the_api_key_on_the_host
     assert!(sent[0].headers.get("authorization").is_none());
     let body: Value = sent[0].body_json().unwrap();
     assert_eq!(body["model"], MODEL);
-    assert_eq!(body["system"][0]["text"], "You are Talon.");
+    assert_eq!(body["system"][0]["text"], "You are Talahon.");
     assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["tools"][0]["name"], "lookup");
@@ -247,5 +247,5 @@ async fn gateway_refuses_to_start_without_an_anthropic_key() {
     let err = LlmGateway::start(gw, Arc::new(MemoryAuditSink::default()))
         .await
         .expect_err("must not start");
-    assert!(err.to_string().contains("TALON_ANTHROPIC_API_KEY"));
+    assert!(err.to_string().contains("TALAHON_ANTHROPIC_API_KEY"));
 }

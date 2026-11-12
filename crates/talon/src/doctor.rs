@@ -1,13 +1,16 @@
-//! `talon doctor`: one command that explains why Talon can or cannot run.
+//! `talahon doctor`: one command that explains why Talahon can or cannot run.
 //!
-//! Prints machine-readable blocks (same format as `talon setup`):
+//! Prints machine-readable blocks (same format as `talahon setup`):
 //! `CHECK_ENVIRONMENT` and `CHECK_VLLM` from `talon-setup`, then
 //! `CHECK_GATEWAY` (bind address the LLM gateway would use and whether
 //! containers can reach it), `CHECK_EXPOSURE` (vLLM API key requirement,
 //! HTTP API bind address — MYTH-05), `CHECK_NETWORK` (the dedicated agent
-//! network exists — MYTH-05), `AUDIT_VERIFY`, and a final `DOCTOR`
-//! summary with one hint per problem. Exit code 0 when no problem was
-//! found.
+//! network exists — MYTH-05), `CHECK_INSTRUCTIONS` (which file holds each
+//! group folder's instructions: `AGENT.md`, or the legacy `CLAUDE.md` —
+//! MYTH-09), `CHECK_RENAME` (what this installation still uses under the
+//! pre-rename name `talon`: `TALON_*` keys, `~/.config/talon`), `AUDIT_VERIFY`,
+//! and a final `DOCTOR` summary with one hint per problem. Exit code 0 when
+//! no problem was found.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -20,6 +23,7 @@ use talon_core::config::TalonConfig;
 use talon_core::provider::effective_vllm;
 use talon_db::{Db, DbOptions, default_db_path};
 use talon_http::HttpConfig;
+use talon_security::instructions::InstructionFiles;
 use talon_setup::checks::check_port;
 use talon_setup::{SetupContext, StatusBlock, Step, StepArgs, run_step};
 
@@ -36,45 +40,51 @@ pub fn hint(issue: &str) -> &'static str {
             "CONTAINER_RUNTIME is not installed; another runtime was found and will be used"
         }
         "image_missing" => {
-            "build the agent image: ./container/build.sh (or `talon setup container`)"
+            "build the agent image: ./container/build.sh (or `talahon setup container`)"
+        }
+        "image_has_old_name" => {
+            "an image with the pre-rename name exists (CHECK_ENVIRONMENT LEGACY_IMAGE) but is \
+             not used: the agent image is now called talahon-agent. Rebuild it with \
+             ./container/build.sh; to keep running the old image on purpose set \
+             CONTAINER_IMAGE to its name"
         }
         "vllm_not_configured" => {
-            "set TALON_VLLM_BASE_URL and TALON_VLLM_MODEL in .env (see .env.example); without them \
+            "set TALAHON_VLLM_BASE_URL and TALAHON_VLLM_MODEL in .env (see .env.example); without them \
              the LLM gateway does not start and every agent run fails"
         }
-        "vllm_invalid_url" => "TALON_VLLM_BASE_URL must be an http(s) URL, e.g. http://vllm:8000",
+        "vllm_invalid_url" => "TALAHON_VLLM_BASE_URL must be an http(s) URL, e.g. http://vllm:8000",
         "vllm_unreachable" => {
             "vLLM is not reachable from this host (network, firewall, server down)"
         }
         "vllm_auth_failed" => {
-            "vLLM rejected the key: set TALON_VLLM_API_KEY in .env to vLLM's --api-key"
+            "vLLM rejected the key: set TALAHON_VLLM_API_KEY in .env to vLLM's --api-key"
         }
         "vllm_api_key_unset" => {
-            "TALON_VLLM_API_KEY is not set, so the LLM gateway refuses to start (without a key \
+            "TALAHON_VLLM_API_KEY is not set, so the LLM gateway refuses to start (without a key \
              containers could call vLLM directly and bypass the gateway): start vLLM with \
              --api-key and put the same value in .env; only if containers provably cannot reach \
-             vLLM, set TALON_VLLM_ALLOW_NO_API_KEY=true"
+             vLLM, set TALAHON_VLLM_ALLOW_NO_API_KEY=true"
         }
         "vllm_model_missing" => {
-            "TALON_VLLM_MODEL is not served by vLLM (compare with --served-model-name / MODELS)"
+            "TALAHON_VLLM_MODEL is not served by vLLM (compare with --served-model-name / MODELS)"
         }
         "vllm_http_error" | "vllm_invalid_response" => {
-            "vLLM answered /v1/models unexpectedly; check TALON_VLLM_BASE_URL points at vLLM"
+            "vLLM answered /v1/models unexpectedly; check TALAHON_VLLM_BASE_URL points at vLLM"
         }
         "gateway_port_in_use" => {
-            "TALON_LLM_GATEWAY_PORT is in use (expected while talon is running; otherwise pick another port)"
+            "TALAHON_LLM_GATEWAY_PORT is in use (expected while talahon is running; otherwise pick another port)"
         }
         "gateway_port_unavailable" | "gateway_bind_unavailable" => {
-            "the LLM gateway cannot bind its address: set TALON_LLM_GATEWAY_BIND to a local address"
+            "the LLM gateway cannot bind its address: set TALAHON_LLM_GATEWAY_BIND to a local address"
         }
         "gateway_bind_loopback" => {
             "on Linux, containers cannot reach a gateway bound to 127.0.0.1: set \
-             TALON_LLM_GATEWAY_BIND to the docker bridge address (e.g. 172.17.0.1)"
+             TALAHON_LLM_GATEWAY_BIND to the docker bridge address (e.g. 172.17.0.1)"
         }
         "agent_network_missing" => {
-            "the agent container network (talon-agents) does not exist: run `talon setup egress` \
+            "the agent container network (talon-agents) does not exist: run `talahon setup egress` \
              (creates it with inter-container traffic disabled plus the egress firewall rules); \
-             `talon run` also creates the network at startup, but not the firewall rules"
+             `talahon run` also creates the network at startup, but not the firewall rules"
         }
         "agent_network_unchecked" => {
             "the agent container network could not be inspected (is the container runtime running?)"
@@ -88,22 +98,34 @@ pub fn hint(issue: &str) -> &'static str {
              bind it to 127.0.0.1 or the private address CoPilot uses, and firewall the port"
         }
         "http_config_invalid" => {
-            "a COPILOT_HTTP_* setting is invalid (see CHECK_EXPOSURE ERROR); `talon run` refuses to start"
+            "a COPILOT_HTTP_* setting is invalid (see CHECK_EXPOSURE ERROR); `talahon run` refuses to start"
         }
         "http_api_key_unset" => {
             "HTTP_API_KEY is not set: the CoPilot HTTP API rejects every request (openssl rand -hex 32)"
         }
         "audit_chain_tampered" => {
-            "the audit log does not verify (see AUDIT_VERIFY ERROR): investigate with `talon audit \
+            "the audit log does not verify (see AUDIT_VERIFY ERROR): investigate with `talahon audit \
              tail` before trusting it"
         }
         "audit_key_missing" => {
-            "the audit log has keyed rows but TALON_AUDIT_KEY is not set in .env: restore the key \
-             (`talon run` refuses to start without it)"
+            "the audit log has keyed rows but TALAHON_AUDIT_KEY is not set in .env: restore the key \
+             (`talahon run` refuses to start without it)"
         }
         "audit_key_invalid" => {
-            "TALON_AUDIT_KEY is too short or not random (openssl rand -hex 32); `talon run` \
+            "TALAHON_AUDIT_KEY is too short or not random (openssl rand -hex 32); `talahon run` \
              refuses to start"
+        }
+        "instructions_conflict" => {
+            "a group folder has both AGENT.md and CLAUDE.md with content (see CHECK_INSTRUCTIONS \
+             CONFLICT): every run in that folder is refused, because the file is the trusted \
+             system prompt and older versions did not protect the name AGENT.md. Inspect both \
+             files, keep the one you wrote and delete the other (keep exactly one; rename a kept \
+             CLAUDE.md to AGENT.md)"
+        }
+        "instructions_unsafe" => {
+            "AGENT.md or CLAUDE.md of a group folder is a symlink, directory or other non-regular \
+             file (see CHECK_INSTRUCTIONS UNSAFE): every run in that folder is refused. Replace \
+             it with a regular file, or remove it"
         }
         _ => "see the blocks above",
     }
@@ -121,7 +143,7 @@ fn issues_of(block: Option<&StatusBlock>) -> Vec<String> {
 async fn gateway_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
     let mut issues = Vec::new();
     let mut block = StatusBlock::new("CHECK_GATEWAY");
-    let explicit = config.env.get("TALON_LLM_GATEWAY_BIND").is_some();
+    let explicit = config.env.get("TALAHON_LLM_GATEWAY_BIND").is_some();
     block.set(
         "BIND_SOURCE",
         if explicit { "explicit" } else { "detected" },
@@ -138,7 +160,7 @@ async fn gateway_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
         },
         None => config
             .env
-            .get("TALON_LLM_GATEWAY_BIND")
+            .get("TALAHON_LLM_GATEWAY_BIND")
             .and_then(|v| v.trim().parse().ok())
             .or(Some(IpAddr::V4(Ipv4Addr::LOCALHOST))),
     };
@@ -161,7 +183,7 @@ async fn gateway_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
     }
     let host = config
         .env
-        .get("TALON_LLM_GATEWAY_HOST")
+        .get("TALAHON_LLM_GATEWAY_HOST")
         .unwrap_or_else(|| DEFAULT_CONTAINER_HOST.to_string());
     block.set(
         "CONTAINER_URL",
@@ -269,7 +291,7 @@ async fn inspect_network(bin: &str, name: &str) -> Result<NetworkState, String> 
 }
 
 /// `CHECK_NETWORK` block plus issue codes: the network agent containers
-/// run on (`TALON_CONTAINER_NETWORK`, default `talon-agents`) must exist.
+/// run on (`TALAHON_CONTAINER_NETWORK`, default `talon-agents`) must exist.
 /// Skipped without a container runtime (reported by the environment step).
 async fn network_block(config: &TalonConfig) -> Option<(StatusBlock, Vec<String>)> {
     let runtime = ContainerRuntime::detect(&config.container_runtime).ok()?;
@@ -280,8 +302,8 @@ async fn network_block(config: &TalonConfig) -> Option<(StatusBlock, Vec<String>
             block.set("NETWORK", "runtime-default");
             block.set(
                 "NOTE",
-                "TALON_CONTAINER_NETWORK selects the runtime default bridge: containers can reach \
-                 each other and `talon setup egress` rules do not apply",
+                "TALAHON_CONTAINER_NETWORK selects the runtime default bridge: containers can reach \
+                 each other and `talahon setup egress` rules do not apply",
             );
         }
         Some(network) => {
@@ -313,6 +335,173 @@ async fn network_block(config: &TalonConfig) -> Option<(StatusBlock, Vec<String>
         },
     );
     Some((block, issues))
+}
+
+/// Most folder names listed per field of `CHECK_INSTRUCTIONS`.
+const MAX_LISTED_FOLDERS: usize = 50;
+
+fn listed(names: &[String]) -> String {
+    if names.is_empty() {
+        return "none".to_string();
+    }
+    let mut out = names
+        .iter()
+        .take(MAX_LISTED_FOLDERS)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    if names.len() > MAX_LISTED_FOLDERS {
+        out.push_str(&format!(",... ({} more)", names.len() - MAX_LISTED_FOLDERS));
+    }
+    out
+}
+
+/// `CHECK_INSTRUCTIONS` block plus issue codes: which file holds the
+/// instructions of each folder under `groups/` (`groups/global` included).
+///
+/// - `LEGACY`: folders that still read `CLAUDE.md` (the fallback). Not a
+///   problem: a `HINT` says how to rename the file.
+/// - `CONFLICT`: folders in which both names have content; runs there are
+///   refused until the operator keeps exactly one (`instructions_conflict`).
+/// - `UNSAFE`: folders in which either name is a symlink or another
+///   non-regular file; runs there are refused (`instructions_unsafe`).
+///
+/// Symlinked folders are skipped (lanes refuse them anyway).
+pub fn instructions_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
+    let mut block = StatusBlock::new("CHECK_INSTRUCTIONS");
+    let mut issues = Vec::new();
+    let mut folders: Vec<String> = std::fs::read_dir(&config.groups_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    folders.sort();
+    let (mut legacy, mut conflicts, mut unsafe_entries) = (Vec::new(), Vec::new(), Vec::new());
+    for folder in &folders {
+        let files = match InstructionFiles::inspect(&config.groups_dir.join(folder)) {
+            Ok(files) => files,
+            Err(e) => {
+                unsafe_entries.push(format!("{folder} (cannot be inspected: {e})"));
+                continue;
+            }
+        };
+        if let Some(found) = files.unsafe_entry() {
+            unsafe_entries.push(format!("{folder} ({found})"));
+        } else if files.is_conflict() {
+            conflicts.push(folder.clone());
+        } else if files.uses_legacy() {
+            legacy.push(folder.clone());
+        }
+    }
+    block.set("FOLDERS", folders.len());
+    block.set("LEGACY", listed(&legacy));
+    block.set("CONFLICT", listed(&conflicts));
+    block.set("UNSAFE", listed(&unsafe_entries));
+    if !legacy.is_empty() {
+        block.set(
+            "HINT",
+            "the LEGACY folders still keep their instructions in CLAUDE.md, which is read as \
+             before. Rename it when convenient: `mv groups/<folder>/CLAUDE.md \
+             groups/<folder>/AGENT.md` (this replaces the AGENT.md mount-point stub Talahon put \
+             there; use `git mv -f` for tracked files)",
+        );
+    }
+    if !conflicts.is_empty() {
+        issues.push("instructions_conflict".to_string());
+    }
+    if !unsafe_entries.is_empty() {
+        issues.push("instructions_unsafe".to_string());
+    }
+    block.set(
+        "STATUS",
+        if issues.is_empty() {
+            "success"
+        } else {
+            "failed"
+        },
+    );
+    (block, issues)
+}
+
+/// `CHECK_RENAME` block: what this installation still uses under the name
+/// the project had up to 2.x. Nothing in it is a problem (everything listed
+/// keeps working until the next major version), so it never adds an issue.
+///
+/// - `DEPRECATED_KEYS`: `TALON_*` keys found in `.env` or the process
+///   environment, each with the spelling to rename it to.
+/// - `CONFLICTING_KEYS`: old keys whose `TALAHON_*` counterpart is set to a
+///   different value. The new one wins; the old value is ignored.
+/// - `CONFIG_DIR` / `CONFIG_DIR_NAME`: the one configuration directory in
+///   effect (`current` = `~/.config/talahon`, `legacy` = `~/.config/talon`).
+/// - `IGNORED_CONFIG_DIR`: `~/.config/talon` when both exist (never merged).
+pub fn rename_block(
+    keys: &[talon_core::env::LegacyKey],
+    config_dir: &talon_core::paths::ConfigDir,
+) -> StatusBlock {
+    use talon_core::env::EnvSource;
+    let mut block = StatusBlock::new("CHECK_RENAME");
+    let describe = |k: &talon_core::env::LegacyKey| {
+        let source = match k.source {
+            EnvSource::File => ".env",
+            EnvSource::Process => "environment",
+        };
+        format!("{} -> {} ({source})", k.legacy, k.current)
+    };
+    let deprecated: Vec<String> = keys.iter().map(describe).collect();
+    let conflicts: Vec<String> = keys.iter().filter(|k| k.conflict).map(describe).collect();
+    block.set("DEPRECATED_KEYS", listed(&deprecated));
+    block.set("CONFLICTING_KEYS", listed(&conflicts));
+    block.set("CONFIG_DIR", config_dir.path.display());
+    block.set(
+        "CONFIG_DIR_NAME",
+        if config_dir.legacy {
+            "legacy"
+        } else {
+            "current"
+        },
+    );
+    if let Some(ignored) = &config_dir.ignored_legacy {
+        block.set("IGNORED_CONFIG_DIR", ignored.display());
+    }
+    let mut hints: Vec<String> = Vec::new();
+    if !deprecated.is_empty() {
+        hints.push(
+            "rename the DEPRECATED_KEYS (TALON_* -> TALAHON_*); the old spellings are read \
+             until the next major version"
+                .into(),
+        );
+    }
+    if !conflicts.is_empty() {
+        hints.push(
+            "CONFLICTING_KEYS are set under both names with different values: the TALAHON_* \
+             value is used, the TALON_* value is ignored; delete the old key"
+                .into(),
+        );
+    }
+    if config_dir.legacy {
+        hints.push(format!(
+            "the mount and sender allowlists are read from {} (pre-rename name); rename the \
+             directory to ~/.config/{} when convenient",
+            config_dir.path.display(),
+            talon_core::paths::CONFIG_DIR_NAME
+        ));
+    }
+    if let Some(ignored) = &config_dir.ignored_legacy {
+        hints.push(format!(
+            "{} is NOT read (only CONFIG_DIR is; the two are never merged): move anything \
+             still needed from it, then delete it",
+            ignored.display()
+        ));
+    }
+    if !hints.is_empty() {
+        block.set("HINT", hints.join("; "));
+    }
+    block.set("STATUS", "success");
+    block
 }
 
 /// `AUDIT_VERIFY` block plus issue codes (skipped without a database).
@@ -418,6 +607,25 @@ pub async fn run(project_root: &Path, config: &TalonConfig) -> i32 {
         issues.push("http_api_key_unset".to_string());
     }
 
+    let (instructions, instruction_issues) = instructions_block(config);
+    println!("{instructions}");
+    issues.extend(instruction_issues);
+
+    println!(
+        "{}",
+        rename_block(
+            &config.env.legacy_keys(),
+            // The same home the configuration was resolved against.
+            &talon_core::paths::resolve_config_dir(
+                config
+                    .config_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or(&ctx.home_dir),
+            ),
+        )
+    );
+
     if let Some((block, audit_issues)) = audit_block(config) {
         println!("{block}");
         issues.extend(audit_issues);
@@ -434,6 +642,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rename_block_lists_deprecated_keys_conflicts_and_the_config_dir() {
+        use std::collections::HashMap;
+        use talon_core::env::EnvFile;
+        use talon_core::paths::resolve_config_dir;
+
+        let home = tempfile::tempdir().unwrap();
+        // Up to date: nothing to report.
+        let clean = rename_block(
+            &EnvFile::from_str_content("TALAHON_VLLM_MODEL=q\n").legacy_keys_in(&HashMap::new()),
+            &resolve_config_dir(home.path()),
+        );
+        assert_eq!(clean.get("DEPRECATED_KEYS"), Some("none"));
+        assert_eq!(clean.get("CONFLICTING_KEYS"), Some("none"));
+        assert_eq!(clean.get("CONFIG_DIR_NAME"), Some("current"));
+        assert_eq!(clean.get("HINT"), None);
+        assert_eq!(clean.get("STATUS"), Some("success"));
+
+        // Upgraded from 2.x: old keys, one of them contradicting the new
+        // spelling, and only ~/.config/talon.
+        let old_dir = home.path().join(".config/talon");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        let env = EnvFile::from_str_content(
+            "TALON_VLLM_BASE_URL=http://old:8000\nTALON_VLLM_MODEL=old\nTALAHON_VLLM_MODEL=new\n",
+        );
+        let process: HashMap<String, String> =
+            [("TALON_LOG".to_string(), "debug".to_string())].into();
+        let block = rename_block(
+            &env.legacy_keys_in(&process),
+            &resolve_config_dir(home.path()),
+        );
+        assert_eq!(
+            block.get("DEPRECATED_KEYS"),
+            Some(
+                "TALON_LOG -> TALAHON_LOG (environment),\
+                 TALON_VLLM_BASE_URL -> TALAHON_VLLM_BASE_URL (.env),\
+                 TALON_VLLM_MODEL -> TALAHON_VLLM_MODEL (.env)"
+            )
+        );
+        assert_eq!(
+            block.get("CONFLICTING_KEYS"),
+            Some("TALON_VLLM_MODEL -> TALAHON_VLLM_MODEL (.env)")
+        );
+        assert_eq!(block.get("CONFIG_DIR_NAME"), Some("legacy"));
+        assert_eq!(
+            block.get("CONFIG_DIR"),
+            Some(old_dir.display().to_string().as_str())
+        );
+        assert_eq!(block.get("IGNORED_CONFIG_DIR"), None);
+        let hint = block.get("HINT").unwrap();
+        assert!(hint.contains("TALAHON_*"), "{hint}");
+        assert!(hint.contains("ignored"), "{hint}");
+        assert!(hint.contains("~/.config/talahon"), "{hint}");
+        // Deprecated spellings are not a failure.
+        assert_eq!(block.get("STATUS"), Some("success"));
+        // The new value is the one in effect.
+        assert_eq!(env.get("TALAHON_VLLM_MODEL").as_deref(), Some("new"));
+
+        // Both directories: the new one is authoritative, the old one is
+        // named as ignored.
+        std::fs::create_dir_all(home.path().join(".config/talahon")).unwrap();
+        let block = rename_block(&[], &resolve_config_dir(home.path()));
+        assert_eq!(block.get("CONFIG_DIR_NAME"), Some("current"));
+        assert_eq!(
+            block.get("IGNORED_CONFIG_DIR"),
+            Some(old_dir.display().to_string().as_str())
+        );
+        assert!(block.get("HINT").unwrap().contains("NOT read"));
+    }
+
+    #[test]
     fn issue_parsing_and_summary() {
         let block = StatusBlock::new("CHECK_ENVIRONMENT")
             .field("ISSUES", "image_missing,vllm_not_configured");
@@ -448,7 +726,7 @@ mod tests {
             summary
                 .get("HINT_2")
                 .unwrap()
-                .contains("TALON_VLLM_BASE_URL")
+                .contains("TALAHON_VLLM_BASE_URL")
         );
         assert_eq!(summary_block(&[]).get("STATUS"), Some("success"));
     }
@@ -487,16 +765,16 @@ mod tests {
         let (block, issues) = audit_block(&config("")).unwrap();
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(block.get("STATUS"), Some("success"));
-        assert!(block.get("HINT").unwrap().contains("TALON_AUDIT_KEY"));
+        assert!(block.get("HINT").unwrap().contains("TALAHON_AUDIT_KEY"));
 
         // Invalid key.
-        let (block, issues) = audit_block(&config("TALON_AUDIT_KEY=tooshort-pw\n")).unwrap();
+        let (block, issues) = audit_block(&config("TALAHON_AUDIT_KEY=tooshort-pw\n")).unwrap();
         assert_eq!(issues, vec!["audit_key_invalid"]);
         assert!(!format!("{block}").contains("tooshort-pw"));
         assert!(hint("audit_key_invalid").contains("openssl rand -hex 32"));
 
         // Keyed chain: no hint; without the key afterwards: an issue.
-        let keyed = config(&format!("TALON_AUDIT_KEY={KEY}\n"));
+        let keyed = config(&format!("TALAHON_AUDIT_KEY={KEY}\n"));
         record(&keyed);
         let (block, issues) = audit_block(&keyed).unwrap();
         assert!(issues.is_empty(), "{block}");
@@ -506,25 +784,25 @@ mod tests {
         let (block, issues) = audit_block(&config("")).unwrap();
         assert_eq!(issues, vec!["audit_key_missing"]);
         assert_eq!(block.get("CHAIN"), Some("unverifiable"));
-        assert!(hint("audit_key_missing").contains("TALON_AUDIT_KEY"));
+        assert!(hint("audit_key_missing").contains("TALAHON_AUDIT_KEY"));
     }
 
     /// The process environment overrides `.env` for non-secret keys.
     fn env_overridden(keys: &[&str]) -> bool {
-        keys.iter().any(|k| std::env::var(k).is_ok())
+        keys.iter().any(|k| talon_core::env::process_var_is_set(k))
     }
 
     #[test]
     fn exposure_flags_missing_vllm_key_and_public_http_bind() {
         if env_overridden(&[
-            "TALON_VLLM_BASE_URL",
-            "TALON_VLLM_MODEL",
-            "TALON_VLLM_ALLOW_NO_API_KEY",
+            "TALAHON_VLLM_BASE_URL",
+            "TALAHON_VLLM_MODEL",
+            "TALAHON_VLLM_ALLOW_NO_API_KEY",
             "COPILOT_HTTP_BIND",
         ]) {
             return;
         }
-        const VLLM: &str = "TALON_VLLM_BASE_URL=http://vllm:8000\nTALON_VLLM_MODEL=q\n";
+        const VLLM: &str = "TALAHON_VLLM_BASE_URL=http://vllm:8000\nTALAHON_VLLM_MODEL=q\n";
 
         let (block, issues) = exposure_block(&cfg(&format!("{VLLM}COPILOT_HTTP_BIND=0.0.0.0\n")));
         assert_eq!(issues, vec!["vllm_api_key_unset", "http_api_public_bind"]);
@@ -535,7 +813,7 @@ mod tests {
             summary
                 .get("HINT_1")
                 .unwrap()
-                .contains("TALON_VLLM_API_KEY")
+                .contains("TALAHON_VLLM_API_KEY")
         );
         assert!(summary.get("HINT_2").unwrap().contains("127.0.0.1"));
 
@@ -543,14 +821,14 @@ mod tests {
         assert!(issues.contains(&"http_api_public_bind".to_string()));
 
         let (block, issues) = exposure_block(&cfg(&format!(
-            "{VLLM}TALON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n"
+            "{VLLM}TALAHON_VLLM_API_KEY=k\nCOPILOT_HTTP_BIND=127.0.0.1\n"
         )));
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(block.get("VLLM_API_KEY"), Some("set"));
         assert_eq!(block.get("STATUS"), Some("success"));
 
         let (block, issues) = exposure_block(&cfg(&format!(
-            "{VLLM}TALON_VLLM_ALLOW_NO_API_KEY=true\nCOPILOT_HTTP_BIND=10.0.0.5\n"
+            "{VLLM}TALAHON_VLLM_ALLOW_NO_API_KEY=true\nCOPILOT_HTTP_BIND=10.0.0.5\n"
         )));
         assert!(issues.is_empty(), "{issues:?}");
         assert_eq!(block.get("VLLM_API_KEY"), Some("unset_allowed"));
@@ -630,8 +908,92 @@ mod tests {
             "http_config_invalid",
             "http_api_key_unset",
             "audit_chain_tampered",
+            "instructions_conflict",
+            "instructions_unsafe",
         ] {
             assert_ne!(hint(issue), hint("unknown_issue"), "{issue}");
         }
+    }
+
+    #[test]
+    fn instructions_block_reports_legacy_conflicting_and_unsafe_files() {
+        use talon_security::instructions::{
+            AGENT_MOUNT_STUB, INSTRUCTIONS_PLACEHOLDER, LEGACY_MOUNT_STUB,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            TalonConfig::from_env(dir.path(), talon_core::env::EnvFile::from_str_content(""));
+        // No groups directory at all.
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("FOLDERS"), Some("0"));
+        assert_eq!(block.get("STATUS"), Some("success"));
+        assert!(issues.is_empty());
+
+        let groups = &config.groups_dir;
+        let write = |rel: &str, content: &str| {
+            let path = groups.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        // Migrated folders (with the stub the host leaves at the old name).
+        write("main/AGENT.md", "main rules");
+        write("main/CLAUDE.md", LEGACY_MOUNT_STUB);
+        write("global/AGENT.md", "global rules");
+        // No instructions.
+        write("empty/AGENT.md", INSTRUCTIONS_PLACEHOLDER);
+        write("old-empty/CLAUDE.md", INSTRUCTIONS_PLACEHOLDER);
+        std::fs::create_dir_all(groups.join("bare")).unwrap();
+        // Fallback in use: before the first run, and after it (stub).
+        write("copilot/CLAUDE.md", "old rules");
+        write("team/CLAUDE.md", "old rules");
+        write("team/AGENT.md", AGENT_MOUNT_STUB);
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("FOLDERS"), Some("7"));
+        assert_eq!(block.get("LEGACY"), Some("copilot,team"));
+        assert_eq!(block.get("CONFLICT"), Some("none"));
+        assert_eq!(block.get("UNSAFE"), Some("none"));
+        assert!(
+            block
+                .get("HINT")
+                .unwrap()
+                .contains("mv groups/<folder>/CLAUDE.md")
+        );
+        // A hint, not an error.
+        assert_eq!(block.get("STATUS"), Some("success"));
+        assert!(issues.is_empty());
+
+        // Both names with content: runs are refused; reported as a
+        // problem with the fix.
+        write("both/AGENT.md", "new rules");
+        write("both/CLAUDE.md", "old rules");
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("CONFLICT"), Some("both"));
+        assert_eq!(block.get("LEGACY"), Some("copilot,team"));
+        assert_eq!(block.get("STATUS"), Some("failed"));
+        assert_eq!(issues, vec!["instructions_conflict"]);
+        assert!(hint("instructions_conflict").contains("keep the one you wrote"));
+        assert!(hint("instructions_conflict").contains("keep exactly one"));
+
+        // A symlink under either name (and a symlinked folder is skipped).
+        std::fs::remove_file(groups.join("both/CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink("AGENT.md", groups.join("both/CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink("planted.md", groups.join("copilot/AGENT.md")).unwrap();
+        std::os::unix::fs::symlink(groups.join("main"), groups.join("alias")).unwrap();
+        let (block, issues) = instructions_block(&config);
+        assert_eq!(block.get("FOLDERS"), Some("8"));
+        let unsafe_entries = block.get("UNSAFE").unwrap();
+        assert!(
+            unsafe_entries.contains("both (CLAUDE.md is a symlink"),
+            "{unsafe_entries}"
+        );
+        assert!(
+            unsafe_entries.contains("copilot (AGENT.md is a symlink"),
+            "{unsafe_entries}"
+        );
+        assert_eq!(block.get("LEGACY"), Some("team"));
+        assert_eq!(issues, vec!["instructions_unsafe"]);
+
+        let many: Vec<String> = (0..60).map(|i| format!("g{i}")).collect();
+        assert!(listed(&many).ends_with(",... (10 more)"));
     }
 }

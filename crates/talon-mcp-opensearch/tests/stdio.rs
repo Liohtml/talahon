@@ -1,4 +1,4 @@
-//! Tests of the `talon-opensearch-mcp` binary itself: the stdio loop
+//! Tests of the `talahon-opensearch-mcp` binary itself: the stdio loop
 //! (initialize → tools/list → tools/call), what it prints where, and its
 //! start-up checks.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -12,7 +12,7 @@ use tokio::process::Command;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const BIN: &str = env!("CARGO_BIN_EXE_talon-opensearch-mcp");
+const BIN: &str = env!("CARGO_BIN_EXE_talahon-opensearch-mcp");
 const PASSWORD: &str = "hunter2-very-secret";
 
 /// The binary with a clean environment (nothing inherited from the test
@@ -49,7 +49,7 @@ async fn stdio_loop_serves_initialize_list_and_call() {
         .env("OPENSEARCH_USERNAME", "admin")
         .env("OPENSEARCH_PASSWORD", PASSWORD)
         .env("VERIFY_CERTS", "false")
-        .env("TALON_OPENSEARCH_LOG", "debug")
+        .env("TALAHON_OPENSEARCH_LOG", "debug")
         // A proxy from the environment must be ignored (it points nowhere).
         .env("HTTP_PROXY", "http://127.0.0.1:1")
         .env("http_proxy", "http://127.0.0.1:1")
@@ -123,7 +123,7 @@ async fn stdio_loop_serves_initialize_list_and_call() {
     // Logs go to stderr and never contain the password or the auth header.
     let mut log = String::new();
     stderr.read_to_string(&mut log).await.unwrap();
-    assert!(log.contains("talon-opensearch-mcp starting"), "{log}");
+    assert!(log.contains("talahon-opensearch-mcp starting"), "{log}");
     assert!(log.contains("TLS certificates are not verified"), "{log}");
     assert!(!log.contains(PASSWORD), "{log}");
     assert!(!log.contains("YWRtaW46"), "{log}");
@@ -201,7 +201,7 @@ async fn check_version_and_unknown_arguments() {
 
     let (code, stdout, _) = run(&["--version"], &[]).await;
     assert_eq!(code, Some(0));
-    assert!(stdout.starts_with("talon-opensearch-mcp "));
+    assert!(stdout.starts_with("talahon-opensearch-mcp "));
 
     let (code, stdout, _) = run(&["--transport", "sse"], &[]).await;
     assert_eq!(code, Some(2));

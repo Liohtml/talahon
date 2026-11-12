@@ -1,4 +1,4 @@
-//! `talon-agent supervise`: the small, LLM-free root process of the
+//! `talahon-agent supervise`: the small, LLM-free root process of the
 //! container (docs/RUST_ARCHITECTURE.md §3.3).
 //!
 //! 1. Read the whole `ContainerInput` from stdin (bounded) and validate it
@@ -20,13 +20,17 @@
 //!    `PYTHONSAFEPATH=1`, `PYTHONDONTWRITEBYTECODE=1`, in its own process
 //!    group, with the **command's directory** as cwd (never the
 //!    agent-writable group folder: Python puts the cwd on `sys.path`).
+//!    Before any of that, the group's instruction files (`AGENT.md` and
+//!    the legacy `CLAUDE.md`, the trusted system prompt) must both be
+//!    read-only mount points of this container
+//!    ([`check_instruction_mounts`]); otherwise the run is refused.
 //! 4. Expose each server on `/run/talon/mcp/<server>.sock` (dir 0750
 //!    `root:<agent gid>`, socket 0600 owned by the agent): accept exactly
 //!    one connection (peer uid checked), unlink the path, then relay bytes
 //!    with `talon_mcp::bridge`.
-//! 5. Spawn `talon-agent run` as `RUN_UID:RUN_GID` (std `uid`/`gid`, which
+//! 5. Spawn `talahon-agent run` as `RUN_UID:RUN_GID` (std `uid`/`gid`, which
 //!    drops supplementary groups) with a cleared environment (`PATH`,
-//!    `HOME=/home/agent`, `LANG`, `TZ`, `TALON_MCP_SOCKET_DIR`, log filter
+//!    `HOME=/home/agent`, `LANG`, `TZ`, `TALAHON_MCP_SOCKET_DIR`, log filter
 //!    and egress policy variables), the original input on its stdin and the
 //!    supervisor's stdout/stderr inherited (frames and logs pass straight
 //!    through). SIGTERM/SIGINT are forwarded; the agent is killed if it does
@@ -92,10 +96,10 @@ pub const DENIED_MCP_DIRS: [&str; 3] = [
 /// Non-secret variables passed from the container environment to the agent.
 pub const PASSTHROUGH_ENV: &[&str] = &[
     "RUST_LOG",
-    "TALON_LOG",
-    "TALON_EGRESS_ALLOW",
-    "TALON_EGRESS_DENY",
-    "TALON_EGRESS_ALLOW_PRIVATE",
+    "TALAHON_LOG",
+    "TALAHON_EGRESS_ALLOW",
+    "TALAHON_EGRESS_DENY",
+    "TALAHON_EGRESS_ALLOW_PRIVATE",
 ];
 /// How long the agent may take to exit after a forwarded signal.
 pub const AGENT_STOP_GRACE: Duration = Duration::from_secs(10);
@@ -105,10 +109,10 @@ const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/s
 /// Longest MCP stderr line logged (bytes).
 const MAX_STDERR_LINE: usize = 4096;
 
-/// CLI options of `talon-agent supervise`.
+/// CLI options of `talahon-agent supervise`.
 #[derive(Debug, Clone, clap::Args)]
 pub struct SuperviseArgs {
-    /// Options forwarded to `talon-agent run` (paths, loop limits).
+    /// Options forwarded to `talahon-agent run` (paths, loop limits).
     #[command(flatten)]
     pub run: RunArgs,
     /// Where the per-server unix sockets are created.
@@ -236,18 +240,20 @@ pub fn agent_env(socket_dir: &Path, get: impl Fn(&str) -> Option<String>) -> Vec
         env.push(("TZ".to_string(), tz));
     }
     env.push((
-        "TALON_MCP_SOCKET_DIR".to_string(),
+        "TALAHON_MCP_SOCKET_DIR".to_string(),
         socket_dir.display().to_string(),
     ));
     for key in PASSTHROUGH_ENV {
-        if let Some(v) = get(key).and_then(clean) {
+        // A `TALAHON_*` key set under its old `TALON_*` name is passed on
+        // under the new one.
+        if let Some(v) = talon_core::env::resolve_with(key, &get).and_then(clean) {
             env.push(((*key).to_string(), v));
         }
     }
     env
 }
 
-/// Command-line arguments that make `talon-agent run` use the same
+/// Command-line arguments that make `talahon-agent run` use the same
 /// configuration as this supervisor.
 pub fn agent_args(cfg: &RunConfig, socket_dir: &Path) -> Vec<OsString> {
     let p = &cfg.paths;
@@ -360,6 +366,39 @@ impl CommandPolicy {
         }
         Ok(command)
     }
+}
+
+/// The group files whose content is trusted as instructions must be the
+/// host's read-only binds (MYTH-09).
+///
+/// The agent reads `<group>/AGENT.md` into its system prompt. The folder
+/// around it is writable by every run of the group, so the file is only
+/// trustworthy while it is its own read-only mount in **this** container.
+/// The legacy name `CLAUDE.md` must be one as well: the host falls back to
+/// it for installations from before the rename, and it would trust
+/// whichever of the two names an agent managed to create. The host binds
+/// both on every run; if either is missing here (an older host with a
+/// newer image, a hand-written `docker run`), nothing proves where the
+/// instructions come from and the run is refused.
+///
+/// # Errors
+/// A text naming the first file that is not a read-only mount point.
+pub fn check_instruction_mounts(mounts: &MountTable, group_dir: &Path) -> Result<(), String> {
+    let group = std::fs::canonicalize(group_dir).unwrap_or_else(|_| group_dir.to_path_buf());
+    for name in talon_security::instructions::INSTRUCTION_FILE_NAMES {
+        let path = group.join(name);
+        if !mounts.is_read_only_mount_point(&path) {
+            return Err(format!(
+                "{} is not a read-only mount of this container, so the group instructions could \
+                 have been written by an agent; refusing to run. The Talahon host binds AGENT.md \
+                 and CLAUDE.md read-only on every run: the host and the agent image are probably \
+                 from different versions (upgrade the host, or rebuild the image with \
+                 ./container/build.sh)",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Decide whether and how to launch `name` (pure apart from resolving the
@@ -691,7 +730,7 @@ async fn wait_agent(child: &mut Child) -> (std::io::Result<ExitStatus>, bool) {
     }
 }
 
-/// Entry point of `talon-agent supervise`; returns the exit code.
+/// Entry point of `talahon-agent supervise`; returns the exit code.
 pub async fn supervise_main(cfg: SuperviseConfig) -> i32 {
     if !rustix::process::geteuid().is_root() {
         tracing::warn!(
@@ -745,6 +784,10 @@ pub async fn supervise_main(cfg: SuperviseConfig) -> i32 {
         );
         MountTable::default()
     });
+    // The system prompt must come from the host's read-only binds.
+    if let Err(e) = check_instruction_mounts(&mounts, &cfg.run.paths.group) {
+        return fail(e);
+    }
     let policy = CommandPolicy::container(mounts);
     let dirs_ready = prepare_dir(&cfg.socket_dir, 0o750, 0, ids.gid)
         .and_then(|()| prepare_dir(&cfg.home_root, 0o711, 0, 0));
@@ -890,10 +933,10 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
             "PATH" => Some("/usr/bin".into()),
             "TZ" => Some("Europe/Berlin".into()),
             "RUST_LOG" => Some("debug".into()),
-            "TALON_EGRESS_ALLOW" => Some("ti.example.com".into()),
+            "TALAHON_EGRESS_ALLOW" => Some("ti.example.com".into()),
             "LANG" => Some(String::new()),
-            "TALON_VLLM_API_KEY" | "AWS_SECRET_ACCESS_KEY" => Some("secret".into()),
-            "TALON_LOG" => Some("bad\0value".into()),
+            "TALAHON_VLLM_API_KEY" | "AWS_SECRET_ACCESS_KEY" => Some("secret".into()),
+            "TALAHON_LOG" => Some("bad\0value".into()),
             _ => None,
         });
         let get = |k: &str| {
@@ -905,12 +948,28 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
         assert_eq!(get("HOME"), Some("/home/agent"));
         assert_eq!(get("LANG"), Some("C.UTF-8"));
         assert_eq!(get("TZ"), Some("Europe/Berlin"));
-        assert_eq!(get("TALON_MCP_SOCKET_DIR"), Some("/run/talon/mcp"));
+        assert_eq!(get("TALAHON_MCP_SOCKET_DIR"), Some("/run/talon/mcp"));
         assert_eq!(get("RUST_LOG"), Some("debug"));
-        assert_eq!(get("TALON_EGRESS_ALLOW"), Some("ti.example.com"));
-        assert_eq!(get("TALON_VLLM_API_KEY"), None);
+        assert_eq!(get("TALAHON_EGRESS_ALLOW"), Some("ti.example.com"));
+        assert_eq!(get("TALAHON_VLLM_API_KEY"), None);
         assert_eq!(get("AWS_SECRET_ACCESS_KEY"), None);
-        assert_eq!(get("TALON_LOG"), None);
+        assert_eq!(get("TALAHON_LOG"), None);
+        // Old spellings reach the agent under the new name only.
+        let legacy = agent_env(Path::new("/s"), |k| match k {
+            "TALON_LOG" => Some("trace".into()),
+            "TALON_EGRESS_DENY" => Some("old.example".into()),
+            "TALAHON_EGRESS_DENY" => Some("new.example".into()),
+            _ => None,
+        });
+        let get = |k: &str| {
+            legacy
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("TALAHON_LOG"), Some("trace"));
+        assert_eq!(get("TALAHON_EGRESS_DENY"), Some("new.example"));
+        assert!(legacy.iter().all(|(k, _)| !k.starts_with("TALON_")));
         let default_path = agent_env(Path::new("/s"), |_| None);
         assert_eq!(default_path[0].1, DEFAULT_PATH);
     }
@@ -939,7 +998,7 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
             Run(RunArgs),
         }
         let parsed = <Cli as clap::Parser>::try_parse_from(
-            std::iter::once("talon-agent".to_string()).chain(args),
+            std::iter::once("talahon-agent".to_string()).chain(args),
         )
         .unwrap();
         let Sub::Run(run) = parsed.cmd;
@@ -1254,13 +1313,60 @@ mcp-evil:x:0:0::/nonexistent:/usr/sbin/nologin
         // mount, the group folder is writable.
         let mounts = MountTable::parse(
             "10 1 0:1 / / ro,relatime - overlay overlay rw\n\
-             11 10 8:1 /srv/talon /workspace/project ro,relatime - ext4 /dev/sda1 rw\n\
-             12 10 8:1 /srv/talon/groups/main /workspace/group rw,relatime - ext4 /dev/sda1 rw\n",
+             11 10 8:1 /srv/talahon /workspace/project ro,relatime - ext4 /dev/sda1 rw\n\
+             12 10 8:1 /srv/talahon/groups/main /workspace/group rw,relatime - ext4 /dev/sda1 rw\n",
         );
         assert!(mounts.is_read_only(Path::new("/workspace/project/mysql/mysql-mcp.sh")));
         assert!(mounts.is_read_only(Path::new("/workspace/project/mysql")));
         assert!(mounts.is_read_only(Path::new("/usr/bin/python3")));
         assert!(!mounts.is_read_only(Path::new("/workspace/group/evil.sh")));
+    }
+
+    #[test]
+    fn instruction_files_must_be_read_only_mount_points() {
+        let tmp = tempfile::tempdir().unwrap();
+        let group = std::fs::canonicalize(tmp.path()).unwrap();
+        let g = group.display();
+        let table = |rest: &str| {
+            MountTable::parse(&format!(
+                "1 0 0:1 / / ro - overlay o rw\n2 1 8:1 /g {g} rw - ext4 d rw\n{rest}"
+            ))
+        };
+        let bind = |id: u32, name: &str, opts: &str| {
+            format!("{id} 2 8:1 /g/src {g}/{name} {opts},relatime - ext4 d rw\n")
+        };
+        // What the host sets up: both names are read-only binds.
+        let both = table(&(bind(3, "AGENT.md", "ro") + &bind(4, "CLAUDE.md", "ro")));
+        assert_eq!(check_instruction_mounts(&both, &group), Ok(()));
+        // The path the supervisor was given may be a symlink to the folder.
+        let link = group.with_extension("link");
+        std::os::unix::fs::symlink(&group, &link).unwrap();
+        assert_eq!(check_instruction_mounts(&both, &link), Ok(()));
+        std::fs::remove_file(&link).unwrap();
+
+        // An older host: only CLAUDE.md is bound, so an agent could have
+        // written the AGENT.md the runtime reads.
+        let old_host = table(&bind(3, "CLAUDE.md", "ro"));
+        let err = check_instruction_mounts(&old_host, &group).unwrap_err();
+        assert!(err.contains("AGENT.md is not a read-only mount"), "{err}");
+        assert!(err.contains("different versions"), "{err}");
+        // Only AGENT.md bound: the legacy name could be planted for the
+        // host's fallback.
+        let err = check_instruction_mounts(&table(&bind(3, "AGENT.md", "ro")), &group).unwrap_err();
+        assert!(err.contains("CLAUDE.md is not a read-only mount"), "{err}");
+        // Writable binds, no binds, a read-only folder without file binds,
+        // no table at all.
+        for bad in [
+            table(&(bind(3, "AGENT.md", "rw") + &bind(4, "CLAUDE.md", "ro"))),
+            table(&(bind(3, "AGENT.md", "ro") + &bind(4, "CLAUDE.md", "rw"))),
+            table(""),
+            MountTable::parse(&format!(
+                "1 0 0:1 / / ro - overlay o rw\n2 1 8:1 /g {g} ro - ext4 d rw\n"
+            )),
+            MountTable::default(),
+        ] {
+            assert!(check_instruction_mounts(&bad, &group).is_err());
+        }
     }
 
     #[test]

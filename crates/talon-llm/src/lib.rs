@@ -1,6 +1,6 @@
 //! # talon-llm — vLLM provider + host LLM gateway
 //!
-//! Talon talks to [vLLM](https://docs.vllm.ai) through its OpenAI-compatible
+//! Talahon talks to [vLLM](https://docs.vllm.ai) through its OpenAI-compatible
 //! API. This crate has two halves:
 //!
 //! - **Client** ([`VllmClient`]) — chat completions (plain and SSE
@@ -8,7 +8,7 @@
 //!   `/health`, `/tokenize`, and a fallback parser that recovers tool calls a
 //!   model wrote as text (Hermes `<tool_call>`, Mistral `[TOOL_CALLS]`, Llama
 //!   `<|python_tag|>`, fenced/bare JSON) and splits `<think>` reasoning.
-//!   Used by the in-container agent (`talon-agent`) and by host-side checks.
+//!   Used by the in-container agent (`talahon-agent`) and by host-side checks.
 //! - **Gateway** ([`gateway::LlmGateway`]) — the host-side reverse proxy
 //!   containers use instead of vLLM: short-lived per-run tokens (stored as
 //!   SHA-256 digests), upstream key injection, a request-parameter
@@ -19,9 +19,9 @@
 //!   passthrough, usage per label, audit of auth failures.
 //!
 //! ```text
-//! talon (host) ── LlmGateway::start ── issue_token(label, ttl) ──▶ ContainerInput.llm (stdin)
+//! talahon (host) ── LlmGateway::start ── issue_token(label, ttl) ──▶ ContainerInput.llm (stdin)
 //!                                                                     │
-//! talon-agent (container) ── VllmClient::from_endpoint(&llm) ──▶ gateway ──▶ vLLM
+//! talahon-agent (container) ── VllmClient::from_endpoint(&llm) ──▶ gateway ──▶ vLLM
 //! ```
 //!
 //! ## In the container: the agent loop
@@ -43,7 +43,7 @@
 //!     let client = VllmClient::from_endpoint(endpoint)?;
 //!     let specs: Vec<_> = tools.iter().map(|t| t.spec()).collect();
 //!     let mut history = vec![
-//!         ChatMessage::system("You are Talon, a SOC analyst."),
+//!         ChatMessage::system("You are Talahon, a SOC analyst."),
 //!         ChatMessage::user(&input.prompt),
 //!     ];
 //!     let mut usage = Usage::default();
@@ -117,7 +117,7 @@
 //! use talon_llm::gateway::{GatewayConfig, LlmGateway};
 //!
 //! # async fn host(vllm: VllmConfig, api_key: Option<String>) -> Result<(), talon_llm::LlmError> {
-//! let mut config = GatewayConfig::from_vllm(&vllm, api_key); // TALON_VLLM_API_KEY
+//! let mut config = GatewayConfig::from_vllm(&vllm, api_key); // TALAHON_VLLM_API_KEY
 //! config.bind = SocketAddr::from(([172, 17, 0, 1], 3001)); // docker bridge on Linux
 //! let gateway = LlmGateway::start(config, Arc::new(TracingAuditSink)).await?;
 //!

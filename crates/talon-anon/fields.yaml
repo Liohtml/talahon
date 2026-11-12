@@ -4,7 +4,7 @@
 # reach the model context window. Add new fields here and git pull to
 # distribute updates to all deployments.
 #
-# It is read by the Rust proxy (`talon-anon-proxy`, crates/talon-anon).
+# It is read by the Rust proxy (`talahon-anon-proxy`, crates/talon-anon).
 # Everything marked "(Rust)" below is an optional extension of the original
 # file format.
 #
@@ -22,7 +22,7 @@
 #   2. Add the field name in underscore notation
 #   3. Commit and push — users git pull to receive the update
 #
-# Validate the file with:  talon-anon-proxy --fields fields.yaml --map /tmp/x.json --check
+# Validate the file with:  talahon-anon-proxy --fields fields.yaml --map /tmp/x.json --check
 
 categories:
 
@@ -43,7 +43,7 @@ categories:
       - syscheck_uname_before
       - data_srcuser
       - data_dstuser
-      # added for talon-anon-proxy
+      # added for talahon-anon-proxy
       - data_win_eventdata_samAccountName
       - data_win_eventdata_accountName
       - data_win_eventdata_clientUserName
@@ -72,7 +72,7 @@ categories:
       - predecoder_hostname
       - manager_name
       - data_win_eventdata_targetServerName
-      # added for talon-anon-proxy
+      # added for talahon-anon-proxy
       - data_win_eventdata_sourceHostname
       # ECS / Winlogbeat indices
       - host_name
@@ -95,7 +95,7 @@ categories:
       - data_office365_UserId
       - data_office365_Actor_ID
       - data_gcp_protoPayload_authenticationInfo_principalEmail
-      # added for talon-anon-proxy
+      # added for talahon-anon-proxy
       - data_win_eventdata_userPrincipalName
       - user_email
 

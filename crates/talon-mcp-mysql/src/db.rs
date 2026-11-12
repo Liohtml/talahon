@@ -94,7 +94,7 @@ pub enum DbError {
     },
     /// The statement took longer than the query timeout and was killed.
     #[error(
-        "Query timed out after {secs} s and was cancelled (TALON_MYSQL_QUERY_TIMEOUT). \
+        "Query timed out after {secs} s and was cancelled (TALAHON_MYSQL_QUERY_TIMEOUT). \
          A statement that changes data may have been applied partially or not at all; \
          check before retrying."
     )]
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn backend_debug_has_no_credentials() {
         let config = Config::from_lookup(|name| match name {
-            "MYSQL_USER" => Some("talon-user".into()),
+            "MYSQL_USER" => Some("talahon-user".into()),
             "MYSQL_PASSWORD" => Some("hunter2-secret".into()),
             _ => None,
         })
@@ -908,7 +908,7 @@ mod tests {
         let backend = MySqlBackend::new(&config);
         let text = format!("{backend:?}");
         assert!(
-            !text.contains("hunter2-secret") && !text.contains("talon-user"),
+            !text.contains("hunter2-secret") && !text.contains("talahon-user"),
             "{text}"
         );
         assert_eq!(backend.database(), None);

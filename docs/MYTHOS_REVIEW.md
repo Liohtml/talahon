@@ -4,6 +4,12 @@ Independent adversarial review of the Talon 2.0 Rust workspace. Most findings
 were confirmed with temporary proof-of-concept tests. This file is the shared
 work order for the fix agents; each finding lists its owners.
 
+> The project has since been renamed to **Talahon**. The findings below are a
+> historical record and keep the names of the time (`talon setup egress`,
+> crate paths); the settings and commands in the *residual risk* notes use
+> today's spelling (`TALAHON_*`, `talahon ...`), see "Upgrading from Talon
+> 2.x" in the [README](../README.md).
+
 | ID | Sev | Finding | Owners |
 |---|---|---|---|
 | MYTH-01 | critical | Host code execution via agent-writable MemPalace data (ChromaDB `index_metadata.pickle` is unpickled by host `/palace/*` calls and by `mcp-palace`) | F3 (entrypoint chown, palace run args), F6 (command palace runner, no host exec by default), F5 (container palace runner) |
@@ -24,7 +30,7 @@ Residual risks accepted for now: prompt injection is inherent (bash is always
 available, so containment matters more than detection); the raw `opensearch`
 MCP is exposed next to `opensearch_anon`; the audit chain is unkeyed and its
 tail can be truncated by someone with host DB write access (since addressed:
-HMAC-keyed chain and truncation checkpoint with `TALON_AUDIT_KEY`, see
+HMAC-keyed chain and truncation checkpoint with `TALAHON_AUDIT_KEY`, see
 [SECURITY.md](SECURITY.md#7-audit); opt-in, and rollback by someone who can
 also write the checkpoint file still needs an external anchor); no global
 vLLM fairness between lanes.
@@ -63,28 +69,33 @@ Verification of round 1: MYTH-01, -02, -10, -13 fixed; MYTH-04, -07, -08,
 | N-9 | Fixed — unlimited-depth scan, git-config credentials, extended credential names |
 | N-10 | Fixed — MCP commands under agent-writable project dirs refused |
 
+Later change: the instructions file of MYTH-09 was renamed from `CLAUDE.md`
+to `AGENT.md`, with `CLAUDE.md` still read as a fallback. Both names are
+read-only binds of one source on every run, so the second name does not
+reopen the finding; see [SECURITY.md](SECURITY.md#boundaries).
+
 ### Accepted residual risks
 - Prompt injection is inherent; containment (per-lane isolation, privilege
-  separation, egress firewall) is the control. `talon setup egress --apply`
+  separation, egress firewall) is the control. `talahon setup egress --apply`
   is opt-in and needs root; `--persist` re-applies it at boot.
 - Shared-by-design state within a group folder: `MEMORY.md` (fenced),
   MemPalace (readable by every lane of the deployment).
 - Anonymization limits exposure in model context and logs; it is not a
   confidentiality control against the model (`opensearch` raw server and
   `deanonymize` remain available).
-- The audit chain is keyed only when `TALON_AUDIT_KEY` is set (HMAC-SHA-256
+- The audit chain is keyed only when `TALAHON_AUDIT_KEY` is set (HMAC-SHA-256
   rows plus a keyed truncation checkpoint outside the database). Without the
   key it can be recomputed or truncated by a database writer; with it, a
   writer of both the database and the checkpoint file can still roll back to
-  a state whose checkpoint they kept. Anchor `talon audit head` externally.
+  a state whose checkpoint they kept. Anchor `talahon audit head` externally.
 - vLLM capacity between lanes: mitigated, not scheduled. The gateway counts
   requests in flight per lane and caps one lane at
-  `TALON_LLM_GATEWAY_LANE_SHARE` percent of the global cap (default 75 %,
+  `TALAHON_LLM_GATEWAY_LANE_SHARE` percent of the global cap (default 75 %,
   refusal `429` / audit reason `lane_share_exceeded`), so a single flooding or
   compromised lane can no longer hold every slot. Residual: several lanes
   saturating at once can still fill the gateway (two at the default share),
   and slots are requests, not model-server tokens per second.
-- The main group is the root of trust inside Talon.
+- The main group is the root of trust inside Talahon.
 - On deployments that ran before the read-only binds existed, reset
   `groups/*/prompts/` and `groups/copilot/notifications.md` from git: content
   an agent planted there earlier would now be trusted.

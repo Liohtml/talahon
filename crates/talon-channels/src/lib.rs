@@ -41,7 +41,7 @@ pub use webhook::{WEBHOOK_JID, WebhookChannel, WebhookConfig};
 ///
 /// Channels are returned unconnected; the host calls
 /// [`Channel::connect`]. Invalid configurations are logged and skipped.
-/// The webhook gets an egress guard built from `TALON_EGRESS_*`
+/// The webhook gets an egress guard built from `TALAHON_EGRESS_*`
 /// ([`PolicyEgressGuard::from_env`]).
 pub fn build_channels(
     host: Arc<dyn ChannelHost>,
@@ -121,7 +121,7 @@ mod tests {
         if !process_env_clean() {
             return;
         }
-        let env = EnvFile::from_str_content("ASSISTANT_NAME=Talon\nEMACS_CHANNEL_PORT=9999\n");
+        let env = EnvFile::from_str_content("ASSISTANT_NAME=Talahon\nEMACS_CHANNEL_PORT=9999\n");
         assert!(build_channels(host(), &env, audit()).is_empty());
     }
 
@@ -157,7 +157,7 @@ mod tests {
             return;
         }
         let env = EnvFile::from_str_content(
-            "WEBHOOK_URL=https://hooks.example.com/talon\nWEBHOOK_SECRET=s\n",
+            "WEBHOOK_URL=https://hooks.example.com/talahon\nWEBHOOK_SECRET=s\n",
         );
         let channels = build_channels(host(), &env, audit());
         assert_eq!(names(&channels), vec!["webhook"]);

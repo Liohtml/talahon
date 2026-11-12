@@ -3,7 +3,7 @@
 //! `STATUS: success` requires a running service, a reachable vLLM serving
 //! the configured model, at least one configured channel and at least one
 //! registered group. `CREDENTIALS` reports whether
-//! `TALON_VLLM_BASE_URL`/`TALON_VLLM_MODEL` are set.
+//! `TALAHON_VLLM_BASE_URL`/`TALAHON_VLLM_MODEL` are set.
 //!
 //! `WARNINGS` lists settings that expose the host to agent containers
 //! (`vllm_api_key_unset`, `http_bind_all_interfaces`, see
@@ -12,10 +12,14 @@
 use std::collections::BTreeMap;
 
 use super::StepArgs;
-use super::service::{LAUNCHD_LABEL, SERVICE_NAME, pid_file_path};
+use super::service::{
+    LAUNCHD_LABEL, LEGACY_LAUNCHD_LABEL, LEGACY_SERVICE_NAME, SERVICE_NAME, legacy_binary_path,
+    legacy_pid_file_path, pid_file_path,
+};
 use super::vllm::add_vllm_fields;
 use crate::checks::{
     VllmStatus, check_configured_vllm, detect_runtime, exposure_issues, image_present,
+    legacy_image_present,
 };
 use crate::context::{SETUP_LOG, SetupContext};
 use crate::platform::ServiceManager;
@@ -44,8 +48,53 @@ impl ServiceState {
     }
 }
 
-/// Determine whether the Talon service is installed / running.
+/// The names one installation of the service goes by.
+struct ServiceNames<'a> {
+    systemd: &'a str,
+    launchd: &'a str,
+    pid_file: std::path::PathBuf,
+}
+
+/// Determine whether the Talahon service is installed / running, under its
+/// current name or the one it had up to 2.x (`talon.service`, `com.talon`,
+/// `talon.pid`); see [`service_report`] to tell the two apart.
 pub async fn service_state(ctx: &SetupContext) -> ServiceState {
+    service_report(ctx).await.0
+}
+
+/// [`service_state`] plus whether that state belongs to the service under
+/// its pre-rename name (`talahon setup service` replaces it). The current
+/// name wins unless only the old one is installed or running.
+pub async fn service_report(ctx: &SetupContext) -> (ServiceState, bool) {
+    let current = state_of(
+        ctx,
+        &ServiceNames {
+            systemd: SERVICE_NAME,
+            launchd: LAUNCHD_LABEL,
+            pid_file: pid_file_path(&ctx.project_root),
+        },
+    )
+    .await;
+    if current == ServiceState::Running {
+        return (current, false);
+    }
+    let legacy = state_of(
+        ctx,
+        &ServiceNames {
+            systemd: LEGACY_SERVICE_NAME,
+            launchd: LEGACY_LAUNCHD_LABEL,
+            pid_file: legacy_pid_file_path(&ctx.project_root),
+        },
+    )
+    .await;
+    match (current, legacy) {
+        (_, ServiceState::Running) => (ServiceState::Running, true),
+        (ServiceState::NotFound, ServiceState::Stopped) => (ServiceState::Stopped, true),
+        (current, _) => (current, false),
+    }
+}
+
+async fn state_of(ctx: &SetupContext, names: &ServiceNames<'_>) -> ServiceState {
     let runner = ctx.runner.as_ref();
     match ctx.platform.service_manager() {
         ServiceManager::Launchd => {
@@ -56,7 +105,7 @@ pub async fn service_state(ctx: &SetupContext) -> ServiceState {
             out.stdout
                 .lines()
                 .map(|l| l.split_whitespace().collect::<Vec<_>>())
-                .find(|cols| cols.get(2) == Some(&LAUNCHD_LABEL))
+                .find(|cols| cols.get(2) == Some(&names.launchd))
                 .map_or(ServiceState::NotFound, |cols| match cols.first() {
                     Some(pid) if *pid != "-" => ServiceState::Running,
                     _ => ServiceState::Stopped,
@@ -67,7 +116,7 @@ pub async fn service_state(ctx: &SetupContext) -> ServiceState {
             if !ctx.platform.is_root() {
                 base.push("--user");
             }
-            let with = |extra: &[&'static str]| -> Vec<String> {
+            let with = |extra: &[&str]| -> Vec<String> {
                 base.iter()
                     .chain(extra.iter())
                     .map(|s| (*s).to_string())
@@ -76,7 +125,7 @@ pub async fn service_state(ctx: &SetupContext) -> ServiceState {
             let active = runner
                 .run(&CommandSpec::new(
                     "systemctl",
-                    with(&["is-active", SERVICE_NAME]),
+                    with(&["is-active", names.systemd]),
                 ))
                 .await;
             if active.success() {
@@ -85,7 +134,7 @@ pub async fn service_state(ctx: &SetupContext) -> ServiceState {
             let files = runner
                 .run(&CommandSpec::new("systemctl", with(&["list-unit-files"])))
                 .await;
-            let unit = format!("{SERVICE_NAME}.service");
+            let unit = format!("{}.service", names.systemd);
             if files.success()
                 && files
                     .stdout
@@ -98,14 +147,13 @@ pub async fn service_state(ctx: &SetupContext) -> ServiceState {
             }
         }
         ServiceManager::None => {
-            let pid_file = pid_file_path(&ctx.project_root);
-            let Ok(raw) = std::fs::read_to_string(&pid_file) else {
+            let Ok(raw) = std::fs::read_to_string(&names.pid_file) else {
                 return ServiceState::NotFound;
             };
             match raw.trim().parse::<u32>() {
                 Ok(pid) if pid > 0 => {
                     // The recorded PID may belong to another process by now
-                    // (reboot, crash): it counts only while it runs Talon.
+                    // (reboot, crash): it counts only while it runs Talahon.
                     let ps = runner
                         .run(&CommandSpec::new(
                             "ps",
@@ -117,8 +165,11 @@ pub async fn service_state(ctx: &SetupContext) -> ServiceState {
                             ],
                         ))
                         .await;
+                    // Either binary name: an instance started before the
+                    // upgrade still runs as `talon`.
                     let ours = format!("{} run", ctx.talon_binary.display());
-                    if ps.success() && ps.stdout.contains(&ours) {
+                    let legacy = format!("{} run", legacy_binary_path(&ctx.talon_binary).display());
+                    if ps.success() && (ps.stdout.contains(&ours) || ps.stdout.contains(&legacy)) {
                         ServiceState::Running
                     } else {
                         ServiceState::Stopped
@@ -156,7 +207,7 @@ pub fn configured_channels(ctx: &SetupContext) -> BTreeMap<&'static str, &'stati
 /// Never fails internally; problems are reported in the block.
 pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOutcome> {
     tracing::info!("Starting verification");
-    let service = service_state(ctx).await;
+    let (service, legacy_service) = service_report(ctx).await;
 
     let runtimes = detect_runtime(ctx.runner.as_ref(), &ctx.config.container_runtime).await;
     let image_ok = match &runtimes.selected {
@@ -209,6 +260,19 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
                 "missing"
             },
         );
+    if legacy_service {
+        // Still `talon.service` / `com.talon` / `talon.pid`:
+        // `talahon setup service` replaces it.
+        block.set("SERVICE_HAS_OLD_NAME", true);
+    }
+    if !image_ok
+        && let Some(rt) = &runtimes.selected
+        && let Some(legacy) =
+            legacy_image_present(ctx.runner.as_ref(), rt, &ctx.config.container_image).await
+    {
+        // Not used in place of the configured image: rebuild it.
+        block.set("LEGACY_IMAGE", legacy);
+    }
     add_vllm_fields(&mut block, vllm_cfg.as_ref(), api_key_set, &vllm);
     block.set("CONFIGURED_CHANNELS", channel_names.join(","));
     block.set("CHANNEL_AUTH", channel_auth);
@@ -254,7 +318,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(MockRunner::new());
         runner.on(
-            "systemctl --user is-active talon",
+            "systemctl --user is-active talahon",
             CommandOutput::ok("active"),
         );
         let mut c = ctx(dir.path(), runner, "");
@@ -265,7 +329,7 @@ mod tests {
         let runner = Arc::new(MockRunner::new());
         runner.on(
             "systemctl --user list-unit-files",
-            CommandOutput::ok("talon.service disabled enabled\n"),
+            CommandOutput::ok("talahon.service disabled enabled\n"),
         );
         c.runner = runner;
         assert_eq!(service_state(&c).await, ServiceState::Stopped);
@@ -279,7 +343,7 @@ mod tests {
         assert_eq!(service_state(&c).await, ServiceState::NotFound);
 
         let runner = Arc::new(MockRunner::new());
-        runner.on("systemctl is-active talon", CommandOutput::ok("active"));
+        runner.on("systemctl is-active talahon", CommandOutput::ok("active"));
         c.runner = runner;
         c.platform.uid = Some(0);
         assert_eq!(service_state(&c).await, ServiceState::Running);
@@ -299,7 +363,7 @@ mod tests {
 
         c.platform.platform = Platform::Linux;
         assert_eq!(service_state(&c).await, ServiceState::NotFound);
-        std::fs::write(dir.path().join("talon.pid"), "4242\n").unwrap();
+        std::fs::write(dir.path().join("talahon.pid"), "4242\n").unwrap();
         let runner = Arc::new(MockRunner::new());
         runner.on(
             "ps -p 4242 -o args=",
@@ -307,7 +371,7 @@ mod tests {
         );
         c.runner = runner;
         assert_eq!(service_state(&c).await, ServiceState::Running);
-        // A stale PID now used by another process is not Talon.
+        // A stale PID now used by another process is not Talahon.
         let runner = Arc::new(MockRunner::new());
         runner.on(
             "ps -p 4242 -o args=",
@@ -315,8 +379,94 @@ mod tests {
         );
         c.runner = runner;
         assert_eq!(service_state(&c).await, ServiceState::Stopped);
-        std::fs::write(dir.path().join("talon.pid"), "garbage").unwrap();
+        std::fs::write(dir.path().join("talahon.pid"), "garbage").unwrap();
         assert_eq!(service_state(&c).await, ServiceState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn the_pre_rename_service_names_are_still_recognised() {
+        let dir = tempfile::tempdir().unwrap();
+        // systemd: only `talon.service` is active.
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "systemctl --user is-active talon",
+            CommandOutput::ok("active"),
+        );
+        let mut c = ctx(dir.path(), runner, "");
+        c.platform.has_systemd = true;
+        c.platform.uid = Some(1000);
+        assert_eq!(service_report(&c).await, (ServiceState::Running, true));
+        let b = run(&StepArgs::default(), &c).await.unwrap().block.unwrap();
+        assert_eq!(b.get("SERVICE"), Some("running"));
+        assert_eq!(b.get("SERVICE_HAS_OLD_NAME"), Some("true"));
+
+        // Installed under the old name, not running.
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "systemctl --user list-unit-files",
+            CommandOutput::ok("talon.service enabled enabled\n"),
+        );
+        c.runner = runner;
+        assert_eq!(service_report(&c).await, (ServiceState::Stopped, true));
+
+        // Both installed, the new one running: that is the one reported.
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "systemctl --user is-active talahon",
+            CommandOutput::ok("active"),
+        );
+        runner.on(
+            "systemctl --user is-active talon",
+            CommandOutput::ok("active"),
+        );
+        c.runner = runner;
+        assert_eq!(service_report(&c).await, (ServiceState::Running, false));
+
+        // launchd: `com.talon` loaded and running.
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "launchctl list",
+            CommandOutput::ok("PID Status Label\n77\t0\tcom.talon\n"),
+        );
+        let mut c = ctx(dir.path(), runner, "");
+        c.platform.platform = Platform::MacOs;
+        assert_eq!(service_report(&c).await, (ServiceState::Running, true));
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "launchctl list",
+            CommandOutput::ok("PID Status Label\n77\t0\tcom.talahon\n"),
+        );
+        c.runner = runner;
+        assert_eq!(service_report(&c).await, (ServiceState::Running, false));
+
+        // No service manager: `talon.pid` of an instance started as `talon`.
+        c.platform.platform = Platform::Linux;
+        std::fs::write(dir.path().join("talon.pid"), "4242\n").unwrap();
+        let old_binary = c.talon_binary.with_file_name("talon");
+        let runner = Arc::new(MockRunner::new());
+        runner.on(
+            "ps -p 4242 -o args=",
+            CommandOutput::ok(&format!("{} run\n", old_binary.display())),
+        );
+        c.runner = runner;
+        assert_eq!(service_report(&c).await, (ServiceState::Running, true));
+    }
+
+    #[tokio::test]
+    async fn a_missing_image_names_the_pre_rename_one_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(MockRunner::new());
+        runner.install("docker");
+        runner.on("docker info", CommandOutput::ok("27"));
+        runner.on(
+            "docker image inspect --format {{.Id}} talon-agent:latest",
+            CommandOutput::ok("sha256:old"),
+        );
+        let c = ctx(dir.path(), runner, "");
+        let b = run(&StepArgs::default(), &c).await.unwrap().block.unwrap();
+        assert_eq!(b.get("IMAGE"), Some("talahon-agent:latest"));
+        assert_eq!(b.get("IMAGE_PRESENT"), Some("false"));
+        assert_eq!(b.get("LEGACY_IMAGE"), Some("talon-agent:latest"));
     }
 
     #[tokio::test]
@@ -368,7 +518,7 @@ mod tests {
         let c = ctx(
             dir.path(),
             Arc::new(MockRunner::new()),
-            "TALON_VLLM_API_KEY=secret-key\nCOPILOT_HTTP_BIND=127.0.0.1\n",
+            "TALAHON_VLLM_API_KEY=secret-key\nCOPILOT_HTTP_BIND=127.0.0.1\n",
         );
         let out = run(&StepArgs::default(), &c).await.unwrap();
         assert!(!out.render().contains("secret-key"));

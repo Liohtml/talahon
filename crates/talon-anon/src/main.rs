@@ -1,12 +1,12 @@
-//! `talon-anon-proxy` — anonymizing MCP stdio proxy.
+//! `talahon-anon-proxy` — anonymizing MCP stdio proxy.
 //!
 //! ```text
-//! talon-anon-proxy [--fields <yaml>] --map <file> -- <upstream cmd> [args...]
+//! talahon-anon-proxy [--fields <yaml>] --map <file> -- <upstream cmd> [args...]
 //! ```
 //!
 //! Speaks line-delimited JSON-RPC on stdin/stdout (the agent side) and runs
 //! the upstream MCP server as a child process. Logs go to stderr only
-//! (`TALON_ANON_LOG` / `RUST_LOG`, default `info`); stdout is the protocol.
+//! (`TALAHON_ANON_LOG` / `RUST_LOG`, default `info`); stdout is the protocol.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -24,18 +24,18 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "talon-anon-proxy",
+    name = "talahon-anon-proxy",
     version,
     about = "Anonymizing MCP stdio proxy: tokenizes PII in upstream tool results and answers a local `deanonymize` tool",
-    after_help = "Example:\n  talon-anon-proxy --fields siem/anon_proxy/fields.yaml --map \"$HOME/session_tokens.json\" -- siem/opensearch-mcp.sh"
+    after_help = "Example:\n  talahon-anon-proxy --fields siem/anon_proxy/fields.yaml --map \"$HOME/session_tokens.json\" -- siem/opensearch-mcp.sh"
 )]
 struct Cli {
     /// Field definitions (fields.yaml). Defaults to the copy embedded at build time.
-    #[arg(long, env = "TALON_ANON_FIELDS", value_name = "YAML")]
+    #[arg(long, env = "TALAHON_ANON_FIELDS", value_name = "YAML")]
     fields: Option<PathBuf>,
 
     /// Session token map (JSON, Python-compatible); created with mode 0600.
-    #[arg(long, env = "TALON_ANON_MAP", value_name = "FILE")]
+    #[arg(long, env = "TALAHON_ANON_MAP", value_name = "FILE")]
     map: PathBuf,
 
     /// Maximum size of one JSON-RPC message in bytes.
@@ -64,10 +64,31 @@ struct Cli {
     upstream: Vec<OsString>,
 }
 
+/// `clap` knows no alias for `env`: an argument whose `TALAHON_*` variable is
+/// unset reads the pre-rename `TALON_*` name instead when that one is set.
+fn parse_cli() -> Cli {
+    use clap::{CommandFactory, FromArgMatches};
+    let cmd = Cli::command().mut_args(|arg| {
+        match arg
+            .get_env()
+            .and_then(|key| key.to_str())
+            .and_then(talon_core::env::legacy_process_key_in_use)
+        {
+            // `clap` wants a `'static` name; one short string per aliased
+            // variable for the life of the process.
+            Some(legacy) => arg.env(&*Box::leak(legacy.into_boxed_str())),
+            None => arg,
+        }
+    });
+    Cli::from_arg_matches(&cmd.get_matches()).unwrap_or_else(|e| e.exit())
+}
+
 fn init_tracing() {
-    let filter = EnvFilter::try_from_env("TALON_ANON_LOG")
-        .or_else(|_| EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    // `TALAHON_ANON_LOG`, or its pre-rename alias `TALON_ANON_LOG`.
+    let filter = talon_core::env::process_var("TALAHON_ANON_LOG")
+        .and_then(|f| EnvFilter::try_new(f).ok())
+        .or_else(|| EnvFilter::try_from_default_env().ok())
+        .unwrap_or_else(|| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -240,8 +261,9 @@ async fn run(cli: Cli) -> u8 {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     init_tracing();
+    talon_core::env::flush_legacy_key_warnings();
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

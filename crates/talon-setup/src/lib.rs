@@ -1,6 +1,6 @@
 //! # talon-setup — install, verify and service management
 //!
-//! Library behind `talon setup <step> [args...]`.
+//! Library behind `talahon setup <step> [args...]`.
 //! Every step prints one machine-readable status block (see [`status`]) that
 //! the setup skill parses, and returns an exit code:
 //!
@@ -11,7 +11,7 @@
 //! | `vllm`        | `CHECK_VLLM`        | `GET <base>/v1/models`, model served                 |
 //! | `container`   | `SETUP_CONTAINER`   | build + smoke-test the agent image                   |
 //! | `groups`      | `SYNC_GROUPS`       | chat discovery report, `--list`                      |
-//! | `register`    | `REGISTER_CHANNEL`  | register a chat, create its folder / `CLAUDE.md`     |
+//! | `register`    | `REGISTER_CHANNEL`  | register a chat, create its folder / `AGENT.md`      |
 //! | `mounts`      | `CONFIGURE_MOUNTS`  | write the mount allowlist                            |
 //! | `egress`      | `SETUP_EGRESS`      | firewall for the agent bridge (print / `--apply`)    |
 //! | `service`     | `SETUP_SERVICE`     | systemd (hardened) / launchd / nohup                 |
@@ -36,7 +36,7 @@
 //! ```
 //!
 //! External commands go through [`CommandRunner`] (argv only, never a
-//! shell) so every step is unit-testable; secrets (`TALON_VLLM_API_KEY`,
+//! shell) so every step is unit-testable; secrets (`TALAHON_VLLM_API_KEY`,
 //! channel tokens) are used but never printed.
 
 #![warn(missing_docs)]

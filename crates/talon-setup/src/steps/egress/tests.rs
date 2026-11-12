@@ -510,7 +510,7 @@ fn scripts_are_wrapped_and_end_with_exit() {
     }
     let nft = render_script(&private_policy(), Backend::Nft, EgressAction::Install);
     let body = format!(
-        "nft -f - <<'TALON_EGRESS_RULES'\n{}TALON_EGRESS_RULES\n\nexit 0\n",
+        "nft -f - <<'TALAHON_EGRESS_RULES'\n{}TALAHON_EGRESS_RULES\n\nexit 0\n",
         nft_ruleset(&private_policy(), EgressAction::Install)
     );
     assert!(nft.ends_with(&body), "{nft}");
@@ -548,7 +548,7 @@ fn script_header_documents_mode_and_trade_off() {
     assert!(text.contains("169.254.169.254"), "{text}");
     assert!(text.contains("only tcp/3101 (LLM gateway)"), "{text}");
     assert!(text.contains("#   10.0.0.5/32:9200\n#   10.1.0.0/16\n#   [fd00:1::/64]:443"));
-    assert!(text.contains("talon setup egress --uninstall --apply --nft"));
+    assert!(text.contains("talahon setup egress --uninstall --apply --nft"));
 
     let script = render_script(&private_policy(), Backend::Iptables, EgressAction::Install);
     assert!(script.contains("# Mode block-private: internet egress is kept"));
@@ -895,7 +895,7 @@ async fn iptables_apply_stops_at_first_failure_and_stays_closed() {
 fn ctx(dir: &Path, runner: Arc<dyn CommandRunner>) -> SetupContext {
     let mut ctx = SetupContext::new(dir, dir, runner);
     ctx.config.llm_gateway_port = 3001;
-    ctx.talon_binary = PathBuf::from("/opt/talon/bin/talon");
+    ctx.talon_binary = PathBuf::from("/opt/talahon/bin/talahon");
     ctx
 }
 
@@ -936,7 +936,7 @@ async fn prints_script_and_block_without_applying() {
     assert_eq!(
         b.get("NEXT_STEP"),
         Some(
-            "review the script above, then run as root: sudo '/opt/talon/bin/talon' setup egress --apply --nft --gateway-port 3001 --allow 10.0.0.5/32:9200 --allow '[fd00::7/128]:443'"
+            "review the script above, then run as root: sudo '/opt/talahon/bin/talahon' setup egress --apply --nft --gateway-port 3001 --allow 10.0.0.5/32:9200 --allow '[fd00::7/128]:443'"
         )
     );
     assert_eq!(b.status(), Some("success"));
@@ -972,7 +972,7 @@ async fn apply_without_root_explains_instead() {
     assert!(
         b.get("NEXT_STEP")
             .unwrap()
-            .contains("sudo '/opt/talon/bin/talon' setup egress --apply --nft")
+            .contains("sudo '/opt/talahon/bin/talahon' setup egress --apply --nft")
     );
     assert!(!runner.called("nft"));
     assert!(!out.lines.is_empty(), "the script is still printed");
@@ -1149,15 +1149,15 @@ async fn blocked_dns_resolvers_are_reported() {
 
 #[tokio::test]
 async fn vllm_reachable_without_key_is_warned() {
-    if std::env::var_os("TALON_VLLM_BASE_URL").is_some()
-        || std::env::var_os("TALON_VLLM_MODEL").is_some()
+    if talon_core::env::process_var_is_set("TALAHON_VLLM_BASE_URL")
+        || talon_core::env::process_var_is_set("TALAHON_VLLM_MODEL")
     {
         return; // process env would override the test .env
     }
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(".env"),
-        "TALON_VLLM_BASE_URL=http://10.9.0.7:8000/v1\nTALON_VLLM_MODEL=qwen\n",
+        "TALAHON_VLLM_BASE_URL=http://10.9.0.7:8000/v1\nTALAHON_VLLM_MODEL=qwen\n",
     )
     .unwrap();
     let runner = Arc::new(MockRunner::new());
@@ -1177,7 +1177,7 @@ async fn vllm_reachable_without_key_is_warned() {
     // With an API key the server rejects direct calls: no warning.
     std::fs::write(
         dir.path().join(".env"),
-        "TALON_VLLM_BASE_URL=http://10.9.0.7:8000/v1\nTALON_VLLM_MODEL=qwen\nTALON_VLLM_API_KEY=k\n",
+        "TALAHON_VLLM_BASE_URL=http://10.9.0.7:8000/v1\nTALAHON_VLLM_MODEL=qwen\nTALAHON_VLLM_API_KEY=k\n",
     )
     .unwrap();
     let mut c = c;
@@ -1206,8 +1206,8 @@ async fn dispatched_by_name() {
 #[test]
 fn persist_unit_quotes_arguments_and_paths() {
     let unit = persist_unit(
-        Path::new("/opt/my talon/bin/talon"),
-        Path::new("/srv/100%/talon"),
+        Path::new("/opt/my talahon/bin/talahon"),
+        Path::new("/srv/100%/talahon"),
         &[
             "--apply".to_string(),
             "--nft".to_string(),
@@ -1217,17 +1217,17 @@ fn persist_unit_quotes_arguments_and_paths() {
     )
     .unwrap();
     assert!(unit.contains(
-        "ExecStart=\"/opt/my talon/bin/talon\" setup egress --apply --nft --allow [fd00::5]:443\n"
+        "ExecStart=\"/opt/my talahon/bin/talahon\" setup egress --apply --nft --allow [fd00::5]:443\n"
     ));
-    assert!(unit.contains("WorkingDirectory=/srv/100%%/talon\n"));
+    assert!(unit.contains("WorkingDirectory=/srv/100%%/talahon\n"));
     assert!(unit.contains("Type=oneshot\n"));
     assert!(unit.contains("After=docker.service\n"));
     assert!(unit.contains("WantedBy=multi-user.target\n"));
     // A line break in a path must not smuggle a directive into a root unit.
     assert!(
         persist_unit(
-            Path::new("/opt/talon\nExecStartPre=/bin/rm -rf /"),
-            Path::new("/srv/talon"),
+            Path::new("/opt/talahon\nExecStartPre=/bin/rm -rf /"),
+            Path::new("/srv/talahon"),
             &[]
         )
         .is_err()
@@ -1284,7 +1284,7 @@ async fn persist_writes_and_enables_the_boot_unit() {
     assert_eq!(b.get("PERSISTED"), Some("true"));
     let unit = std::fs::read_to_string(c.systemd_system_dir.join(PERSIST_UNIT)).unwrap();
     assert!(unit.contains(
-        "ExecStart=/opt/talon/bin/talon setup egress --apply --nft --gateway-port 3001 --allow 10.0.0.5/32:9200\n"
+        "ExecStart=/opt/talahon/bin/talahon setup egress --apply --nft --gateway-port 3001 --allow 10.0.0.5/32:9200\n"
     ), "{unit}");
     let calls = runner.calls();
     assert!(calls.contains(&"systemctl daemon-reload".to_string()));
@@ -1300,6 +1300,77 @@ async fn persist_writes_and_enables_the_boot_unit() {
         runner
             .calls()
             .contains(&format!("systemctl disable {PERSIST_UNIT}"))
+    );
+}
+
+#[tokio::test]
+async fn persist_replaces_the_pre_rename_boot_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = nft_runner();
+    runner.on("systemctl ", CommandOutput::ok(""));
+    let mut c = ctx(dir.path(), runner.clone());
+    c.platform.uid = Some(0);
+    c.platform.has_systemd = true;
+    c.systemd_system_dir = dir.path().join("units");
+    // An installation from before the rename: `talon-egress.service`
+    // running the old binary.
+    assert_eq!(LEGACY_PERSIST_UNIT, "talon-egress.service");
+    assert_eq!(PERSIST_UNIT, "talahon-egress.service");
+    std::fs::create_dir_all(&c.systemd_system_dir).unwrap();
+    let legacy = c.systemd_system_dir.join(LEGACY_PERSIST_UNIT);
+    std::fs::write(
+        &legacy,
+        "[Service]\nExecStart=/opt/talon/bin/talon setup egress --apply --nft\n",
+    )
+    .unwrap();
+
+    // Applying without --persist leaves it alone (nothing replaces it).
+    let out = step(&c, &["--apply", "--nft"]).await;
+    assert_eq!(out.exit_code, 0, "{:?}", out.block);
+    assert!(legacy.exists());
+
+    let out = step(&c, &["--apply", "--persist", "--nft"]).await;
+    let b = out.block.unwrap();
+    assert_eq!(out.exit_code, 0, "{b:?}");
+    assert_eq!(b.get("PERSISTED"), Some("true"));
+    assert!(c.systemd_system_dir.join(PERSIST_UNIT).is_file());
+    assert!(!legacy.exists(), "the old unit must be gone");
+    let calls = runner.calls();
+    let pos = |needle: &str| {
+        calls
+            .iter()
+            .position(|c| c == needle)
+            .unwrap_or_else(|| panic!("{needle} not run: {calls:?}"))
+    };
+    // The new unit is enabled before the old one is taken away.
+    assert!(
+        pos(&format!("systemctl enable {PERSIST_UNIT}"))
+            < pos(&format!("systemctl disable --now {LEGACY_PERSIST_UNIT}"))
+    );
+}
+
+#[tokio::test]
+async fn uninstall_removes_a_pre_rename_boot_unit_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = nft_runner();
+    runner.on("systemctl ", CommandOutput::ok(""));
+    let mut c = ctx(dir.path(), runner.clone());
+    c.platform.uid = Some(0);
+    c.platform.has_systemd = true;
+    c.systemd_system_dir = dir.path().join("units");
+    std::fs::create_dir_all(&c.systemd_system_dir).unwrap();
+    let legacy = c.systemd_system_dir.join(LEGACY_PERSIST_UNIT);
+    std::fs::write(&legacy, "[Service]\n").unwrap();
+
+    let out = step(&c, &["--uninstall", "--apply", "--nft"]).await;
+    let b = out.block.unwrap();
+    assert_eq!(out.exit_code, 0, "{b:?}");
+    assert_eq!(b.get("PERSIST_UNIT_REMOVED"), Some("true"));
+    assert!(!legacy.exists());
+    assert!(
+        runner
+            .calls()
+            .contains(&format!("systemctl disable {LEGACY_PERSIST_UNIT}"))
     );
 }
 

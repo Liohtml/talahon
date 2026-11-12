@@ -15,9 +15,9 @@
 //! | `MYSQL_CONNECT_TIMEOUT` | Seconds for connect + TLS + login (default 10, at most 300) |
 //! | `MYSQL_SQL_MODE` | Session `sql_mode` (default `TRADITIONAL`; set but empty keeps the server's) |
 //! | `MYSQL_CHARSET` / `MYSQL_COLLATION` | Connection character set (`utf8mb4` only) and collation (default `utf8mb4_unicode_ci`) |
-//! | `TALON_MYSQL_QUERY_TIMEOUT` | Seconds one statement may run (default 120, at most 3600) |
-//! | `TALON_MYSQL_MAX_ROWS` | Rows returned at most (default 50000) |
-//! | `TALON_MYSQL_MAX_RESULT_BYTES` | Result text returned at most (default 1 MiB) |
+//! | `TALAHON_MYSQL_QUERY_TIMEOUT` | Seconds one statement may run (default 120, at most 3600) |
+//! | `TALAHON_MYSQL_MAX_ROWS` | Rows returned at most (default 50000) |
+//! | `TALAHON_MYSQL_MAX_RESULT_BYTES` | Result text returned at most (default 1 MiB) |
 //!
 //! Not implemented, and refused at start-up instead of being ignored:
 //! the SSH tunnel (`MYSQL_SSH_ENABLE=true`) and the SSE transport
@@ -31,21 +31,21 @@ use std::time::Duration;
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Upper bound for `MYSQL_CONNECT_TIMEOUT`.
 pub const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
-/// Default for `TALON_MYSQL_QUERY_TIMEOUT`. Below the 300 s the Talon MCP
+/// Default for `TALAHON_MYSQL_QUERY_TIMEOUT`. Below the 300 s the Talahon MCP
 /// client waits for a tool call, so the model gets this server's message.
 pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(120);
-/// Upper bound for `TALON_MYSQL_QUERY_TIMEOUT`.
+/// Upper bound for `TALAHON_MYSQL_QUERY_TIMEOUT`.
 pub const MAX_QUERY_TIMEOUT: Duration = Duration::from_secs(3600);
-/// Default for `TALON_MYSQL_MAX_ROWS`.
+/// Default for `TALAHON_MYSQL_MAX_ROWS`.
 pub const DEFAULT_MAX_ROWS: usize = 50_000;
-/// Upper bound for `TALON_MYSQL_MAX_ROWS`.
+/// Upper bound for `TALAHON_MYSQL_MAX_ROWS`.
 pub const MAX_MAX_ROWS: usize = 1_000_000;
-/// Default for `TALON_MYSQL_MAX_RESULT_BYTES`. The Talon agent keeps at most
+/// Default for `TALAHON_MYSQL_MAX_RESULT_BYTES`. The Talahon agent keeps at most
 /// 200 kB of a tool result, so this only bounds what is buffered here.
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 1024 * 1024;
-/// Lower bound for `TALON_MYSQL_MAX_RESULT_BYTES`.
+/// Lower bound for `TALAHON_MYSQL_MAX_RESULT_BYTES`.
 pub const MIN_MAX_RESULT_BYTES: usize = 1024;
-/// Upper bound for `TALON_MYSQL_MAX_RESULT_BYTES`: a result is embedded in
+/// Upper bound for `TALAHON_MYSQL_MAX_RESULT_BYTES`: a result is embedded in
 /// one JSON-RPC line, whose escaping can double it; 8 MiB stays below the
 /// 16 MiB message limit of `talon-mcp` clients.
 pub const MAX_MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
@@ -74,7 +74,7 @@ pub enum ConfigError {
         reason: String,
     },
     /// A feature of the Python server that this server does not implement.
-    #[error("{var} is not supported by talon-mysql-mcp; {hint}")]
+    #[error("{var} is not supported by talahon-mysql-mcp; {hint}")]
     Unsupported {
         /// The environment variable.
         var: &'static str,
@@ -254,16 +254,20 @@ impl Config {
     /// (taken verbatim) and `MYSQL_SQL_MODE` / `MYSQL_COLLATION` (where an
     /// empty value means "leave the server's default").
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        // A `TALAHON_*` setting that is unset (or blank) is looked up under
+        // its pre-rename `TALON_*` name as well.
         let get = |name: &str| {
-            lookup(name)
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
+            talon_core::env::resolve_with(name, |key| {
+                lookup(key)
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
         };
 
         if get("MYSQL_SSH_ENABLE").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
             return Err(ConfigError::Unsupported {
                 var: "MYSQL_SSH_ENABLE",
-                hint: "unset TALON_MYSQL_MCP to use the Python server for SSH tunnels",
+                hint: "unset TALAHON_MYSQL_MCP to use the Python server for SSH tunnels",
             });
         }
         if get("MCP_TRANSPORT").is_some_and(|v| v.eq_ignore_ascii_case("sse")) {
@@ -396,23 +400,23 @@ impl Config {
                 MAX_CONNECT_TIMEOUT,
             )?,
             query_timeout: seconds(
-                "TALON_MYSQL_QUERY_TIMEOUT",
-                get("TALON_MYSQL_QUERY_TIMEOUT"),
+                "TALAHON_MYSQL_QUERY_TIMEOUT",
+                get("TALAHON_MYSQL_QUERY_TIMEOUT"),
                 DEFAULT_QUERY_TIMEOUT,
                 MAX_QUERY_TIMEOUT,
             )?,
             sql_mode,
             collation,
             max_rows: bounded(
-                "TALON_MYSQL_MAX_ROWS",
-                get("TALON_MYSQL_MAX_ROWS"),
+                "TALAHON_MYSQL_MAX_ROWS",
+                get("TALAHON_MYSQL_MAX_ROWS"),
                 DEFAULT_MAX_ROWS,
                 1,
                 MAX_MAX_ROWS,
             )?,
             max_result_bytes: bounded(
-                "TALON_MYSQL_MAX_RESULT_BYTES",
-                get("TALON_MYSQL_MAX_RESULT_BYTES"),
+                "TALAHON_MYSQL_MAX_RESULT_BYTES",
+                get("TALAHON_MYSQL_MAX_RESULT_BYTES"),
                 DEFAULT_MAX_RESULT_BYTES,
                 MIN_MAX_RESULT_BYTES,
                 MAX_MAX_RESULT_BYTES,
@@ -463,7 +467,7 @@ mod tests {
         Config::from_lookup(|name| map.get(name).cloned())
     }
 
-    const BASE: [(&str, &str); 2] = [("MYSQL_USER", "talon"), ("MYSQL_PASSWORD", "pw")];
+    const BASE: [(&str, &str); 2] = [("MYSQL_USER", "talahon"), ("MYSQL_PASSWORD", "pw")];
 
     fn with(extra: &[(&str, &str)]) -> Result<Config, ConfigError> {
         let mut vars = BASE.to_vec();
@@ -476,7 +480,7 @@ mod tests {
         let c = with(&[]).unwrap();
         assert_eq!(c.host, "localhost");
         assert_eq!(c.port, 3306);
-        assert_eq!(c.user, "talon");
+        assert_eq!(c.user, "talahon");
         assert_eq!(c.password, "pw");
         assert_eq!(c.database, None);
         assert_eq!(c.tls, TlsMode::Preferred);
@@ -600,12 +604,12 @@ mod tests {
             ("MYSQL_CONNECT_TIMEOUT", "soon"),
             ("MYSQL_CONNECT_TIMEOUT", "0"),
             ("MYSQL_CONNECT_TIMEOUT", "1.5"),
-            ("TALON_MYSQL_QUERY_TIMEOUT", "-1"),
-            ("TALON_MYSQL_MAX_ROWS", "0"),
-            ("TALON_MYSQL_MAX_ROWS", "1000001"),
-            ("TALON_MYSQL_MAX_ROWS", "many"),
-            ("TALON_MYSQL_MAX_RESULT_BYTES", "10"),
-            ("TALON_MYSQL_MAX_RESULT_BYTES", "999999999999"),
+            ("TALAHON_MYSQL_QUERY_TIMEOUT", "-1"),
+            ("TALAHON_MYSQL_MAX_ROWS", "0"),
+            ("TALAHON_MYSQL_MAX_ROWS", "1000001"),
+            ("TALAHON_MYSQL_MAX_ROWS", "many"),
+            ("TALAHON_MYSQL_MAX_RESULT_BYTES", "10"),
+            ("TALAHON_MYSQL_MAX_RESULT_BYTES", "999999999999"),
             ("MYSQL_CHARSET", "latin1"),
             ("MYSQL_COLLATION", "latin1_swedish_ci"),
             ("MYSQL_COLLATION", "utf8mb4_bin'; DROP TABLE x; --"),
@@ -625,12 +629,39 @@ mod tests {
     }
 
     #[test]
-    fn timeouts_and_limits() {
+    fn limits_under_the_old_talon_prefix_are_still_read() {
+        // mysql/.env written before the rename.
         let c = with(&[
-            ("MYSQL_CONNECT_TIMEOUT", "3"),
             ("TALON_MYSQL_QUERY_TIMEOUT", "45"),
             ("TALON_MYSQL_MAX_ROWS", "100"),
             ("TALON_MYSQL_MAX_RESULT_BYTES", "4096"),
+        ])
+        .unwrap();
+        assert_eq!(c.query_timeout, Duration::from_secs(45));
+        assert_eq!(c.max_rows, 100);
+        assert_eq!(c.max_result_bytes, 4096);
+        // Both spellings: the new one wins; a blank new one does not hide
+        // the old one.
+        let c = with(&[
+            ("TALON_MYSQL_MAX_ROWS", "100"),
+            ("TALAHON_MYSQL_MAX_ROWS", "7"),
+            ("TALON_MYSQL_QUERY_TIMEOUT", "45"),
+            ("TALAHON_MYSQL_QUERY_TIMEOUT", "  "),
+        ])
+        .unwrap();
+        assert_eq!(c.max_rows, 7);
+        assert_eq!(c.query_timeout, Duration::from_secs(45));
+        // An invalid value under the old name is still an error.
+        assert!(with(&[("TALON_MYSQL_MAX_ROWS", "many")]).is_err());
+    }
+
+    #[test]
+    fn timeouts_and_limits() {
+        let c = with(&[
+            ("MYSQL_CONNECT_TIMEOUT", "3"),
+            ("TALAHON_MYSQL_QUERY_TIMEOUT", "45"),
+            ("TALAHON_MYSQL_MAX_ROWS", "100"),
+            ("TALAHON_MYSQL_MAX_RESULT_BYTES", "4096"),
         ])
         .unwrap();
         assert_eq!(c.connect_timeout, Duration::from_secs(3));
@@ -640,7 +671,7 @@ mod tests {
         // Clamped, not rejected: a huge timeout is a typo, not an attack.
         let c = with(&[
             ("MYSQL_CONNECT_TIMEOUT", "99999"),
-            ("TALON_MYSQL_QUERY_TIMEOUT", "99999"),
+            ("TALAHON_MYSQL_QUERY_TIMEOUT", "99999"),
         ])
         .unwrap();
         assert_eq!(c.connect_timeout, MAX_CONNECT_TIMEOUT);
@@ -683,7 +714,10 @@ mod tests {
                 ..
             }
         ));
-        assert!(err.to_string().contains("not supported by talon-mysql-mcp"));
+        assert!(
+            err.to_string()
+                .contains("not supported by talahon-mysql-mcp")
+        );
         let err = with(&[("MCP_TRANSPORT", "sse")]).unwrap_err();
         assert!(matches!(
             err,
@@ -698,13 +732,13 @@ mod tests {
     #[test]
     fn debug_redacts_credentials() {
         let c = load(&[
-            ("MYSQL_USER", "talon-user"),
+            ("MYSQL_USER", "talahon-user"),
             ("MYSQL_PASSWORD", "hunter2-secret"),
         ])
         .unwrap();
         let text = format!("{c:?}");
         assert!(!text.contains("hunter2-secret"), "{text}");
-        assert!(!text.contains("talon-user"), "{text}");
+        assert!(!text.contains("talahon-user"), "{text}");
         assert!(text.contains("<redacted>"));
     }
 

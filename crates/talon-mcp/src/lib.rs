@@ -32,7 +32,7 @@
 //! let config = McpConfigFile::load_optional("/workspace/group/.mcp.json".as_ref())?
 //!     .unwrap_or_default();
 //! let mut options = ManagerOptions::default()
-//!     .with_socket_dir(std::env::var_os("TALON_MCP_SOCKET_DIR").map(Into::into));
+//!     .with_socket_dir(std::env::var_os("TALAHON_MCP_SOCKET_DIR").map(Into::into));
 //! options.reserved_tool_names = vec!["bash".into(), "read_file".into()];
 //! options.adapter.post_processor = Some(Arc::new(|server, _tool, text| {
 //!     format!("<untrusted_data source=\"mcp:{server}\">\n{text}\n</untrusted_data>")

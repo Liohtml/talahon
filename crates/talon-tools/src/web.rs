@@ -96,6 +96,8 @@ impl Default for WebFetchOptions {
             max_output_bytes: 100_000,
             timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
+            // User-Agent strings are an external identifier (allowlists, proxy
+            // logs): unchanged by the rename to Talahon.
             user_agent: format!(
                 "Talon/{} (security analysis agent)",
                 env!("CARGO_PKG_VERSION")

@@ -1,7 +1,7 @@
 //! Host <-> container wire protocol.
 //!
 //! ```text
-//!   host (talon)                                container (talon-agent)
+//!   host (talahon)                              container (talahon-agent)
 //!   ────────────                                ───────────────────────
 //!   stdin  ── ContainerInput JSON, then EOF ──▶ read once at start
 //!   stdout ◀─ OUTPUT_START / ContainerOutput / OUTPUT_END ── (repeatable)
@@ -34,7 +34,7 @@ pub const IPC_CLOSE_SENTINEL: &str = "_close";
 
 /// Well-known paths inside the agent container.
 pub mod container_paths {
-    /// The group's folder (CLAUDE.md, prompts/, conversations/, logs/). cwd.
+    /// The group's folder (AGENT.md, prompts/, conversations/, logs/). cwd.
     pub const GROUP: &str = "/workspace/group";
     /// Shared read-only global memory (groups/global).
     pub const GLOBAL: &str = "/workspace/global";

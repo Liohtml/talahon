@@ -2,7 +2,7 @@
 //! candidates, process / command-line findings, risk prior, matching
 //! templates and investigation hints.
 //!
-//! `talon-agent` can run [`analyze_alert`] before the first model turn and
+//! `talahon-agent` can run [`analyze_alert`] before the first model turn and
 //! inject [`AlertAnalysis::to_prompt_block`] as a grounded prior. The block
 //! quotes alert content (command lines, decoded payloads, indicators), so it
 //! is **untrusted data** and must be fenced like any other SIEM content.

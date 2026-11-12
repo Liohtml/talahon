@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# MySQL MCP server wrapper for Talon.
+# MySQL MCP server wrapper for Talahon.
 #
 # Execution model (docs/RUST_ARCHITECTURE.md §3.3 — no sudo anywhere):
 #
-#   1. Talon agent container. `talon-agent supervise` starts this script
+#   1. Talahon agent container. `talahon-agent supervise` starts this script
 #      directly as `mcp-mysql` (`"runAs": "mcp-mysql"` in .mcp.json). The
 #      credentials were staged at /etc/mcp-secrets/mysql.env (owner mcp-mysql,
 #      mode 0600); the visible mysql/.env is shadowed with /dev/null. The
@@ -19,7 +19,7 @@
 # Server implementation:
 #
 #   default                the Python `mysql-mcp-server` (PyPI)
-#   TALON_MYSQL_MCP=rust   the native `talon-mysql-mcp` binary
+#   TALAHON_MYSQL_MCP=rust   the native `talahon-mysql-mcp` binary
 #                          (crates/talon-mcp-mysql): same tools, arguments
 #                          and result text, no Python cold start, bounded
 #                          statements (timeouts, row and byte limits).
@@ -42,7 +42,9 @@ export PYTHONSAFEPATH=1
 LOCAL_MCP="$SCRIPT_DIR/.venv/bin/mysql_mcp_server"
 SYSTEM_MCP="/opt/mysql-mcp/bin/mysql_mcp_server"
 ISOLATED_ENV="/etc/mcp-secrets/mysql.env"
-NATIVE_NAME="talon-mysql-mcp"
+NATIVE_NAME="talahon-mysql-mcp"
+# The binary's name up to 2.x (an image built before the rename has only this).
+LEGACY_NATIVE_NAME="talon-mysql-mcp"
 TAG="[mysql-mcp]"
 
 _err() { echo "$TAG ERROR: $*" >&2; }
@@ -71,19 +73,26 @@ _is_native_exec() {
     return 0
 }
 
-# Exec the native Rust server if it was asked for (TALON_MYSQL_MCP=rust, from
+# Exec the native Rust server if it was asked for (TALAHON_MYSQL_MCP=rust, from
 # the env file just loaded or the environment) and a binary exists. Extra
 # arguments are further directories to search (dev mode only). Returns when
 # the Python server should be used.
 _maybe_exec_native() {
-    [[ "${TALON_MYSQL_MCP:-}" == "rust" ]] || return 0
-    local candidates=("/usr/local/bin/$NATIVE_NAME")
-    local on_path
-    on_path="$(command -v "$NATIVE_NAME" 2>/dev/null || true)"
-    [[ -n "$on_path" ]] && candidates+=("$on_path")
-    local dir
-    for dir in "$@"; do
-        candidates+=("$dir/$NATIVE_NAME")
+    # TALON_MYSQL_MCP is the pre-rename spelling: still read, the new name wins.
+    local choice="${TALAHON_MYSQL_MCP:-${TALON_MYSQL_MCP:-}}"
+    [[ "$choice" == "rust" ]] || return 0
+    if [[ -z "${TALAHON_MYSQL_MCP:-}" ]]; then
+        _warn "TALON_MYSQL_MCP is deprecated; rename it to TALAHON_MYSQL_MCP"
+    fi
+    local candidates=() name on_path dir
+    # Every place under the current name first, then under the old one.
+    for name in "$NATIVE_NAME" "$LEGACY_NATIVE_NAME"; do
+        candidates+=("/usr/local/bin/$name")
+        on_path="$(command -v "$name" 2>/dev/null || true)"
+        [[ -n "$on_path" ]] && candidates+=("$on_path")
+        for dir in "$@"; do
+            candidates+=("$dir/$name")
+        done
     done
     local c
     for c in "${candidates[@]}"; do
@@ -91,7 +100,7 @@ _maybe_exec_native() {
             exec "$c"
         fi
     done
-    _warn "TALON_MYSQL_MCP=rust but $NATIVE_NAME was not found; using the Python server"
+    _warn "TALAHON_MYSQL_MCP=rust but $NATIVE_NAME was not found; using the Python server"
     return 0
 }
 

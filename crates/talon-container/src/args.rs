@@ -128,6 +128,8 @@ const RESERVED_PREFIXES: &[&str] = &[
     "DYLD_",
     "BASH_FUNC_",
     "PYTHON",
+    "TALAHON_",
+    // The pre-rename spelling is still read inside the container.
     "TALON_",
     "MALLOC_",
     "NSS_",
@@ -661,7 +663,7 @@ mod tests {
         RunArgsInput {
             name: "talon-team-1700000000000",
             group_folder: "team",
-            image: "talon-agent:latest",
+            image: "talahon-agent:latest",
             timezone: "Europe/Berlin",
             run_as: RunAs {
                 uid: 1001,
@@ -682,7 +684,7 @@ mod tests {
             ..Default::default()
         };
         let mounts = vec![
-            VolumeMount::rw("/srv/talon/groups/team", "/workspace/group"),
+            VolumeMount::rw("/srv/talahon/groups/team", "/workspace/group"),
             VolumeMount::shadow("/workspace/extra/siem/.env"),
         ];
         let gw = sv(&["--add-host", "host.docker.internal:host-gateway"]);
@@ -737,10 +739,10 @@ mod tests {
                 "--add-host",
                 "api.anthropic.com:127.0.0.1",
                 "--mount",
-                "type=bind,source=/srv/talon/groups/team,target=/workspace/group",
+                "type=bind,source=/srv/talahon/groups/team,target=/workspace/group",
                 "--mount",
                 "type=bind,source=/dev/null,target=/workspace/extra/siem/.env,readonly",
-                "talon-agent:latest",
+                "talahon-agent:latest",
             ])
         );
         assert!(out.rejections.is_empty());
@@ -877,7 +879,7 @@ mod tests {
             ("RUN_UID", "0"),
             ("PYTHONPATH", "/workspace/group"),
             ("GLIBC_TUNABLES", "x"),
-            ("TALON_MCP_SOCKET_DIR", "/tmp"),
+            ("TALAHON_MCP_SOCKET_DIR", "/tmp"),
             ("1BAD", "x"),
             ("WITH-DASH", "x"),
             ("MULTI", "a\nb"),
@@ -909,7 +911,10 @@ mod tests {
 
     #[test]
     fn env_key_classification() {
+        assert!(env_key_rejection("TALAHON_THING").is_some());
+        // The old prefix stays reserved: the agent still reads it.
         assert!(env_key_rejection("TALON_THING").is_some());
+        assert!(env_key_rejection("talon_log").is_some());
         assert!(env_key_rejection("SSH_PRIVATE_KEY_PATH").is_some());
         assert!(env_key_rejection("PASS").is_some());
         assert!(env_key_rejection("ld_preload").is_some());
@@ -958,7 +963,7 @@ mod tests {
         let mut i = input(&cfg, &[], &[], &limits);
         i.run_as = RunAs { uid: 0, gid: 5 };
         assert!(build_run_args(&i).is_err());
-        assert!(is_valid_image("ghcr.io/org/talon-agent@sha256:abc"));
+        assert!(is_valid_image("ghcr.io/org/talahon-agent@sha256:abc"));
     }
 
     #[test]

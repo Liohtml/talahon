@@ -927,7 +927,7 @@ async fn investigate_validation() {
             "triggered_by must be one of: manual, scheduled, webhook",
         ),
         (
-            r#"{"alert_id":1,"customer_code":"acme","template_override":"../CLAUDE.md"}"#,
+            r#"{"alert_id":1,"customer_code":"acme","template_override":"../AGENT.md"}"#,
             "template_override must be a plain .txt filename (no path separators)",
         ),
         (

@@ -424,7 +424,7 @@ mod tests {
             jid: "new@g.us".into(),
             name: "New".into(),
             folder: folder.into(),
-            trigger: "@Talon".into(),
+            trigger: "@Talahon".into(),
             requires_trigger: None,
             container_config: None,
             timestamp: None,

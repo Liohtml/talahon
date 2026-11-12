@@ -1,17 +1,17 @@
-# Talon agent container image (talon-agent:latest)
+# Talahon agent container image (talahon-agent:latest)
 #
 # Build with the REPOSITORY ROOT as context:
 #
 #   ./container/build.sh [tag]
-#   docker build -f container/Dockerfile -t talon-agent:latest .
+#   docker build -f container/Dockerfile -t talahon-agent:latest .
 #
 # The context is filtered by container/Dockerfile.dockerignore (allowlist:
 # only the Cargo workspace, the anon-proxy field list and the files below are
 # sent — never .env, store/, data/, groups/ or target/).
 #
 # Stages
-#   rust-builder  compiles talon-agent, talon-anon-proxy, talon-opensearch-mcp
-#                 and talon-mysql-mcp from the workspace
+#   rust-builder  compiles talahon-agent, talahon-anon-proxy, talahon-opensearch-mcp
+#                 and talahon-mysql-mcp from the workspace
 #   py-builder    builds the Python MCP server virtualenvs under /opt
 #   runtime       debian:bookworm-slim: no compilers, no node, no sudo
 #
@@ -20,11 +20,11 @@
 #   docker run --rm -i --cap-drop=ALL --cap-add=CHOWN,SETUID,SETGID,FOWNER,
 #     DAC_OVERRIDE,KILL --security-opt=no-new-privileges --read-only
 #     --tmpfs /tmp --tmpfs /run --tmpfs /etc/mcp-secrets(0711) --tmpfs /home/agent
-#     -e TZ -e RUN_UID -e RUN_GID ... talon-agent:latest
+#     -e TZ -e RUN_UID -e RUN_GID ... talahon-agent:latest
 #
-# and /usr/local/bin/talon-entrypoint (root) stages per-MCP secrets into
+# and /usr/local/bin/talahon-entrypoint (root) stages per-MCP secrets into
 # /etc/mcp-secrets (owner mcp-<id>, 0600), locks MemPalace data to
-# mcp-palace and execs `talon-agent supervise`, which runs every MCP server
+# mcp-palace and execs `talahon-agent supervise`, which runs every MCP server
 # as its mcp-* user and the agent as `agent`.
 
 # Base images are pinned by digest (multi-arch index); Dependabot proposes
@@ -45,12 +45,12 @@ COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     set -eux; \
-    cargo build --release --locked --bin talon-agent --bin talon-anon-proxy \
-        --bin talon-opensearch-mcp --bin talon-mysql-mcp; \
-    install -D -m 0755 target/release/talon-agent /out/talon-agent; \
-    install -D -m 0755 target/release/talon-anon-proxy /out/talon-anon-proxy; \
-    install -D -m 0755 target/release/talon-opensearch-mcp /out/talon-opensearch-mcp; \
-    install -D -m 0755 target/release/talon-mysql-mcp /out/talon-mysql-mcp
+    cargo build --release --locked --bin talahon-agent --bin talahon-anon-proxy \
+        --bin talahon-opensearch-mcp --bin talahon-mysql-mcp; \
+    install -D -m 0755 target/release/talahon-agent /out/talahon-agent; \
+    install -D -m 0755 target/release/talahon-anon-proxy /out/talahon-anon-proxy; \
+    install -D -m 0755 target/release/talahon-opensearch-mcp /out/talahon-opensearch-mcp; \
+    install -D -m 0755 target/release/talahon-mysql-mcp /out/talahon-mysql-mcp
 
 # ---------------------------------------------------------------------------
 # 2. Python MCP servers (built here so the runtime has no compilers)
@@ -136,8 +136,8 @@ FROM ${DEBIAN_IMAGE} AS runtime
 # Optional headless browser for web tooling (adds ~400 MB).
 ARG INSTALL_CHROMIUM=false
 
-LABEL org.opencontainers.image.title="talon-agent" \
-      org.opencontainers.image.description="Talon SOC analyst agent runtime (privilege-separated)" \
+LABEL org.opencontainers.image.title="talahon-agent" \
+      org.opencontainers.image.description="Talahon SOC analyst agent runtime (privilege-separated)" \
       org.opencontainers.image.licenses="MIT"
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -186,23 +186,31 @@ RUN set -eux; \
     install -d -m 0700 -o agent -g agent /home/agent
 
 COPY --from=py-builder /opt/ /opt/
-COPY --from=rust-builder /out/talon-agent /usr/local/bin/talon-agent
-COPY --from=rust-builder /out/talon-anon-proxy /usr/local/bin/talon-anon-proxy
+COPY --from=rust-builder /out/talahon-agent /usr/local/bin/talahon-agent
+COPY --from=rust-builder /out/talahon-anon-proxy /usr/local/bin/talahon-anon-proxy
 # Native OpenSearch MCP server; used instead of the Python one only when
-# siem.env sets TALON_OPENSEARCH_MCP=rust (siem/opensearch-mcp.sh).
-COPY --from=rust-builder /out/talon-opensearch-mcp /usr/local/bin/talon-opensearch-mcp
+# siem.env sets TALAHON_OPENSEARCH_MCP=rust (siem/opensearch-mcp.sh).
+COPY --from=rust-builder /out/talahon-opensearch-mcp /usr/local/bin/talahon-opensearch-mcp
 # Native MySQL MCP server; used instead of the Python one only when
-# mysql.env sets TALON_MYSQL_MCP=rust (mysql/mysql-mcp.sh).
-COPY --from=rust-builder /out/talon-mysql-mcp /usr/local/bin/talon-mysql-mcp
-COPY container/entrypoint.sh /usr/local/bin/talon-entrypoint
+# mysql.env sets TALAHON_MYSQL_MCP=rust (mysql/mysql-mcp.sh).
+COPY --from=rust-builder /out/talahon-mysql-mcp /usr/local/bin/talahon-mysql-mcp
+COPY container/entrypoint.sh /usr/local/bin/talahon-entrypoint
 COPY container/mysql-tools/mysql_query.py /opt/mysql-tools/lib/mysql_query.py
 COPY container/mysql-tools/mysql-query /usr/local/bin/mysql-query
 
+# The binaries were called talon-* up to 2.x. The old names stay as symlinks
+# for one major version, so MCP configurations, wrapper scripts and hosts
+# that still name them keep working with this image.
+RUN set -eux; \
+    for name in entrypoint agent anon-proxy opensearch-mcp mysql-mcp; do \
+        ln -s "talahon-$name" "/usr/local/bin/talon-$name"; \
+    done
+
 RUN set -eux; \
     chown -R root:root /usr/local/bin /opt; \
-    chmod 0755 /usr/local/bin/talon-entrypoint /usr/local/bin/talon-agent \
-        /usr/local/bin/talon-anon-proxy /usr/local/bin/talon-opensearch-mcp \
-        /usr/local/bin/talon-mysql-mcp /usr/local/bin/mysql-query; \
+    chmod 0755 /usr/local/bin/talahon-entrypoint /usr/local/bin/talahon-agent \
+        /usr/local/bin/talahon-anon-proxy /usr/local/bin/talahon-opensearch-mcp \
+        /usr/local/bin/talahon-mysql-mcp /usr/local/bin/mysql-query; \
     chmod -R go-w /opt; \
     # pymysql + helper usable by mcp-mysql only.
     chown -R mcp-mysql:mcp-mysql /opt/mysql-tools; \
@@ -214,5 +222,5 @@ RUN set -eux; \
 WORKDIR /workspace/group
 
 # Starts as root by design (secret staging + privilege separation); the
-# entrypoint drops to `agent` / mcp-* users via talon-agent supervise.
-ENTRYPOINT ["/usr/local/bin/talon-entrypoint"]
+# entrypoint drops to `agent` / mcp-* users via talahon-agent supervise.
+ENTRYPOINT ["/usr/local/bin/talahon-entrypoint"]

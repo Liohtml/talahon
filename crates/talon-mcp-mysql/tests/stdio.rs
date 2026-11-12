@@ -1,13 +1,13 @@
-//! Tests of the `talon-mysql-mcp` binary itself: the stdio loop, what it
+//! Tests of the `talahon-mysql-mcp` binary itself: the stdio loop, what it
 //! prints where, its start-up checks, and (ignored unless a server is
 //! provided) an end-to-end run against a real MySQL / MariaDB.
 //!
 //! The live tests need a database the given user may create tables in:
 //!
 //! ```text
-//! TALON_MYSQL_TEST_HOST=127.0.0.1 TALON_MYSQL_TEST_PORT=3306 \
-//! TALON_MYSQL_TEST_USER=talon TALON_MYSQL_TEST_PASSWORD=... \
-//! TALON_MYSQL_TEST_DATABASE=talontest \
+//! TALAHON_MYSQL_TEST_HOST=127.0.0.1 TALAHON_MYSQL_TEST_PORT=3306 \
+//! TALAHON_MYSQL_TEST_USER=talahon TALAHON_MYSQL_TEST_PASSWORD=... \
+//! TALAHON_MYSQL_TEST_DATABASE=talontest \
 //!     cargo test -p talahon-mcp-mysql --test stdio -- --ignored
 //! ```
 //!
@@ -23,7 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-const BIN: &str = env!("CARGO_BIN_EXE_talon-mysql-mcp");
+const BIN: &str = env!("CARGO_BIN_EXE_talahon-mysql-mcp");
 const PASSWORD: &str = "hunter2-very-secret";
 
 /// The binary with a clean environment (nothing inherited from the test
@@ -154,10 +154,10 @@ async fn stdio_loop_serves_initialize_list_and_call() {
     let mut client = Client::start(&[
         ("MYSQL_HOST", "127.0.0.1".to_string()),
         ("MYSQL_PORT", port.to_string()),
-        ("MYSQL_USER", "talon".to_string()),
+        ("MYSQL_USER", "talahon".to_string()),
         ("MYSQL_PASS", PASSWORD.to_string()),
         ("MYSQL_DB", "copilot".to_string()),
-        ("TALON_MYSQL_LOG", "trace".to_string()),
+        ("TALAHON_MYSQL_LOG", "trace".to_string()),
     ])
     .await;
 
@@ -208,7 +208,7 @@ async fn stdio_loop_serves_initialize_list_and_call() {
     // Logs go to stderr and never contain the password or statements,
     // even at trace level.
     let log = client.finish().await;
-    assert!(log.contains("talon-mysql-mcp starting"), "{log}");
+    assert!(log.contains("talahon-mysql-mcp starting"), "{log}");
     assert!(log.contains("copilot"), "{log}");
     assert!(!log.contains(PASSWORD), "{log}");
     assert!(!log.contains("statement-marker"), "{log}");
@@ -234,12 +234,12 @@ async fn run(args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String, Strin
 
 #[tokio::test]
 async fn bad_configuration_fails_at_startup_without_leaking_it() {
-    let base = [("MYSQL_USER", "talon"), ("MYSQL_PASSWORD", PASSWORD)];
+    let base = [("MYSQL_USER", "talahon"), ("MYSQL_PASSWORD", PASSWORD)];
     let cases: [(&[(&str, &str)], &str); 9] = [
         (&[("MYSQL_USER", "")], "MYSQL_USER"),
         (&[("MYSQL_PORT", "hunter2-very-secret")], "MYSQL_PORT"),
         (
-            &[("MYSQL_HOST", "talon:hunter2-very-secret@db")],
+            &[("MYSQL_HOST", "talahon:hunter2-very-secret@db")],
             "MYSQL_HOST",
         ),
         (&[("MYSQL_SSL_MODE", "maybe")], "MYSQL_SSL_MODE"),
@@ -253,7 +253,7 @@ async fn bad_configuration_fails_at_startup_without_leaking_it() {
         (&[("MYSQL_SSH_ENABLE", "true")], "MYSQL_SSH_ENABLE"),
         (&[("MCP_TRANSPORT", "sse")], "MCP_TRANSPORT"),
         (&[("MYSQL_CHARSET", "latin1")], "MYSQL_CHARSET"),
-        (&[("TALON_MYSQL_MAX_ROWS", "0")], "TALON_MYSQL_MAX_ROWS"),
+        (&[("TALAHON_MYSQL_MAX_ROWS", "0")], "TALAHON_MYSQL_MAX_ROWS"),
     ];
     for (extra, var) in cases {
         let mut env = base.to_vec();
@@ -271,11 +271,11 @@ async fn bad_configuration_fails_at_startup_without_leaking_it() {
     }
 
     // The password is required (it may be empty), under either name.
-    let (code, _, stderr) = run(&["--check"], &[("MYSQL_USER", "talon")]).await;
+    let (code, _, stderr) = run(&["--check"], &[("MYSQL_USER", "talahon")]).await;
     assert_eq!(code, Some(2));
     assert!(stderr.contains("MYSQL_PASSWORD is required"), "{stderr}");
     for name in ["MYSQL_PASSWORD", "MYSQL_PASS"] {
-        let (code, _, stderr) = run(&["--check"], &[("MYSQL_USER", "talon"), (name, "")]).await;
+        let (code, _, stderr) = run(&["--check"], &[("MYSQL_USER", "talahon"), (name, "")]).await;
         assert_eq!(code, Some(0), "{name}: {stderr}");
     }
 }
@@ -286,7 +286,7 @@ async fn check_version_help_and_unknown_arguments() {
         &["--check"],
         &[
             ("MYSQL_HOST", "db.example"),
-            ("MYSQL_USER", "talon"),
+            ("MYSQL_USER", "talahon"),
             ("MYSQL_PASSWORD", PASSWORD),
             ("MYSQL_SSL_MODE", "DISABLED"),
             ("MYSQL_AUTH_PLUGIN", "mysql_native_password"),
@@ -303,7 +303,7 @@ async fn check_version_help_and_unknown_arguments() {
 
     let (code, stdout, _) = run(&["--version"], &[]).await;
     assert_eq!(code, Some(0));
-    assert!(stdout.starts_with("talon-mysql-mcp "));
+    assert!(stdout.starts_with("talahon-mysql-mcp "));
 
     // --help needs no configuration (the image smoke test relies on it).
     let (code, stdout, stderr) = run(&["--help"], &[]).await;
@@ -312,9 +312,9 @@ async fn check_version_help_and_unknown_arguments() {
     for var in [
         "MYSQL_HOST",
         "MYSQL_SSL_MODE",
-        "TALON_MYSQL_QUERY_TIMEOUT",
-        "TALON_MYSQL_MAX_ROWS",
-        "TALON_MYSQL_MAX_RESULT_BYTES",
+        "TALAHON_MYSQL_QUERY_TIMEOUT",
+        "TALAHON_MYSQL_MAX_ROWS",
+        "TALAHON_MYSQL_MAX_RESULT_BYTES",
     ] {
         assert!(stdout.contains(var), "{var} missing from --help");
     }
@@ -326,7 +326,7 @@ async fn check_version_help_and_unknown_arguments() {
 
 // --- live tests -----------------------------------------------------------
 
-const LIVE: &str = "needs a MySQL server: set TALON_MYSQL_TEST_HOST, _PORT, _USER, _PASSWORD \
+const LIVE: &str = "needs a MySQL server: set TALAHON_MYSQL_TEST_HOST, _PORT, _USER, _PASSWORD \
                     and _DATABASE (a database the user may create tables in)";
 
 /// The binary's environment for the test server.
@@ -334,21 +334,21 @@ fn live_env(extra: &[(&str, &str)]) -> Vec<(String, String)> {
     let var =
         |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set: {LIVE}"));
     let mut env = vec![
-        ("MYSQL_HOST".to_string(), var("TALON_MYSQL_TEST_HOST")),
+        ("MYSQL_HOST".to_string(), var("TALAHON_MYSQL_TEST_HOST")),
         (
             "MYSQL_PORT".to_string(),
-            std::env::var("TALON_MYSQL_TEST_PORT").unwrap_or_else(|_| "3306".to_string()),
+            std::env::var("TALAHON_MYSQL_TEST_PORT").unwrap_or_else(|_| "3306".to_string()),
         ),
-        ("MYSQL_USER".to_string(), var("TALON_MYSQL_TEST_USER")),
+        ("MYSQL_USER".to_string(), var("TALAHON_MYSQL_TEST_USER")),
         (
             "MYSQL_PASSWORD".to_string(),
-            var("TALON_MYSQL_TEST_PASSWORD"),
+            var("TALAHON_MYSQL_TEST_PASSWORD"),
         ),
         (
             "MYSQL_DATABASE".to_string(),
-            var("TALON_MYSQL_TEST_DATABASE"),
+            var("TALAHON_MYSQL_TEST_DATABASE"),
         ),
-        ("TALON_MYSQL_LOG".to_string(), "debug".to_string()),
+        ("TALAHON_MYSQL_LOG".to_string(), "debug".to_string()),
     ];
     env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     env
@@ -598,7 +598,7 @@ async fn live_limits_and_timeouts() {
         .await;
 
     // Row limit: the first rows and a marker; an exact fit is not marked.
-    let mut c = Client::start(&live_env(&[("TALON_MYSQL_MAX_ROWS", "10")])).await;
+    let mut c = Client::start(&live_env(&[("TALAHON_MYSQL_MAX_ROWS", "10")])).await;
     let text = c.sql(&format!("SELECT id FROM {table} ORDER BY id")).await;
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(
@@ -608,7 +608,7 @@ async fn live_limits_and_timeouts() {
     assert_eq!(lines.len(), 12, "{text}");
     assert!(
         lines[11].starts_with("[RESULT TRUNCATED: only the first 10 rows are shown")
-            && lines[11].contains("10 rows (TALON_MYSQL_MAX_ROWS)"),
+            && lines[11].contains("10 rows (TALAHON_MYSQL_MAX_ROWS)"),
         "{text}"
     );
     let text = c
@@ -619,14 +619,14 @@ async fn live_limits_and_timeouts() {
     c.finish().await;
 
     // Byte limit: bounded output whatever the table size.
-    let mut c = Client::start(&live_env(&[("TALON_MYSQL_MAX_RESULT_BYTES", "4096")])).await;
+    let mut c = Client::start(&live_env(&[("TALAHON_MYSQL_MAX_RESULT_BYTES", "4096")])).await;
     let text = c.sql(&format!("SELECT * FROM {table} ORDER BY id")).await;
     assert!(text.len() < 4096 + 400, "{} bytes", text.len());
     assert!(text.starts_with("id,pad\n0,xxxx"), "{}", &text[..40]);
     let marker = text.lines().last().unwrap();
     assert!(
         marker.starts_with("[RESULT TRUNCATED:")
-            && marker.contains("4096 bytes (TALON_MYSQL_MAX_RESULT_BYTES)"),
+            && marker.contains("4096 bytes (TALAHON_MYSQL_MAX_RESULT_BYTES)"),
         "{marker}"
     );
     // The server keeps answering after a truncated result.
@@ -637,7 +637,7 @@ async fn live_limits_and_timeouts() {
     c.finish().await;
 
     // Query timeout: reported, and the statement is killed on the server.
-    let mut c = Client::start(&live_env(&[("TALON_MYSQL_QUERY_TIMEOUT", "1")])).await;
+    let mut c = Client::start(&live_env(&[("TALAHON_MYSQL_QUERY_TIMEOUT", "1")])).await;
     let started = Instant::now();
     let text = c.sql_err("SELECT SLEEP(30) AS talon_e2e_sleeper").await;
     assert!(

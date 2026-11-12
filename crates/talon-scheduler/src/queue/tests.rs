@@ -1042,7 +1042,7 @@ async fn jittered_retry_delay_stays_within_bounds() {
 #[test]
 fn config_from_talon_config() {
     let env = talon_core::env::EnvFile::default();
-    let cfg = talon_core::config::TalonConfig::from_env(Path::new("/srv/talon"), env);
+    let cfg = talon_core::config::TalonConfig::from_env(Path::new("/srv/talahon"), env);
     let q = QueueConfig::from_talon_config(&cfg);
     assert_eq!(q.max_concurrent, cfg.max_concurrent_containers);
     assert_eq!(q.data_dir, cfg.data_dir);

@@ -1,5 +1,5 @@
 //! Structured logging: `tracing-subscriber` with an `EnvFilter`
-//! (`RUST_LOG`), human-readable or JSON output (`TALON_LOG_FORMAT=json`),
+//! (`RUST_LOG`), human-readable or JSON output (`TALAHON_LOG_FORMAT=json`),
 //! and **redaction of every line** before it reaches the terminal or the
 //! service log file.
 //!
@@ -156,7 +156,7 @@ pub fn init(format: LogFormat, target: LogTarget, default_filter: &str, redactor
         LogFormat::Pretty => builder.with_ansi(false).try_init(),
     };
     if let Err(e) = result {
-        eprintln!("talon: logging already initialized: {e}");
+        eprintln!("talahon: logging already initialized: {e}");
     }
 }
 

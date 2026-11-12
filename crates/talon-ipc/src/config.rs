@@ -208,9 +208,12 @@ mod tests {
 
     #[test]
     fn defaults_are_bounded() {
-        let c = IpcWatcherConfig::new(Path::new("/srv/talon/data"), chrono_tz::UTC);
-        assert_eq!(c.ipc_dir, PathBuf::from("/srv/talon/data/ipc"));
-        assert_eq!(c.errors_dir(), PathBuf::from("/srv/talon/data/ipc/errors"));
+        let c = IpcWatcherConfig::new(Path::new("/srv/talahon/data"), chrono_tz::UTC);
+        assert_eq!(c.ipc_dir, PathBuf::from("/srv/talahon/data/ipc"));
+        assert_eq!(
+            c.errors_dir(),
+            PathBuf::from("/srv/talahon/data/ipc/errors")
+        );
         assert_eq!(c.max_file_bytes, 256 * 1024);
         assert!(c.max_json_depth >= 4);
         assert!(c.max_messages_per_scan > 0 && c.max_tasks_per_scan > 0);
@@ -220,7 +223,7 @@ mod tests {
 
     #[test]
     fn task_quota_defaults() {
-        let c = IpcWatcherConfig::new(Path::new("/srv/talon/data"), chrono_tz::UTC);
+        let c = IpcWatcherConfig::new(Path::new("/srv/talahon/data"), chrono_tz::UTC);
         assert_eq!(c.max_tasks_per_lane, 25);
         assert_eq!(c.max_prompt_bytes, 16 * 1024);
         assert_eq!(c.main_max_prompt_bytes, 64 * 1024);
@@ -233,7 +236,7 @@ mod tests {
         assert_eq!(c.task_op_limit(false), Some(30));
         assert_eq!(c.task_op_limit(true), Some(120));
         // the host's constructor gets the same defaults
-        let tc = TalonConfig::from_env(Path::new("/opt/talon"), EnvFile::from_str_content(""));
+        let tc = TalonConfig::from_env(Path::new("/opt/talahon"), EnvFile::from_str_content(""));
         let h = IpcWatcherConfig::from_talon_config(&tc);
         assert_eq!(h.max_tasks_per_lane, 25);
         assert_eq!(h.task_op_limit(false), Some(30));
@@ -254,11 +257,11 @@ mod tests {
     #[test]
     fn from_talon_config_uses_data_dir_and_tz() {
         let tc = TalonConfig::from_env(
-            Path::new("/opt/talon"),
+            Path::new("/opt/talahon"),
             EnvFile::from_str_content("IPC_POLL_INTERVAL=250\n"),
         );
         let c = IpcWatcherConfig::from_talon_config(&tc);
-        assert_eq!(c.ipc_dir, PathBuf::from("/opt/talon/data/ipc"));
+        assert_eq!(c.ipc_dir, PathBuf::from("/opt/talahon/data/ipc"));
         assert_eq!(c.timezone, tc.timezone);
         assert_eq!(c.poll_interval, tc.ipc_poll_interval);
     }

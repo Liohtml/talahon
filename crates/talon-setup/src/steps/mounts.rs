@@ -1,5 +1,5 @@
 //! Step `mounts`: write the mount allowlist
-//! (`~/.config/talon/mount-allowlist.json`, outside the project root and
+//! (`~/.config/talahon/mount-allowlist.json`, outside the project root and
 //! never mounted into a container).
 //!
 //! Sources, in order: `--empty` (no extra mounts), `--template` (the

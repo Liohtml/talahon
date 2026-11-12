@@ -36,7 +36,7 @@ impl Platform {
     }
 }
 
-/// Service manager available for installing Talon as a service.
+/// Service manager available for installing Talahon as a service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceManager {
     /// macOS launchd.

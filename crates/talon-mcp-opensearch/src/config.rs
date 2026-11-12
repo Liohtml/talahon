@@ -11,7 +11,7 @@
 //! | `REQUEST_TIMEOUT` | Whole-request timeout in seconds (default 30, at most 600) |
 //! | `OPENSEARCH_PROXY` | `http://` / `https://` proxy for all requests (SOCKS is not supported) |
 //! | `OPENSEARCH_CA_CERTS` | PEM file with additional trusted CA certificates (Rust server only) |
-//! | `TALON_OPENSEARCH_MAX_RESPONSE_BYTES` | Largest accepted response body (default 8 MiB) |
+//! | `TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES` | Largest accepted response body (default 8 MiB) |
 //!
 //! The multi-cluster variables `OPENSEARCH_CLUSTERS` / `OPENSEARCH_CLUSTERS_FILE`
 //! are not supported; the server refuses to start when one is set instead of
@@ -31,9 +31,9 @@ pub const MAX_TIMEOUT: Duration = Duration::from_secs(600);
 /// JSON-RPC line, whose escaping can roughly double it; 8 MiB stays below
 /// the 16 MiB message limit of `talon-mcp` clients.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-/// Bounds for `TALON_OPENSEARCH_MAX_RESPONSE_BYTES`.
+/// Bounds for `TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES`.
 pub const MIN_MAX_RESPONSE_BYTES: usize = 1024;
-/// Upper bound for `TALON_OPENSEARCH_MAX_RESPONSE_BYTES`.
+/// Upper bound for `TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES`.
 pub const MAX_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// A configuration problem. Messages never contain credentials or URLs.
@@ -48,7 +48,7 @@ pub enum ConfigError {
         reason: String,
     },
     /// A variable of the Python server that this server does not implement.
-    #[error("{var} is not supported by talon-opensearch-mcp; {hint}")]
+    #[error("{var} is not supported by talahon-opensearch-mcp; {hint}")]
     Unsupported {
         /// The environment variable.
         var: &'static str,
@@ -124,17 +124,21 @@ impl Config {
     /// Read the configuration through `lookup` (tests, embedding).
     /// Empty and whitespace-only values count as unset.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        // A `TALAHON_*` setting that is unset (or blank) is looked up under
+        // its pre-rename `TALON_*` name as well.
         let get = |name: &str| {
-            lookup(name)
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
+            talon_core::env::resolve_with(name, |key| {
+                lookup(key)
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
         };
 
         for var in ["OPENSEARCH_CLUSTERS", "OPENSEARCH_CLUSTERS_FILE"] {
             if get(var).is_some() {
                 return Err(ConfigError::Unsupported {
                     var,
-                    hint: "configure one cluster with OPENSEARCH_HOSTS or unset TALON_OPENSEARCH_MCP \
+                    hint: "configure one cluster with OPENSEARCH_HOSTS or unset TALAHON_OPENSEARCH_MCP \
                            to use the Python server",
                 });
             }
@@ -194,18 +198,18 @@ impl Config {
             }
         };
 
-        let max_response_bytes = match get("TALON_OPENSEARCH_MAX_RESPONSE_BYTES") {
+        let max_response_bytes = match get("TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES") {
             None => DEFAULT_MAX_RESPONSE_BYTES,
             Some(v) => {
                 let n: usize = v.parse().map_err(|_| {
                     invalid(
-                        "TALON_OPENSEARCH_MAX_RESPONSE_BYTES",
+                        "TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES",
                         "expected a number of bytes",
                     )
                 })?;
                 if !(MIN_MAX_RESPONSE_BYTES..=MAX_MAX_RESPONSE_BYTES).contains(&n) {
                     return Err(invalid(
-                        "TALON_OPENSEARCH_MAX_RESPONSE_BYTES",
+                        "TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES",
                         format!(
                             "must be between {MIN_MAX_RESPONSE_BYTES} and {MAX_MAX_RESPONSE_BYTES}"
                         ),
@@ -225,7 +229,7 @@ impl Config {
                     "socks5" | "socks5h" => {
                         return Err(ConfigError::Unsupported {
                             var: "OPENSEARCH_PROXY",
-                            hint: "SOCKS proxies need the Python server (unset TALON_OPENSEARCH_MCP); \
+                            hint: "SOCKS proxies need the Python server (unset TALAHON_OPENSEARCH_MCP); \
                                    http:// and https:// proxies work",
                         });
                     }
@@ -435,6 +439,28 @@ mod tests {
     }
 
     #[test]
+    fn response_limit_under_the_old_talon_prefix_is_still_read() {
+        // siem/.env written before the rename.
+        assert_eq!(
+            cfg(&[("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096")])
+                .unwrap()
+                .max_response_bytes,
+            4096
+        );
+        // Both spellings: the new one wins.
+        assert_eq!(
+            cfg(&[
+                ("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096"),
+                ("TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES", "8192"),
+            ])
+            .unwrap()
+            .max_response_bytes,
+            8192
+        );
+        assert!(cfg(&[("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", "lots")]).is_err());
+    }
+
+    #[test]
     fn timeout_and_size_limits_are_bounded() {
         assert_eq!(
             cfg(&[("REQUEST_TIMEOUT", "2.5")]).unwrap().timeout,
@@ -448,14 +474,14 @@ mod tests {
             assert!(cfg(&[("REQUEST_TIMEOUT", bad)]).is_err(), "{bad}");
         }
         assert_eq!(
-            cfg(&[("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096")])
+            cfg(&[("TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES", "4096")])
                 .unwrap()
                 .max_response_bytes,
             4096
         );
         for bad in ["1", "x", "99999999999"] {
             assert!(
-                cfg(&[("TALON_OPENSEARCH_MAX_RESPONSE_BYTES", bad)]).is_err(),
+                cfg(&[("TALAHON_OPENSEARCH_MAX_RESPONSE_BYTES", bad)]).is_err(),
                 "{bad}"
             );
         }

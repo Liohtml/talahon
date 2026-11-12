@@ -545,7 +545,7 @@ fn ops_main_host() -> Arc<RecordingHost> {
 
 /// MYTH-09: the Emacs lane gets its own real folder, never main's.
 #[tokio::test]
-async fn creates_own_emacs_folder_and_writes_claude_md() {
+async fn creates_own_emacs_folder_and_writes_agent_md() {
     let dir = tempfile::tempdir().unwrap();
     // Fresh install: not even `groups/` exists yet.
     let groups = dir.path().join("groups");
@@ -559,8 +559,9 @@ async fn creates_own_emacs_folder_and_writes_claude_md() {
 
     let meta = std::fs::symlink_metadata(groups.join("emacs")).unwrap();
     assert!(meta.is_dir() && !meta.file_type().is_symlink());
-    let md = std::fs::read_to_string(groups.join("emacs").join("CLAUDE.md")).unwrap();
-    assert_eq!(md, CLAUDE_MD);
+    let md = std::fs::read_to_string(groups.join("emacs").join("AGENT.md")).unwrap();
+    assert_eq!(md, AGENT_MD);
+    assert!(!groups.join("emacs").join("CLAUDE.md").exists());
     assert!(md.contains("Always format responses in standard markdown"));
     // Main's folder is never created or written by the Emacs lane.
     assert!(!groups.join("ops-main").exists());
@@ -571,8 +572,11 @@ async fn creates_own_emacs_folder_and_writes_claude_md() {
     channel.disconnect().await.unwrap();
 }
 
+/// An installation from before the rename: its `CLAUDE.md` stays the
+/// lane's instructions. The bootstrap must not put an `AGENT.md` next to
+/// it, which would silently take precedence over the operator's file.
 #[tokio::test]
-async fn keeps_existing_claude_md() {
+async fn keeps_existing_legacy_claude_md_and_adds_no_agent_md() {
     let dir = tempfile::tempdir().unwrap();
     let groups = dir.path().join("groups");
     std::fs::create_dir_all(groups.join("emacs")).unwrap();
@@ -587,7 +591,47 @@ async fn keeps_existing_claude_md() {
         std::fs::read_to_string(groups.join("emacs").join("CLAUDE.md")).unwrap(),
         "keep me"
     );
+    assert!(!groups.join("emacs").join("AGENT.md").exists());
     channel.disconnect().await.unwrap();
+}
+
+/// Existing files of either name are never replaced: an `AGENT.md`, the
+/// host's placeholder, or the mount-point stub next to a `CLAUDE.md`.
+#[tokio::test]
+async fn keeps_existing_agent_md_placeholders_and_stubs() {
+    use talon_security::instructions::{AGENT_MOUNT_STUB, INSTRUCTIONS_PLACEHOLDER};
+    for (agent, legacy) in [
+        ("keep me", None),
+        (INSTRUCTIONS_PLACEHOLDER, None),
+        ("", None),
+        (AGENT_MOUNT_STUB, Some("operator rules")),
+        ("new rules", Some("old rules")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let emacs = dir.path().join("groups").join("emacs");
+        std::fs::create_dir_all(&emacs).unwrap();
+        std::fs::write(emacs.join("AGENT.md"), agent).unwrap();
+        if let Some(legacy) = legacy {
+            std::fs::write(emacs.join("CLAUDE.md"), legacy).unwrap();
+        }
+        let channel = make_with_dir(
+            main_host(),
+            &MemoryAuditSink::default(),
+            Some(dir.path().join("groups")),
+        );
+        channel.connect().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(emacs.join("AGENT.md")).unwrap(),
+            agent
+        );
+        assert_eq!(
+            std::fs::read_to_string(emacs.join("CLAUDE.md"))
+                .ok()
+                .as_deref(),
+            legacy
+        );
+        channel.disconnect().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -604,7 +648,7 @@ async fn leaves_existing_emacs_directory_alone() {
     channel.connect().await.unwrap();
     let meta = std::fs::symlink_metadata(groups.join("emacs")).unwrap();
     assert!(meta.is_dir() && !meta.file_type().is_symlink());
-    assert!(groups.join("emacs").join("CLAUDE.md").exists());
+    assert!(groups.join("emacs").join("AGENT.md").exists());
     assert_eq!(
         std::fs::read_to_string(groups.join("emacs").join("notes.md")).unwrap(),
         "mine"
@@ -705,53 +749,84 @@ async fn refuses_to_start_when_emacs_entry_is_a_file() {
     assert!(!channel.is_connected());
 }
 
-/// MYTH-10: an agent-planted dangling `CLAUDE.md` symlink must not make the
-/// bootstrap create an arbitrary host file.
+/// MYTH-10: an agent-planted dangling symlink under either instruction
+/// name must not make the bootstrap create an arbitrary host file, and the
+/// bootstrap must not create the other name next to it either.
 #[cfg(unix)]
 #[tokio::test]
-async fn never_writes_claude_md_through_a_dangling_symlink() {
-    let dir = tempfile::tempdir().unwrap();
-    let groups = dir.path().join("groups");
-    std::fs::create_dir_all(groups.join("emacs")).unwrap();
-    let outside = dir.path().join("outside").join("planted.txt");
-    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
-    let link = groups.join("emacs").join("CLAUDE.md");
-    std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let channel = make_with_dir(
-        main_host(),
-        &MemoryAuditSink::default(),
-        Some(groups.clone()),
-    );
-    channel.connect().await.unwrap();
-    assert!(!outside.exists(), "write followed the planted symlink");
-    assert!(
-        std::fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
-    assert_eq!(std::fs::read_link(&link).unwrap(), outside);
-    channel.disconnect().await.unwrap();
+async fn never_writes_instructions_through_a_dangling_symlink() {
+    for (planted, other) in [("AGENT.md", "CLAUDE.md"), ("CLAUDE.md", "AGENT.md")] {
+        let dir = tempfile::tempdir().unwrap();
+        let groups = dir.path().join("groups");
+        std::fs::create_dir_all(groups.join("emacs")).unwrap();
+        let outside = dir.path().join("outside").join("planted.txt");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        let link = groups.join("emacs").join(planted);
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let channel = make_with_dir(
+            main_host(),
+            &MemoryAuditSink::default(),
+            Some(groups.clone()),
+        );
+        channel.connect().await.unwrap();
+        assert!(!outside.exists(), "write followed the planted symlink");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), outside);
+        assert!(std::fs::symlink_metadata(groups.join("emacs").join(other)).is_err());
+        channel.disconnect().await.unwrap();
+    }
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn never_writes_claude_md_through_a_symlink_to_an_existing_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let groups = dir.path().join("groups");
-    std::fs::create_dir_all(groups.join("emacs")).unwrap();
-    std::fs::create_dir_all(groups.join("main")).unwrap();
-    let main_md = groups.join("main").join("CLAUDE.md");
-    std::fs::write(&main_md, "main prompt").unwrap();
-    std::os::unix::fs::symlink(&main_md, groups.join("emacs").join("CLAUDE.md")).unwrap();
-    let channel = make_with_dir(
-        main_host(),
-        &MemoryAuditSink::default(),
-        Some(groups.clone()),
-    );
-    channel.connect().await.unwrap();
-    assert_eq!(std::fs::read_to_string(&main_md).unwrap(), "main prompt");
-    channel.disconnect().await.unwrap();
+async fn never_writes_instructions_through_a_symlink_to_an_existing_file() {
+    for (planted, other) in [("AGENT.md", "CLAUDE.md"), ("CLAUDE.md", "AGENT.md")] {
+        let dir = tempfile::tempdir().unwrap();
+        let groups = dir.path().join("groups");
+        std::fs::create_dir_all(groups.join("emacs")).unwrap();
+        std::fs::create_dir_all(groups.join("main")).unwrap();
+        let main_md = groups.join("main").join("AGENT.md");
+        std::fs::write(&main_md, "main prompt").unwrap();
+        std::os::unix::fs::symlink(&main_md, groups.join("emacs").join(planted)).unwrap();
+        let channel = make_with_dir(
+            main_host(),
+            &MemoryAuditSink::default(),
+            Some(groups.clone()),
+        );
+        channel.connect().await.unwrap();
+        assert_eq!(std::fs::read_to_string(&main_md).unwrap(), "main prompt");
+        assert!(std::fs::symlink_metadata(groups.join("emacs").join(other)).is_err());
+        channel.disconnect().await.unwrap();
+    }
+}
+
+/// A directory or FIFO under either name: nothing is created, nothing
+/// blocks.
+#[cfg(unix)]
+#[tokio::test]
+async fn never_bootstraps_next_to_a_non_regular_instruction_entry() {
+    for (planted, other) in [("AGENT.md", "CLAUDE.md"), ("CLAUDE.md", "AGENT.md")] {
+        let dir = tempfile::tempdir().unwrap();
+        let groups = dir.path().join("groups");
+        std::fs::create_dir_all(groups.join("emacs").join(planted)).unwrap();
+        let channel = make_with_dir(
+            main_host(),
+            &MemoryAuditSink::default(),
+            Some(groups.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(5), channel.connect())
+            .await
+            .expect("bootstrap must not block")
+            .unwrap();
+        assert!(groups.join("emacs").join(planted).is_dir());
+        assert!(std::fs::symlink_metadata(groups.join("emacs").join(other)).is_err());
+        channel.disconnect().await.unwrap();
+    }
 }
 
 #[tokio::test]

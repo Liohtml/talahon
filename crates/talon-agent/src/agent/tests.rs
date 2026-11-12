@@ -148,7 +148,7 @@ impl Harness {
             },
             archive: ArchiveOptions {
                 dir: Some(self.conversations()),
-                assistant_name: "Talon".into(),
+                assistant_name: "Talahon".into(),
                 timezone: chrono_tz::UTC,
             },
             investigation: false,
@@ -280,7 +280,7 @@ async fn loop_detection_nudges_then_stops() {
         .map(|m| m.text().to_string())
         .collect();
     assert_eq!(tool_texts.len(), 5);
-    assert!(!tool_texts[1].contains("[talon] Note"));
+    assert!(!tool_texts[1].contains("[talahon] Note"));
     assert!(tool_texts[2].contains("call #3"));
     assert!(tool_texts[3].contains("call #4"));
     assert!(tool_texts[4].contains("Not executed"));
@@ -371,7 +371,7 @@ async fn threshold_compaction_summarizes_archives_and_rewrites() {
     assert_eq!(archived.len(), 1);
     assert!(archived[0].ends_with("-old-alert-work.md"), "{archived:?}");
     let md = std::fs::read_to_string(h.conversations().join(&archived[0])).unwrap();
-    assert!(md.contains("**Talon**: answer 0"));
+    assert!(md.contains("**Talahon**: answer 0"));
     // Transcript rewritten: summary + ack + kept turn + new turn.
     let (_, loaded) = SessionStore::open(&h.sessions(), agent.session_id()).unwrap();
     assert_eq!(loaded.len(), 6);

@@ -57,7 +57,7 @@ pub struct PalaceContainerConfig {
     pub runtime_bin: PathBuf,
     /// Agent image (holds the palace venv).
     pub image: String,
-    /// Absolute Talon checkout holding `mempalace/` and `mempalace-data/`.
+    /// Absolute Talahon checkout holding `mempalace/` and `mempalace-data/`.
     pub project_root: PathBuf,
     /// `--network` of the palace containers (`None` = runtime default).
     pub network: Option<String>,
@@ -230,13 +230,13 @@ impl PalaceRunner for ContainerPalaceRunner {
     }
 }
 
-/// The palace runner `talon run` hands to the CoPilot HTTP channel: a
+/// The palace runner `talahon run` hands to the CoPilot HTTP channel: a
 /// [`ContainerPalaceRunner`] on `network` (the agent network) using the
 /// agent image, the HTTP config's timeout / output cap / concurrency, and
 /// `runtime` to kill abandoned containers. When it cannot be built (e.g.
 /// MemPalace is not installed) the palace is disabled (`503`) — the
 /// host-executed script runner is never used, whatever
-/// `TALON_PALACE_HOST_EXEC` says.
+/// `TALAHON_PALACE_HOST_EXEC` says.
 pub fn host_palace_runner(
     config: &TalonConfig,
     http: &HttpConfig,
@@ -245,7 +245,7 @@ pub fn host_palace_runner(
 ) -> Arc<dyn PalaceRunner> {
     if http.palace_host_exec {
         tracing::warn!(
-            "TALON_PALACE_HOST_EXEC=unsafe is ignored: MemPalace calls always run in a hardened \
+            "TALAHON_PALACE_HOST_EXEC=unsafe is ignored: MemPalace calls always run in a hardened \
              container (host execution would unpickle agent-writable data on the host)"
         );
     }
@@ -336,7 +336,7 @@ mod tests {
     fn config(fx: &Fx) -> PalaceContainerConfig {
         PalaceContainerConfig {
             runtime_bin: fx.runtime.clone(),
-            image: "talon-agent:latest".into(),
+            image: "talahon-agent:latest".into(),
             project_root: fx.root.clone(),
             network: Some("talon-agents".into()),
             timeout: Duration::from_secs(10),
@@ -362,7 +362,10 @@ mod tests {
         assert!(joined.contains("--cap-drop=ALL"));
         assert!(joined.contains("--read-only"));
         assert!(joined.contains("--user 61008:61008"));
-        assert_eq!(args.last().map(String::as_str), Some("talon-agent:latest"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("talahon-agent:latest")
+        );
         // Names are unique per call.
         assert_ne!(runner.next_name(), runner.next_name());
     }
@@ -425,7 +428,7 @@ mod tests {
         let fx = fixture(ECHO_ARGS);
         let config = TalonConfig::from_env(
             &fx.root,
-            talon_core::env::EnvFile::from_str_content("TALON_PALACE_HOST_EXEC=unsafe\n"),
+            talon_core::env::EnvFile::from_str_content("TALAHON_PALACE_HOST_EXEC=unsafe\n"),
         );
         let mut http = HttpConfig::new(&fx.root);
         http.palace_host_exec = true;

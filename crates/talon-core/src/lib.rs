@@ -1,8 +1,8 @@
 //! # talon-core
 //!
-//! The contract every other Talon crate builds against. Everything in here is
+//! The contract every other Talahon crate builds against. Everything in here is
 //! **frozen**: crates may add their own types, but must not change the
-//! shapes defined here without coordinating, because the host (`talon`) and the in-container runtime (`talon-agent`)
+//! shapes defined here without coordinating, because the host (`talahon`) and the in-container runtime (`talahon-agent`)
 //! exchange these types across a process and container boundary.
 //!
 //! Module map:

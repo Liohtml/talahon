@@ -1,4 +1,4 @@
-//! Timestamp helpers. Talon stores timestamps as ISO-8601 strings with
+//! Timestamp helpers. Talahon stores timestamps as ISO-8601 strings with
 //! millisecond precision and a `Z` suffix — byte-identical to JavaScript's
 //! `Date.prototype.toISOString()` — so string comparison == time comparison.
 

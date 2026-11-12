@@ -2,7 +2,7 @@
 //!
 //! Everything runtime-specific lives here: which binary to call
 //! (`docker` / `podman`), how to check it is up, how to find and stop
-//! orphaned Talon containers (by the `talon.managed=true` label instead of a
+//! orphaned Talahon containers (by the `talon.managed=true` label instead of a
 //! name prefix), how containers reach the host, which host address the
 //! LLM gateway should bind to so that `host.docker.internal` reaches it, and
 //! the dedicated agent network ([`AGENT_NETWORK`], MYTH-05).
@@ -23,7 +23,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use talon_core::{Error, Result};
 
-/// Label every Talon-launched container carries (`--label`).
+/// Label every Talahon-launched container carries (`--label`).
 pub const MANAGED_LABEL: &str = "talon.managed=true";
 
 /// Label key recording the owning group folder.
@@ -34,7 +34,7 @@ pub const HOST_GATEWAY_NAME: &str = "host.docker.internal";
 
 /// Dedicated bridge network for agent containers (MYTH-05): inter-container
 /// communication disabled, fixed bridge interface [`AGENT_BRIDGE_NAME`] for
-/// host egress firewall rules (`talon setup egress`).
+/// host egress firewall rules (`talahon setup egress`).
 pub const AGENT_NETWORK: &str = "talon-agents";
 
 /// Linux bridge interface of [`AGENT_NETWORK`].
@@ -239,7 +239,7 @@ pub fn kill_args(name: &str) -> Vec<String> {
     vec!["kill".to_string(), name.to_string()]
 }
 
-/// Argument vector listing running Talon containers by label.
+/// Argument vector listing running Talahon containers by label.
 pub fn list_managed_args() -> Vec<String> {
     vec![
         "ps".to_string(),
@@ -263,7 +263,7 @@ pub fn network_inspect_args(name: &str) -> Vec<String> {
 ///
 /// - docker: `network create --driver bridge --opt
 ///   com.docker.network.bridge.enable_icc=false --opt
-///   com.docker.network.bridge.name=br-talon --label talon.managed=true <name>`
+///   com.docker.network.bridge.name=br-talahon --label talon.managed=true <name>`
 /// - podman: the same without `enable_icc` (netavark has no equivalent and
 ///   rejects unknown bridge options).
 pub fn agent_network_create_args(kind: RuntimeKind, name: &str) -> Vec<String> {
@@ -710,7 +710,7 @@ impl ContainerRuntime {
 
         tracing::warn!(
             "could not detect the container bridge address; binding the LLM gateway to 127.0.0.1 \
-             (containers may not reach it — set TALON_LLM_GATEWAY_BIND explicitly)"
+             (containers may not reach it — set TALAHON_LLM_GATEWAY_BIND explicitly)"
         );
         loopback
     }

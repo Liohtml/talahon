@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Talon MemPalace — one-time host setup
+# Talahon MemPalace — one-time host setup
 #
 # Creates the palace data directory and hands it over to the mcp-palace user,
 # plus a local Python venv with mempalace + chromadb for development and
@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 
-echo "=== Talon MemPalace Setup ==="
+echo "=== Talahon MemPalace Setup ==="
 echo ""
 
 # ── Python check ─────────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ if [[ "$(uname -s)" == "Linux" ]]; then
         else
             echo ""
             echo "  WARNING: could not hand $MEMPALACE_ROOT over to mcp-palace (uid $PALACE_UID)."
-            echo "  Fix manually before starting Talon:"
+            echo "  Fix manually before starting Talahon:"
             echo "    sudo chown -R $PALACE_UID:$PALACE_UID $MEMPALACE_ROOT && sudo chmod 700 $MEMPALACE_ROOT"
             echo ""
         fi

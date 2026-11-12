@@ -22,7 +22,7 @@ pub const BUILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 pub const TEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Image repository the build script tags.
-const DEFAULT_IMAGE_REPO: &str = "talon-agent";
+const DEFAULT_IMAGE_REPO: &str = "talahon-agent";
 
 fn base_block(runtime: &str, image: &str) -> StatusBlock {
     StatusBlock::new("SETUP_CONTAINER")
@@ -174,7 +174,7 @@ mod tests {
 
     fn ctx(dir: &std::path::Path, runner: Arc<MockRunner>) -> SetupContext {
         let mut c = SetupContext::new(dir, dir, runner);
-        c.config.container_image = "talon-agent:latest".into();
+        c.config.container_image = "talahon-agent:latest".into();
         c.config.container_runtime = "docker".into();
         c
     }

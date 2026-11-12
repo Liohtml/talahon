@@ -1,6 +1,6 @@
-# Talon × CoPilot Integration
+# Talahon × CoPilot Integration
 
-> **Status:** Live. CoPilot's side of this integration — the Talon connector
+> **Status:** Live. CoPilot's side of this integration — the Talahon connector
 > (`/api/talon/*`), the write-back API (`/api/ai_analyst/*`) and the Customer
 > Portal's AI reports (`/api/customer_portal/ai_reports/*`) — is served by
 > CoPilot's Rust service (CoPilot `crates/copilot-talon`,
@@ -9,14 +9,14 @@
 > built on the same toolchain and conventions as this workspace. The wire
 > contract is typed and test-pinned on the CoPilot side (§ Wire contract).
 
-This document describes the architecture for integrating the Talon AI analyst with the [CoPilot](https://github.com/Liohtml/CoPilot) application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
+This document describes the architecture for integrating the Talahon AI analyst with the [CoPilot](https://github.com/Liohtml/CoPilot) application. The goal is a seamless analyst experience: alerts are automatically investigated by the AI, findings are written back into CoPilot, and analysts can interact with the AI directly from within the platform.
 
 ---
 
 ## Design Principles
 
-- **CoPilot is the database of record.** All investigation results, job status, and extracted IOCs are stored in CoPilot's MySQL database — not in Talon's SQLite store.
-- **Talon is the AI brain.** It detects alert types, loads the right analysis template, queries the SIEM, runs threat intel, and produces structured reports.
+- **CoPilot is the database of record.** All investigation results, job status, and extracted IOCs are stored in CoPilot's MySQL database — not in Talahon's SQLite store.
+- **Talahon is the AI brain.** It detects alert types, loads the right analysis template, queries the SIEM, runs threat intel, and produces structured reports.
 - **The agent never writes directly to MySQL.** The MySQL MCP tool is read-only. Agent write-back goes through a CoPilot REST API, which validates and persists results. This keeps the database boundary clean and auditable.
 - **Both trigger paths produce identical output.** Whether an investigation is started by a real-time `POST /investigate` call or the 15-minute scheduled task, the agent runs the same workflow and writes back through the same API.
 
@@ -30,7 +30,7 @@ This document describes the architecture for integrating the Talon AI analyst wi
 │                                                     │
 │  Alert created ──► POST /investigate ──────────────┐│
 │                                                    ││
-│  GET /api/talon/status ◄──── Talon HTTP API        ││
+│  GET /api/talon/status ◄──── Talahon HTTP API        ││
 │  GET /api/talon/jobs/{alert_id} (CoPilot DB)       ││
 │                                                    ││
 │  MCP write-back tools:                             ││
@@ -46,7 +46,7 @@ This document describes the architecture for integrating the Talon AI analyst wi
           │  read-only MCP              ▲ REST write-back
           ▼                             │
 ┌─────────────────────────────────────────────────────┐
-│                    Talon (Rust)                     │
+│                    Talahon (Rust)                     │
 │                                                     │
 │  HTTP channel (port 3100)                           │
 │    POST /investigate   ← CoPilot triggers this      │
@@ -60,7 +60,7 @@ This document describes the architecture for integrating the Talon AI analyst wi
 │    Runs full investigation per alert                │
 │                                                     │
 │  Copilot container agent                            │
-│    groups/copilot/CLAUDE.md   ← investigation flow  │
+│    groups/copilot/AGENT.md    ← investigation flow  │
 │    groups/copilot/prompts/    ← per-alert templates │
 └─────────────────────────────────────────────────────┘
 ```
@@ -89,15 +89,15 @@ POST http://talon:3100/investigate
 |---|---|---|
 | `copilot` | ingest-time trigger | `incident_management_ai_analyst_trigger_enabled` per customer |
 | `copilot-analyst` | `POST /api/talon/investigate` (analyst click) | the alert must belong to one of the analyst's customers |
-| `customer-portal` | `POST /api/customer_portal/ai_reports/alert/{id}/investigate` (a portal user asking, CoPilot #1215; Rust `copilot-customer-portal`) | opt-in per customer, 30-minute cooldown per alert, optional daily limit — refused in CoPilot before Talon is called |
+| `customer-portal` | `POST /api/customer_portal/ai_reports/alert/{id}/investigate` (a portal user asking, CoPilot #1215; Rust `copilot-customer-portal`) | opt-in per customer, 30-minute cooldown per alert, optional daily limit — refused in CoPilot before Talahon is called |
 
 For `customer-portal` requests the `ai_analyst_job` row appears only once
-Talon picks the request up; until then CoPilot counts its own
+Talahon picks the request up; until then CoPilot counts its own
 `customer_portal_ai_request` row. A non-2xx answer from `/investigate` makes
-CoPilot drop that row and tell the customer to try again later — Talon's
+CoPilot drop that row and tell the customer to try again later — Talahon's
 error text never reaches the portal.
 
-**Talon behaviour:**
+**Talahon behaviour:**
 1. Creates a job row in `ai_analyst_job` (status = `pending`) via the CoPilot write-back API
 2. Enqueues the investigation into the copilot group container
 3. Returns `{ "job_id": "..." }` immediately (investigation runs async)
@@ -126,7 +126,7 @@ Both paths feed the same investigation workflow and write back through the same 
 
 ## Investigation Workflow (Agent-Side)
 
-The copilot agent follows these steps for every alert, defined in `groups/copilot/CLAUDE.md`:
+The copilot agent follows these steps for every alert, defined in `groups/copilot/AGENT.md`:
 
 1. **Pull alert from MySQL** — `incident_management_alert` + `incident_management_asset`
 2. **Fetch raw SIEM event + index mapping** — `get_document` and `get_index` in parallel. The mapping confirms exact field names and types before any search query is built.
@@ -267,7 +267,7 @@ The agent has **read-only** access to MySQL. All writes go through CoPilot REST 
 
 ---
 
-## Talon HTTP API
+## Talahon HTTP API
 
 Endpoints on the HTTP channel (default port `3100`, `crates/talon-http`).
 Authentication: `X-Api-Key` (or `Authorization: Bearer`) with `HTTP_API_KEY`;
@@ -284,17 +284,17 @@ errors are `{"error": "…"}`.
 | `POST /session/reset` | Clear a lane `{scope, user_id?}` → `{cleared, lanes}` | `POST /api/talon/session/reset` |
 | `POST /palace/lesson`, `GET /palace/search`, `POST /palace/forget` | MemPalace proxy (503 unless configured) | palace drainer, `GET /api/ai_analyst/palace_lessons/customer/{code}`, one-off sweeper |
 
-There is no per-alert job endpoint on Talon: CoPilot answers
+There is no per-alert job endpoint on Talahon: CoPilot answers
 `GET /api/talon/jobs/{alert_id}` from its own `ai_analyst_job` table.
 
 ### Wire contract
 
-Talon parses these bodies by hand and builds its responses with `json!`, so
+Talahon parses these bodies by hand and builds its responses with `json!`, so
 the shapes are typed on the CoPilot side instead: CoPilot
 `crates/copilot-talon/src/contract.rs` defines every request and response
 above (`InvestigateRequest`, `InvestigateAccepted`, `Investigation`,
 `MessageRequest`, `SseFrame`, `SessionResetRequest`, `TemplateInfo`,
-`PalaceLessonRequest`, `ErrorBody`, …) plus Talon's validation rules for
+`PalaceLessonRequest`, `ErrorBody`, …) plus Talahon's validation rules for
 customer codes and template names, with tests pinning the exact JSON. **A
 change to any of these endpoints here needs the matching change there** —
 the CoPilot tests fail otherwise rather than CoPilot getting a 400 in
@@ -304,11 +304,11 @@ production.
 
 ## CoPilot UI Integration (Planned)
 
-Once the write-back API and Talon endpoints are in place, CoPilot can surface:
+Once the write-back API and Talahon endpoints are in place, CoPilot can surface:
 
 - **Alert detail page** — "AI Analysis" tab: severity badge, summary, full report, IOC table
 - **Alert list** — status column: `⚡ Analyzed` / `⏳ Analyzing` / `✗ Failed` / `—`
-- **Dashboard widget** — Talon queue: N running, N completed today, N failed
+- **Dashboard widget** — Talahon queue: N running, N completed today, N failed
 - **IOC browser** — filter by `vt_verdict = 'malicious'` across all AI-discovered IOCs
 - **"Analyze with AI" button** — calls `POST /investigate`, shows a spinner, auto-refreshes
 
@@ -332,11 +332,11 @@ Analyst reads AI report in CoPilot UI
   │
   ├─► Teach the palace (free-text lesson + room dropdown)
   │     CoPilot queues the lesson in ai_analyst_palace_lesson
-  │     Async drainer POSTs to Talon → POST /palace/lesson
-  │     Talon wraps the MemPalace MCP call (mempalace_add_drawer / mempalace_kg_add)
+  │     Async drainer POSTs to Talahon → POST /palace/lesson
+  │     Talahon wraps the MemPalace MCP call (mempalace_add_drawer / mempalace_kg_add)
   │
   ├─► Re-run with different template
-  │     CoPilot → POST /investigate (Talon) with template_override
+  │     CoPilot → POST /investigate (Talahon) with template_override
   │     New job runs, side-by-side diff shown in UI
   │
   └─► Flag template issue (missed step, wrong choice, etc.)
@@ -372,7 +372,7 @@ The reviewer writes prose; the system handles MCP tool names, wing/room routing,
 │   • Threat intel — IOC seen in this environment     │
 │ Lesson: [ DC01 runs SCCM patching at 02:00, expect │
 │           svchost children in that window        ] │
-│ Similar existing lessons: (CoPilot → GET /palace/search on Talon) │
+│ Similar existing lessons: (CoPilot → GET /palace/search on Talahon) │
 │ Durability: ( ) one-off  (•) durable                │
 │ [ Save to palace ]                                 │
 └─────────────────────────────────────────────────────┘
@@ -439,14 +439,14 @@ CREATE TABLE ai_analyst_palace_lesson (
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/ai_analyst/reports/{report_id}/review` | Submit a review (rubric + thumbs + template verdict) |
-| `POST /api/ai_analyst/reports/{report_id}/replay` | Trigger `POST /investigate` on Talon with `template_override` |
+| `POST /api/ai_analyst/reports/{report_id}/replay` | Trigger `POST /investigate` on Talahon with `template_override` |
 | `POST /api/ai_analyst/palace_lessons` | Queue a teach-the-palace lesson for async ingestion |
 | `GET /api/ai_analyst/reviews/customer/{customer_code}` | Feed the Feedback Dashboard |
-| `GET /api/ai_analyst/palace_lessons/customer/{customer_code}` | List already-ingested lessons for the UI's similar-lessons preview (proxies `GET /palace/search` on Talon) |
+| `GET /api/ai_analyst/palace_lessons/customer/{customer_code}` | List already-ingested lessons for the UI's similar-lessons preview (proxies `GET /palace/search` on Talahon) |
 
 **Async palace ingestion drainer (CoPilot-side)**
 
-MemPalace itself runs inside Talon — CoPilot does not hold an MCP client and does not talk to the palace directly. Instead, a lightweight CoPilot worker drains `ai_analyst_palace_lesson` where `status = 'pending'` and POSTs each row to the Talon HTTP endpoint:
+MemPalace itself runs inside Talahon — CoPilot does not hold an MCP client and does not talk to the palace directly. Instead, a lightweight CoPilot worker drains `ai_analyst_palace_lesson` where `status = 'pending'` and POSTs each row to the Talahon HTTP endpoint:
 
 ```
 POST http://talon:3100/palace/lesson
@@ -459,11 +459,11 @@ Authorization: Bearer <HTTP_API_KEY>
 }
 ```
 
-On a `2xx` response the worker marks the row `ingested`; on failure it retries with backoff and marks `failed` after N attempts. CoPilot's responsibility ends at the HTTP call — Talon owns the MemPalace write, room/wing routing, and durability metadata.
+On a `2xx` response the worker marks the row `ingested`; on failure it retries with backoff and marks `failed` after N attempts. CoPilot's responsibility ends at the HTTP call — Talahon owns the MemPalace write, room/wing routing, and durability metadata.
 
-Similarly, the **live similar-lessons preview** in the teach-the-palace UI is served by CoPilot proxying to Talon's `GET /palace/search` rather than hitting MemPalace directly.
+Similarly, the **live similar-lessons preview** in the teach-the-palace UI is served by CoPilot proxying to Talahon's `GET /palace/search` rather than hitting MemPalace directly.
 
-### Talon side
+### Talahon side
 
 **Eval output alongside every investigation**
 
@@ -498,14 +498,14 @@ data/sessions/copilot-investigate/evals/<alert_id>-<job_id>.json   # /home/agent
 
 The CoPilot Feedback Dashboard reads these to compute selection-accuracy and tool-usage stats without parsing transcripts.
 
-**New HTTP endpoints on the Talon channel**
+**New HTTP endpoints on the Talahon channel**
 
-Talon is the sole owner of MemPalace — every palace interaction from CoPilot goes through these endpoints, not through an MCP client on the CoPilot side.
+Talahon is the sole owner of MemPalace — every palace interaction from CoPilot goes through these endpoints, not through an MCP client on the CoPilot side.
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /investigate` *(extended)* | Now accepts `template_override: "<filename>"` — agent skips Step 2.5 selection and loads that template directly |
-| `POST /palace/lesson` | Wraps `mempalace_add_drawer`. Body: `{ customer_code, lesson_type, lesson_text, durability }`. Talon maps `customer_code → wing` and `lesson_type → room`, writes the drawer, and returns `{ drawer_id, ingested_at }`. Called by CoPilot's async drainer. |
+| `POST /palace/lesson` | Wraps `mempalace_add_drawer`. Body: `{ customer_code, lesson_type, lesson_text, durability }`. Talahon maps `customer_code → wing` and `lesson_type → room`, writes the drawer, and returns `{ drawer_id, ingested_at }`. Called by CoPilot's async drainer. |
 | `GET /palace/search` | Wraps `mempalace_search`. Query: `?customer_code=<code>&room=<room>&query=<text>&limit=<n>`. Powers the similar-lessons preview in the teach-the-palace UI. |
 | `GET /evals/:alertId` | Returns the eval JSON for a given alert — used by the CoPilot dashboard |
 
@@ -517,7 +517,7 @@ Talon is the sole owner of MemPalace — every palace interaction from CoPilot g
 
 **MemPalace room taxonomy for reviews**
 
-Reuse the existing taxonomy from `groups/copilot/CLAUDE.md` — no new rooms needed for teach-the-palace. One new room for tracking review signals themselves:
+Reuse the existing taxonomy from `groups/copilot/AGENT.md` — no new rooms needed for teach-the-palace. One new room for tracking review signals themselves:
 
 | Wing | Room | What goes here |
 |---|---|---|
@@ -553,23 +553,23 @@ Reviews can generate lessons fast. Two guards keep the palace useful:
 
 | # | Item | Owner | Status |
 |---|------|-------|--------|
-| 1 | Alert-type prompt templates (`sysmon_event_1.txt`) | Talon | ✅ Done |
-| 2 | Investigation workflow + index mapping step (CLAUDE.md) | Talon | ✅ Done |
-| 3 | Upgraded scheduled task (full investigation per alert) | Talon | ✅ Done |
+| 1 | Alert-type prompt templates (`sysmon_event_1.txt`) | Talahon | ✅ Done |
+| 2 | Investigation workflow + index mapping step (AGENT.md) | Talahon | ✅ Done |
+| 3 | Upgraded scheduled task (full investigation per alert) | Talahon | ✅ Done |
 | 4 | MySQL schema: `ai_analyst_job/report/ioc` tables | CoPilot | ✅ Done |
 | 5 | CoPilot write-back REST API endpoints | CoPilot | ✅ Done |
-| 6 | CoPilot MCP server (`copilot-mcp-server`) + Talon integration | Both | ✅ Done |
-| 7 | Scheduled task deduplication + full write-back with real tool names | Talon | ✅ Done |
-| 8 | `POST /investigate` endpoint in Talon | Talon | ✅ Done |
-| 9 | `GET /status` endpoint in Talon | Talon | ✅ Done |
-| 10 | Additional prompt templates (events 3, 7, 11, 22) | Talon | ✅ Done |
+| 6 | CoPilot MCP server (`copilot-mcp-server`) + Talahon integration | Both | ✅ Done |
+| 7 | Scheduled task deduplication + full write-back with real tool names | Talahon | ✅ Done |
+| 8 | `POST /investigate` endpoint in Talahon | Talahon | ✅ Done |
+| 9 | `GET /status` endpoint in Talahon | Talahon | ✅ Done |
+| 10 | Additional prompt templates (events 3, 7, 11, 22) | Talahon | ✅ Done |
 | 11 | CoPilot UI: alert analysis tab + status badges | CoPilot | ✅ Done |
-| 12 | Eval JSON output per investigation (`data/sessions/copilot-investigate/evals/`) + `GET /evals/:alertId` endpoint | Talon | ✅ Done |
-| 13 | `template_override` param on `POST /investigate` | Talon | ✅ Done |
-| 14 | Talon palace HTTP endpoints: `POST /palace/lesson` + `GET /palace/search` wrapping MemPalace MCP tools | Talon | ✅ Done |
+| 12 | Eval JSON output per investigation (`data/sessions/copilot-investigate/evals/`) + `GET /evals/:alertId` endpoint | Talahon | ✅ Done |
+| 13 | `template_override` param on `POST /investigate` | Talahon | ✅ Done |
+| 14 | Talahon palace HTTP endpoints: `POST /palace/lesson` + `GET /palace/search` wrapping MemPalace MCP tools | Talahon | ✅ Done |
 | 15 | Review MySQL tables (`ai_analyst_review`, `ai_analyst_ioc_review`, `ai_analyst_palace_lesson`) | CoPilot | ✅ Done |
 | 16 | CoPilot REST endpoints: review submit, replay, palace lesson queue | CoPilot | ✅ Done |
-| 17 | CoPilot async palace drainer (POSTs queued lessons to Talon `/palace/lesson`) | CoPilot | ✅ Done |
+| 17 | CoPilot async palace drainer (POSTs queued lessons to Talahon `/palace/lesson`) | CoPilot | ✅ Done |
 | 18 | CoPilot UI: inline review panel + teach-the-palace | CoPilot | ✅ Done |
 | 19 | CoPilot UI: re-run / A-B template comparison modal | CoPilot | ✅ Done |
 | 20 | CoPilot UI: feedback dashboard (selection accuracy, flagged steps, lesson hit rate) | CoPilot | ✅ Done |

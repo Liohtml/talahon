@@ -1,17 +1,17 @@
 # Code of Conduct
 
-Talon is a security tool built for SOC teams. These guidelines keep
+Talahon is a security tool built for SOC teams. These guidelines keep
 contributions focused, professional and safe.
 
 ## Expectations
 
 - **Be direct and technical.** Keep discussions focused on the work.
-- **Responsible disclosure.** Report vulnerabilities in Talon privately (see
+- **Responsible disclosure.** Report vulnerabilities in Talahon privately (see
   [docs/SECURITY.md](docs/SECURITY.md#reporting)) before anything is
   discussed in public.
 - **No weaponisation.** Contributions that add capabilities designed to
   attack, surveil or harm systems without authorization are rejected.
-- **Respect customer data.** Talon processes real SOC alert data. Never put
+- **Respect customer data.** Talahon processes real SOC alert data. Never put
   real PII, credentials or customer data into issues, PRs or examples.
 - **Give credit.** If your contribution builds on prior work, say so.
 

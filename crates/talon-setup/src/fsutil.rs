@@ -220,7 +220,11 @@ mod tests {
     fn upsert_replaces_first_occurrence_and_keeps_rest() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(".env");
-        std::fs::write(&p, "SOME_KEY=value\nASSISTANT_NAME=\"Talon\"\nOTHER=test\n").unwrap();
+        std::fs::write(
+            &p,
+            "SOME_KEY=value\nASSISTANT_NAME=\"Talahon\"\nOTHER=test\n",
+        )
+        .unwrap();
         upsert_env_line(&p, "ASSISTANT_NAME", "\"Nova\"").unwrap();
         assert_eq!(
             std::fs::read_to_string(&p).unwrap(),
@@ -275,7 +279,7 @@ mod tests {
     fn upsert_rejects_injection() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(".env");
-        assert!(upsert_env_line(&p, "TZ", "UTC\nTALON_VLLM_BASE_URL=http://evil").is_err());
+        assert!(upsert_env_line(&p, "TZ", "UTC\nTALAHON_VLLM_BASE_URL=http://evil").is_err());
         assert!(upsert_env_line(&p, "BAD KEY", "x").is_err());
         assert!(upsert_env_line(&p, "1X", "x").is_err());
         assert!(!p.exists());

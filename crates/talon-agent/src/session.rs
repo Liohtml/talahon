@@ -10,7 +10,7 @@
 //!
 //! Messages are appended as they happen; compaction rewrites the file
 //! atomically (temp file + rename). The system prompt is never stored — it is
-//! rebuilt on every run so `CLAUDE.md` edits take effect. Ids must be
+//! rebuilt on every run so `AGENT.md` edits take effect. Ids must be
 //! canonical hyphenated UUIDs, so an id can never traverse out of the
 //! sessions directory. Loading tolerates a torn last line and repairs
 //! tool-call/result pairing (see [`sanitize_history`]).
@@ -37,7 +37,7 @@ const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Text of the synthetic tool result inserted for calls that never got one.
 pub const INTERRUPTED_TOOL_RESULT: &str =
-    "[talon] No result: the previous run ended before this tool call finished.";
+    "[talahon] No result: the previous run ended before this tool call finished.";
 
 /// Validate a session id: a hyphenated UUID (36 chars). Returns the
 /// canonical (lower-case) form.

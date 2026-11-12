@@ -8,7 +8,7 @@
 //! MemPalace keeps its data (ChromaDB, including pickled index metadata) in
 //! `mempalace-data/`, a directory agent containers mount. Running the Python
 //! palace code *on the host* against that directory would unpickle data an
-//! agent may have written: host code execution as the Talon user. So:
+//! agent may have written: host code execution as the Talahon user. So:
 //!
 //! - the default runner is [`DisabledPalaceRunner`]: every `/palace/*` call
 //!   answers `503 {"error":"palace not configured"}`;
@@ -18,7 +18,7 @@
 //!   container as `mcp-palace`;
 //! - [`ScriptPalaceRunner`] (host execution of `mempalace/palace-call.sh`)
 //!   is only selected when the operator sets
-//!   `TALON_PALACE_HOST_EXEC=unsafe` ([`HOST_EXEC_ENV`]). **Dangerous**: any
+//!   `TALAHON_PALACE_HOST_EXEC=unsafe` ([`HOST_EXEC_ENV`]). **Dangerous**: any
 //!   agent that can write `mempalace-data/` can then run code on the host.
 //!
 //! Every process-backed runner keeps the same safeguards: an allowlisted
@@ -40,7 +40,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 /// Env var that opts into running `palace-call.sh` directly on the host.
-pub const HOST_EXEC_ENV: &str = "TALON_PALACE_HOST_EXEC";
+pub const HOST_EXEC_ENV: &str = "TALAHON_PALACE_HOST_EXEC";
 /// The only value of [`HOST_EXEC_ENV`] that enables host execution.
 pub const HOST_EXEC_UNSAFE: &str = "unsafe";
 /// Default cap on a palace call's stdout.
@@ -468,7 +468,7 @@ impl PalaceRunner for CommandPalaceRunner {
 /// **Dangerous** (MYTH-01): the script loads ChromaDB data from
 /// `mempalace-data/`, which agent containers can write, so a compromised
 /// agent can get code executed as the host user. Only selected when the
-/// operator sets `TALON_PALACE_HOST_EXEC=unsafe`; prefer
+/// operator sets `TALAHON_PALACE_HOST_EXEC=unsafe`; prefer
 /// [`CommandPalaceRunner`].
 #[derive(Debug)]
 pub struct ScriptPalaceRunner {
@@ -805,7 +805,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = script(
             &dir,
-            r#"cat >/dev/null; if [ -n "$HTTP_API_KEY$TALON_VLLM_API_KEY" ]; then echo '{"leak":true}'; else echo '{"leak":false}'; fi"#,
+            r#"cat >/dev/null; if [ -n "$HTTP_API_KEY$TALAHON_VLLM_API_KEY" ]; then echo '{"leak":true}'; else echo '{"leak":false}'; fi"#,
         );
         // The test process may or may not have these set; the child must
         // never see them either way.

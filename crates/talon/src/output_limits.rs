@@ -120,7 +120,7 @@ pub fn cap_text(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let note = format!(
-        "\n\n[Talon: output truncated — the result was {} bytes; only the first part \
+        "\n\n[Talahon: output truncated — the result was {} bytes; only the first part \
          (limit {max} bytes) is shown here]",
         text.len()
     );

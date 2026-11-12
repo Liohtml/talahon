@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# Anonymizing OpenSearch MCP proxy for Talon
+# Anonymizing OpenSearch MCP proxy for Talahon
 #
 # Wraps opensearch-mcp.sh and anonymizes tool results before they reach the
 # model. Sensitive field values are replaced with consistent tokens
 # (USER_1, HOST_1, IP_INT_1, EMAIL_1, DOMAIN_INT_1, SID_1, MAC_1). A built-in
 # `deanonymize` tool reverses the substitution for report writing.
 #
-# Implementation: the Rust proxy `talon-anon-proxy` (crates/talon-anon). If
+# Implementation: the Rust proxy `talahon-anon-proxy` (crates/talon-anon). If
 # the binary is not available the server refuses to start: SIEM data is never
 # served without anonymization.
 #
 # Field definitions live in anon_proxy/fields.yaml — git pull to get updates.
 #
 # Token map (holds the real values; written atomically with mode 0600):
-#   $TALON_ANON_MAP                      if set
+#   $TALAHON_ANON_MAP                      if set
 #   $HOME/session_tokens.json            default (in the container HOME is the
 #                                        server's private tmpfs /run/talon/home/<server>)
 #   /workspace/group/session_tokens.json dev-mode fallback when $HOME is not writable
 #
 # Environment overrides:
-#   TALON_ANON_PROXY_BIN   path to the talon-anon-proxy binary
-#   TALON_ANON_FIELDS      field definitions (default: anon_proxy/fields.yaml)
-#   TALON_ANON_MAP         token map file
-#   TALON_ANON_LOG         log filter for the Rust proxy (stderr), e.g. "debug"
+#   TALAHON_ANON_PROXY_BIN   path to the talahon-anon-proxy binary
+#   TALAHON_ANON_FIELDS      field definitions (default: anon_proxy/fields.yaml)
+#   TALAHON_ANON_MAP         token map file
+#   TALAHON_ANON_LOG         log filter for the Rust proxy (stderr), e.g. "debug"
 #
 # This script is the MCP server command. Do not run it directly.
 
@@ -31,7 +31,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 UPSTREAM="$SCRIPT_DIR/opensearch-mcp.sh"
-FIELDS="${TALON_ANON_FIELDS:-$SCRIPT_DIR/anon_proxy/fields.yaml}"
+# TALON_ANON_* are the pre-rename spellings of TALAHON_ANON_*: still read
+# (the new name wins), removed in the next major version.
+for _old in TALON_ANON_PROXY_BIN TALON_ANON_FIELDS TALON_ANON_MAP TALON_ANON_LOG; do
+    _new="TALAHON_${_old#TALON_}"
+    if [[ -n "${!_old:-}" && -z "${!_new:-}" ]]; then
+        echo "[anon-opensearch-mcp] WARNING: $_old is deprecated; rename it to $_new" >&2
+    fi
+done
+unset _old _new
+ANON_PROXY_BIN="${TALAHON_ANON_PROXY_BIN:-${TALON_ANON_PROXY_BIN:-}}"
+ANON_MAP="${TALAHON_ANON_MAP:-${TALON_ANON_MAP:-}}"
+FIELDS="${TALAHON_ANON_FIELDS:-${TALON_ANON_FIELDS:-$SCRIPT_DIR/anon_proxy/fields.yaml}}"
 
 # Check if a binary is native to the current OS (handles macOS venv in Linux container)
 _is_native_exec() {
@@ -49,15 +60,19 @@ _is_native_exec() {
 
 _find_rust_proxy() {
     local candidates=()
-    [[ -n "${TALON_ANON_PROXY_BIN:-}" ]] && candidates+=("$TALON_ANON_PROXY_BIN")
-    local on_path
-    on_path="$(command -v talon-anon-proxy 2>/dev/null || true)"
-    [[ -n "$on_path" ]] && candidates+=("$on_path")
-    candidates+=(
-        "/usr/local/bin/talon-anon-proxy"
-        "$REPO_DIR/target/release/talon-anon-proxy"
-        "$REPO_DIR/target/debug/talon-anon-proxy"
-    )
+    [[ -n "$ANON_PROXY_BIN" ]] && candidates+=("$ANON_PROXY_BIN")
+    local name on_path
+    # Every place under the current name first, then under the name the
+    # binary had up to 2.x (an image built before the rename has only that).
+    for name in talahon-anon-proxy talon-anon-proxy; do
+        on_path="$(command -v "$name" 2>/dev/null || true)"
+        [[ -n "$on_path" ]] && candidates+=("$on_path")
+        candidates+=(
+            "/usr/local/bin/$name"
+            "$REPO_DIR/target/release/$name"
+            "$REPO_DIR/target/debug/$name"
+        )
+    done
     local c
     for c in "${candidates[@]}"; do
         if _is_native_exec "$c"; then
@@ -69,8 +84,8 @@ _find_rust_proxy() {
 }
 
 _token_map_path() {
-    if [[ -n "${TALON_ANON_MAP:-}" ]]; then
-        printf '%s\n' "$TALON_ANON_MAP"
+    if [[ -n "$ANON_MAP" ]]; then
+        printf '%s\n' "$ANON_MAP"
     elif [[ -n "${HOME:-}" && -d "$HOME" && -w "$HOME" ]]; then
         printf '%s\n' "$HOME/session_tokens.json"
     elif [[ -d /workspace/group && -w /workspace/group ]]; then
@@ -89,8 +104,8 @@ if RUST_PROXY="$(_find_rust_proxy)"; then
     exec "$RUST_PROXY" "${args[@]}" -- "$UPSTREAM"
 fi
 
-echo "[anon-opensearch-mcp] ERROR: talon-anon-proxy not found; refusing to serve SIEM data without it." >&2
-echo "[anon-opensearch-mcp]   Tried: \$TALON_ANON_PROXY_BIN, PATH, /usr/local/bin, $REPO_DIR/target/{release,debug}" >&2
+echo "[anon-opensearch-mcp] ERROR: talahon-anon-proxy not found; refusing to serve SIEM data without it." >&2
+echo "[anon-opensearch-mcp]   Tried: \$TALAHON_ANON_PROXY_BIN, PATH, /usr/local/bin, $REPO_DIR/target/{release,debug}" >&2
 echo "[anon-opensearch-mcp]   In a container: rebuild the image (container/build.sh)" >&2
 echo "[anon-opensearch-mcp]   On the host: cargo build --release -p talahon-anon" >&2
 exit 1

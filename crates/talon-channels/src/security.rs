@@ -50,8 +50,8 @@ impl PolicyEgressGuard {
         Self { policy }
     }
 
-    /// Policy from `TALON_EGRESS_ALLOW` / `TALON_EGRESS_DENY` /
-    /// `TALON_EGRESS_ALLOW_PRIVATE` (see [`EgressPolicy::from_env`]).
+    /// Policy from `TALAHON_EGRESS_ALLOW` / `TALAHON_EGRESS_DENY` /
+    /// `TALAHON_EGRESS_ALLOW_PRIVATE` (see [`EgressPolicy::from_env`]).
     pub fn from_env(env: &talon_core::env::EnvFile) -> Self {
         Self::new(EgressPolicy::from_env(env))
     }

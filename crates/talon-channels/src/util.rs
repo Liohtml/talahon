@@ -134,19 +134,19 @@ mod tests {
     #[test]
     fn env_helpers() {
         let env = EnvFile::from_str_content(
-            "TALON_CH_TEST_SECRET=  s3cret \nTALON_CH_TEST_LIST= a, ,b ,c\nTALON_CH_BLANK=\" \"\n",
+            "TALAHON_CH_TEST_SECRET=  s3cret \nTALAHON_CH_TEST_LIST= a, ,b ,c\nTALAHON_CH_BLANK=\" \"\n",
         );
         assert_eq!(
-            secret_value(&env, "TALON_CH_TEST_SECRET").as_deref(),
+            secret_value(&env, "TALAHON_CH_TEST_SECRET").as_deref(),
             Some("s3cret")
         );
-        assert_eq!(secret_value(&env, "TALON_CH_BLANK"), None);
-        assert_eq!(secret_value(&env, "TALON_CH_MISSING"), None);
+        assert_eq!(secret_value(&env, "TALAHON_CH_BLANK"), None);
+        assert_eq!(secret_value(&env, "TALAHON_CH_MISSING"), None);
         assert_eq!(
-            list_setting(&env, "TALON_CH_TEST_LIST"),
+            list_setting(&env, "TALAHON_CH_TEST_LIST"),
             vec!["a", "b", "c"]
         );
-        assert!(list_setting(&env, "TALON_CH_MISSING").is_empty());
+        assert!(list_setting(&env, "TALAHON_CH_MISSING").is_empty());
     }
 
     #[tokio::test]

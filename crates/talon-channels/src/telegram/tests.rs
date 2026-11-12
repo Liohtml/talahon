@@ -18,6 +18,8 @@ fn api_path(method_name: &str) -> String {
     format!("/bot{TOKEN}/{method_name}")
 }
 
+use talon_core::env::EnvFile;
+
 fn ok(result: Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({ "ok": true, "result": result }))
 }
@@ -25,12 +27,12 @@ fn ok(result: Value) -> ResponseTemplate {
 fn default_host() -> Arc<RecordingHost> {
     Arc::new(RecordingHost::with_groups(&[(
         "tg:100200300",
-        group("Test Group", "test-group", "@Talon"),
+        group("Test Group", "test-group", "@Talahon"),
     )]))
 }
 
 fn config(server: &MockServer) -> TelegramConfig {
-    let mut cfg = TelegramConfig::new(TOKEN, "Talon");
+    let mut cfg = TelegramConfig::new(TOKEN, "Talahon");
     cfg.api_base_url = server.uri();
     cfg.poll_timeout = Duration::from_secs(1);
     cfg.error_backoff_base = Duration::from_millis(5);
@@ -43,7 +45,7 @@ fn ready_channel(server: &MockServer, host: Arc<RecordingHost>) -> TelegramChann
     let channel = TelegramChannel::new(config(server), host).unwrap();
     channel.inner.set_me(&User {
         id: 12345,
-        first_name: Some("Talon".into()),
+        first_name: Some("Talahon".into()),
         username: Some("talonai_bot".into()),
     });
     channel.inner.connected.store(true, Ordering::SeqCst);
@@ -62,7 +64,7 @@ async fn mount_startup(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path(api_path("getMe")))
         .respond_with(ok(json!({
-            "id": 12345, "is_bot": true, "first_name": "Talon", "username": "talonai_bot"
+            "id": 12345, "is_bot": true, "first_name": "Talahon", "username": "talonai_bot"
         })))
         .mount(server)
         .await;
@@ -210,7 +212,7 @@ async fn connect_fails_on_rejected_token_without_leaking_it() {
 async fn rejects_malformed_tokens() {
     let host: Arc<dyn ChannelHost> = default_host();
     for bad in ["", "123/../x", "123:abc?x=1", "tok en", "123:abc#frag"] {
-        let err = TelegramChannel::new(TelegramConfig::new(bad, "Talon"), Arc::clone(&host))
+        let err = TelegramChannel::new(TelegramConfig::new(bad, "Talahon"), Arc::clone(&host))
             .unwrap_err()
             .to_string();
         if !bad.is_empty() {
@@ -221,7 +223,7 @@ async fn rejects_malformed_tokens() {
 
 #[test]
 fn config_debug_redacts_token() {
-    let dbg = format!("{:?}", TelegramConfig::new("123:SECRETSECRET", "Talon"));
+    let dbg = format!("{:?}", TelegramConfig::new("123:SECRETSECRET", "Talahon"));
     assert!(!dbg.contains("SECRETSECRET"), "{dbg}");
 }
 
@@ -483,7 +485,7 @@ async fn uses_sender_name_as_chat_name_for_private_chats() {
     let server = MockServer::start().await;
     let host = Arc::new(RecordingHost::with_groups(&[(
         "tg:100200300",
-        group("Private", "private", "@Talon"),
+        group("Private", "private", "@Talahon"),
     )]));
     let channel = ready_channel(&server, host.clone());
     let mut v = text_json("Hello");
@@ -590,17 +592,97 @@ async fn translates_bot_mention_to_trigger_format() {
         json!([{ "type": "mention", "offset": 0, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Talon @talonai_bot what time is it?");
+    assert_eq!(content, "@Talahon @talonai_bot what time is it?");
 }
 
 #[tokio::test]
 async fn does_not_translate_if_message_already_matches_trigger() {
     let content = mention_case(
-        "@Talon @talonai_bot hello",
-        json!([{ "type": "mention", "offset": 7, "length": 12 }]),
+        "@Talahon @talonai_bot hello",
+        json!([{ "type": "mention", "offset": 9, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Talon @talonai_bot hello");
+    assert_eq!(content, "@Talahon @talonai_bot hello");
+}
+
+/// A chat registered before the rename (trigger `@Talon`), delivered through
+/// a channel whose assistant name is the built-in default or set explicitly.
+async fn mention_in_pre_rename_group(name_is_default: bool, text: &str, offset: u64) -> String {
+    let server = MockServer::start().await;
+    let host = Arc::new(RecordingHost::with_groups(&[(
+        "tg:100200300",
+        group("Old Group", "old-group", "@Talon"),
+    )]));
+    let mut cfg = config(&server);
+    cfg.assistant_name_is_default = name_is_default;
+    let channel = TelegramChannel::new(cfg, host.clone()).unwrap();
+    channel.inner.set_me(&User {
+        id: 12345,
+        first_name: Some("Talahon".into()),
+        username: Some("talonai_bot".into()),
+    });
+    channel.inner.connected.store(true, Ordering::SeqCst);
+    let mut v = text_json(text);
+    v["entities"] = json!([{ "type": "mention", "offset": offset, "length": 12 }]);
+    deliver(&channel, v).await;
+    only_message(&host).content
+}
+
+#[tokio::test]
+async fn without_assistant_name_both_default_names_count_as_the_trigger() {
+    // ASSISTANT_NAME not set: `@Talon` and `@Talahon` both already address
+    // the assistant, so neither message gets a trigger prepended.
+    assert_eq!(
+        mention_in_pre_rename_group(true, "@Talon @talonai_bot hello", 7).await,
+        "@Talon @talonai_bot hello"
+    );
+    assert_eq!(
+        mention_in_pre_rename_group(true, "@Talahon @talonai_bot hello", 9).await,
+        "@Talahon @talonai_bot hello"
+    );
+    // A bare mention still becomes the group's own trigger word.
+    assert_eq!(
+        mention_in_pre_rename_group(true, "@talonai_bot hello", 0).await,
+        "@Talon @talonai_bot hello"
+    );
+}
+
+#[tokio::test]
+async fn with_assistant_name_set_only_the_configured_trigger_counts() {
+    // ASSISTANT_NAME set explicitly: unchanged behaviour, the group's
+    // trigger is matched literally.
+    assert_eq!(
+        mention_in_pre_rename_group(false, "@Talon @talonai_bot hello", 7).await,
+        "@Talon @talonai_bot hello"
+    );
+    assert_eq!(
+        mention_in_pre_rename_group(false, "@Talahon @talonai_bot hello", 9).await,
+        "@Talon @Talahon @talonai_bot hello"
+    );
+}
+
+#[test]
+fn from_env_marks_the_default_assistant_name() {
+    if std::env::var("ASSISTANT_NAME").is_ok_and(|v| !v.is_empty())
+        || std::env::var("TELEGRAM_BOT_TOKEN").is_ok_and(|v| !v.is_empty())
+    {
+        return; // the process environment overrides `.env`
+    }
+    let unset = TelegramConfig::from_env(&EnvFile::from_str_content(&format!(
+        "TELEGRAM_BOT_TOKEN={TOKEN}\n"
+    )))
+    .unwrap();
+    assert_eq!(unset.assistant_name, "Talahon");
+    assert!(unset.assistant_name_is_default);
+    for name in ["Talahon", "Talon", "Nova"] {
+        let set = TelegramConfig::from_env(&EnvFile::from_str_content(&format!(
+            "TELEGRAM_BOT_TOKEN={TOKEN}\nASSISTANT_NAME={name}\n"
+        )))
+        .unwrap();
+        assert_eq!(set.assistant_name, name);
+        assert!(!set.assistant_name_is_default, "{name}");
+    }
+    assert!(!TelegramConfig::new(TOKEN, "Talahon").assistant_name_is_default);
 }
 
 #[tokio::test]
@@ -637,7 +719,7 @@ async fn handles_mention_in_middle_of_message() {
         json!([{ "type": "mention", "offset": 4, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Talon hey @talonai_bot check this");
+    assert_eq!(content, "@Talahon hey @talonai_bot check this");
 }
 
 #[tokio::test]
@@ -648,7 +730,7 @@ async fn mention_offsets_are_utf16() {
         json!([{ "type": "mention", "offset": 3, "length": 12 }]),
     )
     .await;
-    assert_eq!(content, "@Talon 😂 @TalonAI_Bot look");
+    assert_eq!(content, "@Talahon 😂 @TalonAI_Bot look");
 }
 
 #[tokio::test]
@@ -707,8 +789,8 @@ async fn stores_photo_with_caption() {
 #[tokio::test]
 async fn a_caption_can_carry_the_trigger() {
     // Written trigger: it stays at the start.
-    let (_, msg) = media_case(json!({ "photo": [], "caption": "@Talon what is this?" })).await;
-    assert_eq!(msg.unwrap().content, "@Talon what is this? [Photo]");
+    let (_, msg) = media_case(json!({ "photo": [], "caption": "@Talahon what is this?" })).await;
+    assert_eq!(msg.unwrap().content, "@Talahon what is this? [Photo]");
     // Bot mention in the caption.
     let (_, msg) = media_case(json!({
         "photo": [],
@@ -718,7 +800,7 @@ async fn a_caption_can_carry_the_trigger() {
     .await;
     assert_eq!(
         msg.unwrap().content,
-        "@Talon @talonai_bot is this phishing? [Photo]"
+        "@Talahon @talonai_bot is this phishing? [Photo]"
     );
 }
 
@@ -1092,7 +1174,7 @@ async fn ping_replies_with_bot_status() {
     let reqs = requests_to(&server, "sendMessage").await;
     assert_eq!(
         reqs,
-        vec![json!({ "chat_id": "100200300", "text": "Talon is online." })]
+        vec![json!({ "chat_id": "100200300", "text": "Talahon is online." })]
     );
 }
 

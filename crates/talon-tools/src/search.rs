@@ -244,7 +244,7 @@ impl Tool for GlobTool {
                  `*` and `?` do not cross `/`; `**` matches any number of directories; `{{a,b}}` is \
                  alternation; `[abc]` is a character class.\n\
                  - Examples: \"**/*.json\" (all JSON files, any depth), \"*.md\" (Markdown files in the \
-                 top directory only), \"reports/**/incident-*.{{md,json}}\", \"**/CLAUDE.md\".\n\
+                 top directory only), \"reports/**/incident-*.{{md,json}}\", \"**/AGENT.md\".\n\
                  - Returns files only (not directories), at most {} results. Paths below the workspace \
                  are shown relative to it. Symlinks are not followed; `.git` is skipped.\n\
                  - To search file contents use grep; to list a single directory use list_dir.",

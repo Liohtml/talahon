@@ -306,7 +306,7 @@ impl Tool for ReadFileTool {
             description: format!(
                 "Read a text file and return its lines prefixed with line numbers (`     1\\t<line>`).\n\
                  \n\
-                 - `path` is absolute or relative to the workspace, e.g. \"CLAUDE.md\" or \
+                 - `path` is absolute or relative to the workspace, e.g. \"AGENT.md\" or \
                  \"/workspace/extra/logs/auth.log\".\n\
                  - By default up to {lines} lines are returned starting at line 1. For long files use \
                  `offset` (1-based first line) and `limit` (number of lines), e.g. \
@@ -631,7 +631,7 @@ impl Tool for EditFileTool {
                  - To delete text, use an empty `new_string`. To create a new file, use write_file.\n\
                  - The write is atomic; the result shows the edited region with line numbers.\n\
                  \n\
-                 Example: {\"path\": \"CLAUDE.md\", \"old_string\": \"severity: low\", \"new_string\": \
+                 Example: {\"path\": \"MEMORY.md\", \"old_string\": \"severity: low\", \"new_string\": \
                  \"severity: high\"}"
                 .to_string(),
             parameters: json!({

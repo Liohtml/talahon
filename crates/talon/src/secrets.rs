@@ -7,19 +7,20 @@
 
 use std::sync::Arc;
 
-use talon_core::env::{EnvFile, parse_env};
+use talon_core::env::{EnvFile, current_key, key_spellings, parse_env};
 use talon_security::redact::Redactor;
 
-/// Secret keys Talon itself reads (always registered when set, in `.env`
-/// or the process environment).
+/// Secret keys Talahon itself reads (always registered when set, in `.env`
+/// or the process environment). A `TALAHON_*` entry also covers its
+/// pre-rename `TALON_*` spelling, see [`known_secret_key_spellings`].
 pub const KNOWN_SECRET_KEYS: &[&str] = &[
-    "TALON_VLLM_API_KEY",
-    "TALON_ANTHROPIC_API_KEY",
+    "TALAHON_VLLM_API_KEY",
+    "TALAHON_ANTHROPIC_API_KEY",
     "HTTP_API_KEY",
     "TELEGRAM_BOT_TOKEN",
     "WEBHOOK_SECRET",
     "EMACS_AUTH_TOKEN",
-    "TALON_AUDIT_KEY",
+    "TALAHON_AUDIT_KEY",
     "ONECLI_API_KEY",
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -37,11 +38,25 @@ const SECRET_KEY_MARKERS: &[&str] = &[
     "PRIVATE",
 ];
 
+/// [`KNOWN_SECRET_KEYS`] in every spelling a value may be stored under: each
+/// key as listed plus, for a `TALAHON_*` key, the `TALON_*` name it had up to
+/// 2.x. A secret left under the old key name is redacted like any other.
+pub fn known_secret_key_spellings() -> Vec<String> {
+    KNOWN_SECRET_KEYS
+        .iter()
+        .flat_map(|key| key_spellings(key))
+        .collect()
+}
+
 /// Whether an environment key names a secret (`*KEY*`, `*TOKEN*`,
-/// `*SECRET*`, `*PASSWORD*`, ...).
+/// `*SECRET*`, `*PASSWORD*`, ...), under its current or its old spelling.
 pub fn is_secret_key(key: &str) -> bool {
     let upper = key.to_ascii_uppercase();
+    let current = current_key(&upper);
     KNOWN_SECRET_KEYS.contains(&upper.as_str())
+        || current
+            .as_deref()
+            .is_some_and(|k| KNOWN_SECRET_KEYS.contains(&k))
         || SECRET_KEY_MARKERS.iter().any(|m| upper.contains(m))
 }
 
@@ -58,7 +73,8 @@ fn looks_like_secret_value(value: &str) -> bool {
 }
 
 /// Secret values from `.env` (every key that [`is_secret_key`]) plus the
-/// [`KNOWN_SECRET_KEYS`] from the process environment.
+/// [`KNOWN_SECRET_KEYS`] from the process environment, each under both its
+/// current and its old spelling (when both are set, both values count).
 pub fn collect_secrets(env: &EnvFile) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(path) = env.path()
@@ -71,11 +87,13 @@ pub fn collect_secrets(env: &EnvFile) -> Vec<String> {
                 .map(|(_, v)| v),
         );
     }
-    for key in KNOWN_SECRET_KEYS {
-        if let Some(v) = env.file_value(key) {
+    // Every spelling is looked up by itself: a value under the old name is
+    // a secret even when the new name is set as well.
+    for key in known_secret_key_spellings() {
+        if let Some(v) = env.file_value(&key) {
             out.push(v.to_string());
         }
-        if let Ok(v) = std::env::var(key) {
+        if let Ok(v) = std::env::var(&key) {
             out.push(v);
         }
     }
@@ -96,13 +114,13 @@ mod tests {
 
     #[test]
     fn secret_key_detection() {
-        assert!(is_secret_key("TALON_VLLM_API_KEY"));
+        assert!(is_secret_key("TALAHON_VLLM_API_KEY"));
         assert!(is_secret_key("HTTP_API_KEY"));
         assert!(is_secret_key(talon_db::AUDIT_KEY_ENV));
         assert!(KNOWN_SECRET_KEYS.contains(&talon_db::AUDIT_KEY_ENV));
         assert!(is_secret_key("MYSQL_PASSWORD"));
         assert!(is_secret_key("some_token"));
-        assert!(!is_secret_key("TALON_VLLM_MODEL"));
+        assert!(!is_secret_key("TALAHON_VLLM_MODEL"));
         assert!(!is_secret_key("TZ"));
     }
 
@@ -111,10 +129,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".env"),
-            "TALON_VLLM_API_KEY=vllm-secret-123456\nHTTP_API_KEY=http-secret-abcdef\n\
-             TALON_VLLM_MODEL=qwen\nCUSTOM_DB_PASSWORD=hunter2hunter2\n\
-             TALON_VLLM_MAX_TOKENS=131072\nSOME_TOKEN_REQUIRED=true\n\
-             TALON_AUDIT_KEY=4c1f0e9a7b3d5c2e8f6a1b0d9c7e5f3a2b4d6c8e0f1a3b5c7d9e1f2a4b6c8d0e\n",
+            "TALAHON_VLLM_API_KEY=vllm-secret-123456\nHTTP_API_KEY=http-secret-abcdef\n\
+             TALAHON_VLLM_MODEL=qwen\nCUSTOM_DB_PASSWORD=hunter2hunter2\n\
+             TALAHON_VLLM_MAX_TOKENS=131072\nSOME_TOKEN_REQUIRED=true\n\
+             TALAHON_AUDIT_KEY=4c1f0e9a7b3d5c2e8f6a1b0d9c7e5f3a2b4d6c8e0f1a3b5c7d9e1f2a4b6c8d0e\n",
         )
         .unwrap();
         let env = EnvFile::load(dir.path());
@@ -140,5 +158,36 @@ mod tests {
         let line = format!("audit key {audit_key} leaked");
         let out = redactor.redact(&line);
         assert!(!out.contains(audit_key), "{out}");
+    }
+
+    #[test]
+    fn secrets_under_the_old_key_names_are_still_redacted() {
+        // Upgraded installation: `.env` still spells the keys `TALON_*`,
+        // one of them next to a different value under the new name.
+        let env = EnvFile::from_str_content(
+            "TALON_VLLM_API_KEY=old-vllm-secret-123456\n\
+             TALON_ANTHROPIC_API_KEY=old-anthropic-secret-1\n\
+             TALAHON_ANTHROPIC_API_KEY=new-anthropic-secret-2\n\
+             TALON_AUDIT_KEY=old-audit-key-material-000\n",
+        );
+        assert!(is_secret_key("TALON_VLLM_API_KEY"));
+        assert!(is_secret_key("TALON_AUDIT_KEY"));
+        assert!(known_secret_key_spellings().contains(&"TALON_AUDIT_KEY".to_string()));
+        assert!(known_secret_key_spellings().contains(&"TALAHON_AUDIT_KEY".to_string()));
+        assert!(!known_secret_key_spellings().contains(&"TALON_HTTP_API_KEY".to_string()));
+
+        let secrets = collect_secrets(&env);
+        for secret in [
+            "old-vllm-secret-123456",
+            "old-anthropic-secret-1",
+            "new-anthropic-secret-2",
+            "old-audit-key-material-000",
+        ] {
+            assert!(secrets.contains(&secret.to_string()), "{secret}");
+        }
+        let redactor = redactor_for(&env);
+        let out = redactor.redact("leak old-vllm-secret-123456 and old-anthropic-secret-1");
+        assert!(!out.contains("old-vllm-secret-123456"), "{out}");
+        assert!(!out.contains("old-anthropic-secret-1"), "{out}");
     }
 }

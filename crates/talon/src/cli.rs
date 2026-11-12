@@ -2,20 +2,55 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
-/// `talon` — automated AI SOC analyst for CoPilot.
+/// Make every argument that reads a `TALAHON_*` variable read its
+/// pre-rename `TALON_*` name instead when `legacy_in_use` says only that one
+/// is set (`clap` knows no alias for `env`). Applied to subcommands too.
+pub fn with_legacy_env(
+    cmd: clap::Command,
+    legacy_in_use: &dyn Fn(&str) -> Option<String>,
+) -> clap::Command {
+    cmd.mut_args(|arg| {
+        match arg
+            .get_env()
+            .and_then(|key| key.to_str())
+            .and_then(legacy_in_use)
+        {
+            // `clap` wants a `'static` name; one short string per aliased
+            // variable for the life of the process.
+            Some(legacy) => arg.env(&*Box::leak(legacy.into_boxed_str())),
+            None => arg,
+        }
+    })
+    .mut_subcommands(|sub| with_legacy_env(sub, legacy_in_use))
+}
+
+/// `talahon` — automated AI SOC analyst for CoPilot.
 #[derive(Debug, Parser)]
-#[command(name = "talon", version, about, long_about = None)]
+#[command(name = "talahon", version, about, long_about = None)]
 pub struct Cli {
-    /// Talon project directory (holds `.env`, `groups/`, `store/`, `data/`).
+    /// Talahon project directory (holds `.env`, `groups/`, `store/`, `data/`).
     /// Defaults to the current directory.
-    #[arg(long, global = true, env = "TALON_PROJECT_ROOT", value_name = "DIR")]
+    #[arg(long, global = true, env = "TALAHON_PROJECT_ROOT", value_name = "DIR")]
     pub project_root: Option<PathBuf>,
 
     /// Subcommand; `run` when omitted.
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    /// [`Parser::parse`] that also honours the `TALON_*` spelling of the
+    /// environment variables behind the arguments (see [`with_legacy_env`]).
+    pub fn parse_with_legacy_env() -> Self {
+        let cmd = with_legacy_env(
+            <Self as CommandFactory>::command(),
+            &talon_core::env::legacy_process_key_in_use,
+        );
+        let matches = cmd.get_matches();
+        Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    }
 }
 
 /// Top-level subcommands.
@@ -37,7 +72,7 @@ pub enum Command {
     },
     /// Score investigation quality against the golden set
     /// (`evals/golden/`): offline from saved reports, or online through a
-    /// running Talon.
+    /// running Talahon.
     Eval {
         /// Eval subcommand.
         #[command(subcommand)]
@@ -47,21 +82,21 @@ pub enum Command {
     Version,
 }
 
-/// `talon eval` subcommands.
+/// `talahon eval` subcommands.
 #[derive(Debug, Subcommand, PartialEq)]
 pub enum EvalCommand {
     /// Offline: score already-produced reports (`<case id>.json`) against
     /// the golden cases. Exit code 1 when the pass rate is below
     /// `--min-pass-rate`, 2 on unusable input.
     Score(EvalScoreArgs),
-    /// Online: submit every golden case to a running Talon
+    /// Online: submit every golden case to a running Talahon
     /// (`POST /investigate`), wait for each verdict, then score. The
-    /// case's alert must already exist in the CoPilot stack Talon is
+    /// case's alert must already exist in the CoPilot stack Talahon is
     /// connected to.
     Run(EvalRunArgs),
 }
 
-/// Options shared by the `talon eval` modes.
+/// Options shared by the `talahon eval` modes.
 #[derive(Debug, Args, PartialEq)]
 pub struct EvalCommonArgs {
     /// Directory of golden case files (default: `<project root>/evals/golden`).
@@ -75,7 +110,7 @@ pub struct EvalCommonArgs {
     pub min_pass_rate: f64,
 }
 
-/// Arguments of `talon eval score`.
+/// Arguments of `talahon eval score`.
 #[derive(Debug, Args, PartialEq)]
 pub struct EvalScoreArgs {
     /// Directory holding one `<case id>.json` per case: a triage report, or
@@ -87,10 +122,10 @@ pub struct EvalScoreArgs {
     pub common: EvalCommonArgs,
 }
 
-/// Arguments of `talon eval run`.
+/// Arguments of `talahon eval run`.
 #[derive(Debug, Args, PartialEq)]
 pub struct EvalRunArgs {
-    /// Base URL of the Talon HTTP API (default:
+    /// Base URL of the Talahon HTTP API (default:
     /// `http://<COPILOT_HTTP_BIND>:<COPILOT_HTTP_PORT>` from the project's
     /// `.env`). The API key is always `HTTP_API_KEY` from `.env`.
     #[arg(long, value_name = "URL")]
@@ -111,10 +146,10 @@ pub struct EvalRunArgs {
     #[arg(long, value_name = "CODE")]
     pub customer_code: Option<String>,
     /// Write each investigation record to `<DIR>/<case id>.json`, in the
-    /// form `talon eval score --reports <DIR>` reads.
+    /// form `talahon eval score --reports <DIR>` reads.
     #[arg(long, value_name = "DIR")]
     pub save_dir: Option<PathBuf>,
-    /// Score the existing job when Talon de-duplicates a trigger instead of
+    /// Score the existing job when Talahon de-duplicates a trigger instead of
     /// failing the case (the verdict may predate the change under test).
     #[arg(long)]
     pub allow_deduplicated: bool,
@@ -130,7 +165,7 @@ fn parse_pass_rate(raw: &str) -> Result<f64, String> {
     }
 }
 
-/// Arguments of `talon setup`.
+/// Arguments of `talahon setup`.
 #[derive(Debug, Args, PartialEq, Eq)]
 pub struct SetupArgs {
     /// Step name.
@@ -140,10 +175,10 @@ pub struct SetupArgs {
     pub args: Vec<String>,
 }
 
-/// `talon audit` subcommands.
+/// `talahon audit` subcommands.
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum AuditCommand {
-    /// Verify the chain (and, with `TALON_AUDIT_KEY`, its MACs and the
+    /// Verify the chain (and, with `TALAHON_AUDIT_KEY`, its MACs and the
     /// truncation checkpoint); exit code 1 if anything does not verify.
     Verify,
     /// Print the newest row's id, hash and sequence number, for anchoring
@@ -166,7 +201,7 @@ impl Cli {
         self.command.as_ref().unwrap_or(&Command::Run)
     }
 
-    /// Project root: `--project-root`, `TALON_PROJECT_ROOT`, else the
+    /// Project root: `--project-root`, `TALAHON_PROJECT_ROOT`, else the
     /// current directory.
     pub fn resolve_project_root(&self) -> std::io::Result<PathBuf> {
         match &self.project_root {
@@ -186,16 +221,45 @@ mod tests {
     }
 
     #[test]
+    fn env_backed_arguments_read_the_old_name_when_only_that_is_set() {
+        let env_of = |cmd: &clap::Command| {
+            cmd.get_arguments()
+                .find(|a| a.get_id() == "project_root")
+                .and_then(|a| a.get_env())
+                .and_then(|e| e.to_str())
+                .map(str::to_string)
+        };
+        // Nothing set under the old name: the argument keeps its variable.
+        let cmd = with_legacy_env(<Cli as CommandFactory>::command(), &|_| None);
+        assert_eq!(env_of(&cmd).as_deref(), Some("TALAHON_PROJECT_ROOT"));
+        // Only TALON_PROJECT_ROOT is set: that is what the argument reads.
+        let asked = std::sync::Mutex::new(Vec::new());
+        let cmd = with_legacy_env(<Cli as CommandFactory>::command(), &|key| {
+            asked.lock().unwrap().push(key.to_string());
+            talon_core::env::legacy_key(key)
+        });
+        assert_eq!(env_of(&cmd).as_deref(), Some("TALON_PROJECT_ROOT"));
+        assert!(
+            asked
+                .lock()
+                .unwrap()
+                .contains(&"TALAHON_PROJECT_ROOT".to_string())
+        );
+        // Subcommands are still intact.
+        assert!(cmd.get_subcommands().any(|c| c.get_name() == "doctor"));
+    }
+
+    #[test]
     fn defaults_to_run() {
-        let cli = parse(&["talon"]);
+        let cli = parse(&["talahon"]);
         assert_eq!(cli.command(), &Command::Run);
-        assert_eq!(parse(&["talon", "run"]).command(), &Command::Run);
+        assert_eq!(parse(&["talahon", "run"]).command(), &Command::Run);
     }
 
     #[test]
     fn setup_passes_hyphenated_args_through() {
         let cli = parse(&[
-            "talon",
+            "talahon",
             "setup",
             "timezone",
             "--tz",
@@ -214,19 +278,19 @@ mod tests {
     #[test]
     fn audit_subcommands() {
         assert_eq!(
-            parse(&["talon", "audit", "verify"]).command(),
+            parse(&["talahon", "audit", "verify"]).command(),
             &Command::Audit {
                 command: AuditCommand::Verify
             }
         );
         assert_eq!(
-            parse(&["talon", "audit", "head"]).command(),
+            parse(&["talahon", "audit", "head"]).command(),
             &Command::Audit {
                 command: AuditCommand::Head
             }
         );
         assert_eq!(
-            parse(&["talon", "audit", "tail", "-n", "5", "--kind", "ipc."]).command(),
+            parse(&["talahon", "audit", "tail", "-n", "5", "--kind", "ipc."]).command(),
             &Command::Audit {
                 command: AuditCommand::Tail {
                     lines: 5,
@@ -235,7 +299,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse(&["talon", "audit", "tail"]).command(),
+            parse(&["talahon", "audit", "tail"]).command(),
             &Command::Audit {
                 command: AuditCommand::Tail {
                     lines: 50,
@@ -249,7 +313,7 @@ mod tests {
     fn eval_subcommands() {
         let Some(Command::Eval {
             command: EvalCommand::Score(score),
-        }) = parse(&["talon", "eval", "score", "--reports", "out"]).command
+        }) = parse(&["talahon", "eval", "score", "--reports", "out"]).command
         else {
             panic!("expected eval score");
         };
@@ -261,7 +325,7 @@ mod tests {
         let Some(Command::Eval {
             command: EvalCommand::Run(run),
         }) = parse(&[
-            "talon",
+            "talahon",
             "eval",
             "run",
             "--cases",
@@ -290,10 +354,10 @@ mod tests {
         );
 
         let bad: [&[&str]; 5] = [
-            &["talon", "eval"],
-            &["talon", "eval", "score"],
+            &["talahon", "eval"],
+            &["talahon", "eval", "score"],
             &[
-                "talon",
+                "talahon",
                 "eval",
                 "score",
                 "--reports",
@@ -302,7 +366,7 @@ mod tests {
                 "1.5",
             ],
             &[
-                "talon",
+                "talahon",
                 "eval",
                 "score",
                 "--reports",
@@ -310,7 +374,7 @@ mod tests {
                 "--min-pass-rate",
                 "NaN",
             ],
-            &["talon", "eval", "run", "--timeout-secs", "0"],
+            &["talahon", "eval", "run", "--timeout-secs", "0"],
         ];
         for args in bad {
             assert!(Cli::try_parse_from(args).is_err(), "{args:?}");
@@ -319,16 +383,16 @@ mod tests {
 
     #[test]
     fn project_root_flag_is_global() {
-        let cli = parse(&["talon", "doctor", "--project-root", "/srv/talon"]);
+        let cli = parse(&["talahon", "doctor", "--project-root", "/srv/talahon"]);
         assert_eq!(cli.command(), &Command::Doctor);
         assert_eq!(
             cli.resolve_project_root().unwrap(),
-            PathBuf::from("/srv/talon")
+            PathBuf::from("/srv/talahon")
         );
     }
 
     #[test]
     fn unknown_command_is_rejected() {
-        assert!(Cli::try_parse_from(["talon", "frobnicate"]).is_err());
+        assert!(Cli::try_parse_from(["talahon", "frobnicate"]).is_err());
     }
 }

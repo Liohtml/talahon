@@ -265,7 +265,7 @@ impl Db {
     /// own messages: `is_bot_message`, or (stored by releases that had no
     /// such flag) sent from the assistant's own account and prefixed
     /// `"{bot_prefix}:"`. A user's message that starts with the prefix
-    /// ("Talon: show open alerts") is kept.
+    /// ("Talahon: show open alerts") is kept.
     /// Returns the messages (oldest first) and the new high-water timestamp.
     ///
     /// At most [`DEFAULT_MESSAGE_LIMIT`] (the most recent) are returned; see
@@ -480,7 +480,7 @@ mod tests {
             "2024-01-01T00:00:01.000Z",
         );
         let m = db
-            .get_messages_since("group@g.us", T0, "Talon", 200)
+            .get_messages_since("group@g.us", T0, "Talahon", 200)
             .unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].id, "msg-1");
@@ -506,7 +506,7 @@ mod tests {
             "part one",
             "2024-01-01T10:00:05.000Z",
         );
-        let (first, cursor) = db.get_new_messages(&jids, T0, "Talon").unwrap();
+        let (first, cursor) = db.get_new_messages(&jids, T0, "Talahon").unwrap();
         assert_eq!(first.len(), 1);
         store(
             &db,
@@ -517,7 +517,7 @@ mod tests {
             "part two",
             "2024-01-01T10:00:05.000Z",
         );
-        let (second, _) = db.get_new_messages(&jids, &cursor, "Talon").unwrap();
+        let (second, _) = db.get_new_messages(&jids, &cursor, "Talahon").unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].content, "part two");
         assert_eq!(second[0].timestamp, "2024-01-01T10:00:05.001Z");
@@ -540,7 +540,7 @@ mod tests {
             "from http",
             "2024-01-01T12:00:00.900Z",
         );
-        let (_, cursor) = db.get_new_messages(&jids, T0, "Talon").unwrap();
+        let (_, cursor) = db.get_new_messages(&jids, T0, "Talahon").unwrap();
         store(
             &db,
             "t1",
@@ -550,11 +550,11 @@ mod tests {
             "from telegram",
             "2024-01-01T12:00:00.000Z",
         );
-        let (late, _) = db.get_new_messages(&jids, &cursor, "Talon").unwrap();
+        let (late, _) = db.get_new_messages(&jids, &cursor, "Talahon").unwrap();
         assert_eq!(late.len(), 1);
         assert_eq!(late[0].content, "from telegram");
         assert!(
-            db.get_messages_since("tg:1", &cursor, "Talon", 10)
+            db.get_messages_since("tg:1", &cursor, "Talahon", 10)
                 .unwrap()
                 .len()
                 == 1
@@ -584,7 +584,7 @@ mod tests {
             "later",
             "2024-01-01T10:00:09.000Z",
         );
-        let (_, cursor) = db.get_new_messages(&jids, T0, "Talon").unwrap();
+        let (_, cursor) = db.get_new_messages(&jids, T0, "Talahon").unwrap();
         store(
             &db,
             "1",
@@ -594,7 +594,7 @@ mod tests {
             "hello",
             "2024-01-01T10:00:05.000Z",
         );
-        let (again, _) = db.get_new_messages(&jids, &cursor, "Talon").unwrap();
+        let (again, _) = db.get_new_messages(&jids, &cursor, "Talahon").unwrap();
         assert!(again.is_empty(), "redelivery processed twice: {again:?}");
     }
 
@@ -612,7 +612,7 @@ mod tests {
             "2024-01-01T00:00:04.000Z",
         );
         let m = db
-            .get_messages_since("group@g.us", T0, "Talon", 200)
+            .get_messages_since("group@g.us", T0, "Talahon", 200)
             .unwrap();
         assert!(m.is_empty());
     }
@@ -633,7 +633,7 @@ mod tests {
         })
         .unwrap();
         let m = db
-            .get_messages_since("group@g.us", T0, "Talon", 200)
+            .get_messages_since("group@g.us", T0, "Talahon", 200)
             .unwrap();
         assert_eq!(m.len(), 1);
         assert!(m[0].is_from_me);
@@ -647,7 +647,7 @@ mod tests {
         store(&db, "msg-dup", "group@g.us", "123", "Alice", "original", ts);
         store(&db, "msg-dup", "group@g.us", "123", "Alice", "updated", ts);
         let m = db
-            .get_messages_since("group@g.us", T0, "Talon", 200)
+            .get_messages_since("group@g.us", T0, "Talahon", 200)
             .unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].content, "updated");
@@ -666,7 +666,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let m = db.get_messages_since("tg:1", "", "Talon", 10).unwrap();
+        let m = db.get_messages_since("tg:1", "", "Talahon", 10).unwrap();
         assert_eq!(m[0].thread_id.as_deref(), Some("77"));
     }
 
@@ -690,7 +690,7 @@ mod tests {
         })
         .unwrap();
         let m = db
-            .get_messages_since("group@g.us", T0, "Talon", 200)
+            .get_messages_since("group@g.us", T0, "Talahon", 200)
             .unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].reply_to_message_id.as_deref(), Some("42"));
@@ -715,7 +715,7 @@ mod tests {
             "2024-01-01T00:00:01.000Z",
         );
         let m = db
-            .get_messages_since("group@g.us", T0, "Talon", 200)
+            .get_messages_since("group@g.us", T0, "Talahon", 200)
             .unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].reply_to_message_id, None);
@@ -741,7 +741,7 @@ mod tests {
         })
         .unwrap();
         let (m, _) = db
-            .get_new_messages(&["group@g.us".to_string()], T0, "Talon")
+            .get_new_messages(&["group@g.us".to_string()], T0, "Talahon")
             .unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].reply_to_message_id.as_deref(), Some("99"));
@@ -801,7 +801,7 @@ mod tests {
     fn returns_messages_after_the_given_timestamp() {
         let db = since_fixture();
         let m = db
-            .get_messages_since("group@g.us", "2024-01-01T00:00:02.000Z", "Talon", 200)
+            .get_messages_since("group@g.us", "2024-01-01T00:00:02.000Z", "Talahon", 200)
             .unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].content, "third");
@@ -811,7 +811,7 @@ mod tests {
     fn excludes_bot_messages_via_is_bot_message_flag() {
         let db = since_fixture();
         let m = db
-            .get_messages_since("group@g.us", T0, "Talon", 200)
+            .get_messages_since("group@g.us", T0, "Talahon", 200)
             .unwrap();
         assert!(m.iter().all(|m| m.content != "bot reply"));
     }
@@ -820,7 +820,7 @@ mod tests {
     fn returns_all_non_bot_messages_when_since_is_empty() {
         let db = since_fixture();
         let m = db
-            .get_messages_since("group@g.us", "", "Talon", 200)
+            .get_messages_since("group@g.us", "", "Talahon", 200)
             .unwrap();
         assert_eq!(m.len(), 3);
     }
@@ -850,11 +850,11 @@ mod tests {
             "2024-01-02T00:00:00.000Z",
         );
         let recovered = db
-            .get_last_bot_message_timestamp("group@g.us", "Talon")
+            .get_last_bot_message_timestamp("group@g.us", "Talahon")
             .unwrap();
         assert_eq!(recovered.as_deref(), Some("2024-01-01T00:00:03.000Z"));
         let m = db
-            .get_messages_since("group@g.us", recovered.as_deref().unwrap(), "Talon", 10)
+            .get_messages_since("group@g.us", recovered.as_deref().unwrap(), "Talahon", 10)
             .unwrap();
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].content, "third");
@@ -876,12 +876,12 @@ mod tests {
             );
         }
         let recovered = db
-            .get_last_bot_message_timestamp("group@g.us", "Talon")
+            .get_last_bot_message_timestamp("group@g.us", "Talahon")
             .unwrap()
             .unwrap();
         assert_eq!(recovered, "2024-01-01T00:00:03.000Z");
         let m = db
-            .get_messages_since("group@g.us", &recovered, "Talon", 10)
+            .get_messages_since("group@g.us", &recovered, "Talahon", 10)
             .unwrap();
         assert_eq!(m.len(), 10);
         assert_eq!(m[0].content, "pending message 21");
@@ -904,12 +904,12 @@ mod tests {
             );
         }
         assert_eq!(
-            db.get_last_bot_message_timestamp("fresh@g.us", "Talon")
+            db.get_last_bot_message_timestamp("fresh@g.us", "Talahon")
                 .unwrap(),
             None
         );
         let m = db
-            .get_messages_since("fresh@g.us", "", "Talon", 10)
+            .get_messages_since("fresh@g.us", "", "Talahon", 10)
             .unwrap();
         assert_eq!(m.len(), 10);
         assert_eq!(m[0].content, "message 11");
@@ -924,19 +924,19 @@ mod tests {
             chat_jid: "group@g.us".into(),
             sender: "Bot@s.whatsapp.net".into(),
             sender_name: "Bot".into(),
-            content: "Talon: old bot reply".into(),
+            content: "Talahon: old bot reply".into(),
             timestamp: "2024-01-01T00:00:05.000Z".into(),
             is_from_me: true,
             ..Default::default()
         })
         .unwrap();
         let m = db
-            .get_messages_since("group@g.us", "2024-01-01T00:00:04.000Z", "Talon", 200)
+            .get_messages_since("group@g.us", "2024-01-01T00:00:04.000Z", "Talahon", 200)
             .unwrap();
         assert!(m.is_empty());
         // ...and it counts as the last bot message.
         assert_eq!(
-            db.get_last_bot_message_timestamp("group@g.us", "Talon")
+            db.get_last_bot_message_timestamp("group@g.us", "Talahon")
                 .unwrap()
                 .as_deref(),
             Some("2024-01-01T00:00:05.000Z")
@@ -959,13 +959,13 @@ mod tests {
         };
         db.store_message(&own(
             "1",
-            "Talon: not from T_lon",
+            "Talahon: not from Tal_hon",
             "2024-01-01T00:00:01.000Z",
         ))
         .unwrap();
-        db.store_message(&own("2", "T_lon: from bot", "2024-01-01T00:00:02.000Z"))
+        db.store_message(&own("2", "Tal_hon: from bot", "2024-01-01T00:00:02.000Z"))
             .unwrap();
-        let m = db.get_messages_since("c", "", "T_lon", 10).unwrap();
+        let m = db.get_messages_since("c", "", "Tal_hon", 10).unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].id, "1");
         let m = db.get_messages_since("c", "", "%", 10).unwrap();
@@ -982,7 +982,7 @@ mod tests {
             "c",
             "u",
             "U",
-            "Talon: show open alerts",
+            "Talahon: show open alerts",
             "2024-01-01T00:00:01.000Z",
         );
         store(
@@ -991,16 +991,16 @@ mod tests {
             "c",
             "u",
             "U",
-            "talon: and the closed ones",
+            "talahon: and the closed ones",
             "2024-01-01T00:00:02.000Z",
         );
-        let m = db.get_messages_since("c", "", "Talon", 10).unwrap();
+        let m = db.get_messages_since("c", "", "Talahon", 10).unwrap();
         assert_eq!(m.len(), 2);
-        let (m, _) = db.get_new_messages(&jids(&["c"]), "", "Talon").unwrap();
+        let (m, _) = db.get_new_messages(&jids(&["c"]), "", "Talahon").unwrap();
         assert_eq!(m.len(), 2);
         // ...and none of them counts as a bot reply for cursor recovery.
         assert_eq!(
-            db.get_last_bot_message_timestamp("c", "Talon").unwrap(),
+            db.get_last_bot_message_timestamp("c", "Talahon").unwrap(),
             None
         );
     }
@@ -1056,7 +1056,7 @@ mod tests {
     fn returns_new_messages_across_multiple_groups() {
         let db = new_fixture();
         let (m, ts) = db
-            .get_new_messages(&jids(&["group1@g.us", "group2@g.us"]), T0, "Talon")
+            .get_new_messages(&jids(&["group1@g.us", "group2@g.us"]), T0, "Talahon")
             .unwrap();
         assert_eq!(m.len(), 3);
         assert_eq!(ts, "2024-01-01T00:00:04.000Z");
@@ -1069,7 +1069,7 @@ mod tests {
             .get_new_messages(
                 &jids(&["group1@g.us", "group2@g.us"]),
                 "2024-01-01T00:00:02.000Z",
-                "Talon",
+                "Talahon",
             )
             .unwrap();
         assert_eq!(m.len(), 1);
@@ -1080,7 +1080,7 @@ mod tests {
     fn get_new_messages_only_returns_requested_jids() {
         let db = new_fixture();
         let (m, ts) = db
-            .get_new_messages(&jids(&["group2@g.us"]), T0, "Talon")
+            .get_new_messages(&jids(&["group2@g.us"]), T0, "Talahon")
             .unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].chat_jid, "group2@g.us");
@@ -1090,7 +1090,7 @@ mod tests {
     #[test]
     fn returns_empty_for_no_registered_groups() {
         let db = new_fixture();
-        let (m, ts) = db.get_new_messages(&[], "", "Talon").unwrap();
+        let (m, ts) = db.get_new_messages(&[], "", "Talahon").unwrap();
         assert!(m.is_empty());
         assert_eq!(ts, "");
     }
@@ -1100,7 +1100,7 @@ mod tests {
         let db = new_fixture();
         let since = "2030-01-01T00:00:00.000Z";
         let (m, ts) = db
-            .get_new_messages(&jids(&["group1@g.us"]), since, "Talon")
+            .get_new_messages(&jids(&["group1@g.us"]), since, "Talahon")
             .unwrap();
         assert!(m.is_empty());
         assert_eq!(ts, since);
@@ -1253,7 +1253,7 @@ mod tests {
     fn get_new_messages_caps_to_limit_chronologically() {
         let db = limit_fixture();
         let (m, ts) = db
-            .get_new_messages_limited(&jids(&["group@g.us"]), T0, "Talon", 3)
+            .get_new_messages_limited(&jids(&["group@g.us"]), T0, "Talahon", 3)
             .unwrap();
         assert_eq!(m.len(), 3);
         assert_eq!(m[0].content, "message 8");
@@ -1265,7 +1265,9 @@ mod tests {
     #[test]
     fn get_messages_since_caps_to_limit_chronologically() {
         let db = limit_fixture();
-        let m = db.get_messages_since("group@g.us", T0, "Talon", 3).unwrap();
+        let m = db
+            .get_messages_since("group@g.us", T0, "Talahon", 3)
+            .unwrap();
         assert_eq!(m.len(), 3);
         assert_eq!(m[0].content, "message 8");
         assert_eq!(m[2].content, "message 10");
@@ -1276,7 +1278,7 @@ mod tests {
     fn returns_all_messages_when_count_is_under_limit() {
         let db = limit_fixture();
         let (m, _) = db
-            .get_new_messages_limited(&jids(&["group@g.us"]), T0, "Talon", 50)
+            .get_new_messages_limited(&jids(&["group@g.us"]), T0, "Talahon", 50)
             .unwrap();
         assert_eq!(m.len(), 10);
     }
@@ -1318,7 +1320,7 @@ mod tests {
             .unwrap();
         assert_eq!(n, 3);
         let m = db
-            .get_messages_since("group@g.us", "", "Talon", 100)
+            .get_messages_since("group@g.us", "", "Talahon", 100)
             .unwrap();
         assert_eq!(m.len(), 7);
         assert_eq!(m[0].content, "message 4");

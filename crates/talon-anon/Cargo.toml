@@ -35,5 +35,5 @@ tempfile = { workspace = true }
 workspace = true
 
 [[bin]]
-name = "talon-anon-proxy"
+name = "talahon-anon-proxy"
 path = "src/main.rs"

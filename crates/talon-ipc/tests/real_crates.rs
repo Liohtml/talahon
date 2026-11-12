@@ -21,7 +21,7 @@ fn group(name: &str, folder: &str, is_main: bool) -> RegisteredGroup {
     RegisteredGroup {
         name: name.into(),
         folder: folder.into(),
-        trigger: "@Talon".into(),
+        trigger: "@Talahon".into(),
         added_at: "2024-01-01T00:00:00.000Z".into(),
         container_config: None,
         requires_trigger: None,
@@ -312,7 +312,7 @@ async fn register_and_refresh_with_real_policy_and_db() {
         jid: "new@g.us".into(),
         name: "New Group".into(),
         folder: folder.into(),
-        trigger: "@Talon".into(),
+        trigger: "@Talahon".into(),
         requires_trigger: None,
         container_config: None,
         timestamp: None,
@@ -595,11 +595,11 @@ async fn register_group_container_config_is_stripped_with_real_db() {
         jid: "new@g.us".into(),
         name: "New Group".into(),
         folder: "new-group".into(),
-        trigger: "@Talon".into(),
+        trigger: "@Talahon".into(),
         requires_trigger: None,
         container_config: Some(talon_core::types::ContainerConfig {
             additional_mounts: vec![talon_core::types::AdditionalMount {
-                host_path: "/srv/talon".into(),
+                host_path: "/srv/talahon".into(),
                 container_path: Some("project".into()),
                 readonly: false,
             }],

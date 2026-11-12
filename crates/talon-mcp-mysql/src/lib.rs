@@ -1,6 +1,6 @@
 //! # talon-mcp-mysql — native MySQL MCP server
 //!
-//! A stdio MCP server (`talon-mysql-mcp`) that gives the agent the CoPilot
+//! A stdio MCP server (`talahon-mysql-mcp`) that gives the agent the CoPilot
 //! MySQL database. It is a drop-in for the tools of the Python
 //! `mysql-mcp-server` 0.4.5 (same tool names, argument names, input schemas,
 //! statements and result text) without a Python interpreter to cold-start
@@ -8,7 +8,7 @@
 //! MCP servers run under privilege separation.
 //!
 //! It is **opt-in**: `mysql/mysql-mcp.sh` starts it only when
-//! `TALON_MYSQL_MCP=rust` is set; the Python server stays the default.
+//! `TALAHON_MYSQL_MCP=rust` is set; the Python server stays the default.
 //!
 //! Module map:
 //! - [`config`] — environment variables (`MYSQL_HOST`, `MYSQL_SSL_MODE`, ...)
@@ -54,7 +54,8 @@ pub use config::{Config, ConfigError, TlsMode};
 pub use db::{Backend, DbError, MySqlBackend, Outcome, Rows, Truncation};
 use talon_mcp::McpServer;
 
-/// Name reported as `serverInfo.name` in `initialize`.
+/// Name reported as `serverInfo.name` in `initialize` (a protocol
+/// identifier: it keeps the pre-rename spelling).
 pub const SERVER_NAME: &str = "talon-mysql-mcp";
 
 /// Build the MCP server for `config`. No connection is made until a tool

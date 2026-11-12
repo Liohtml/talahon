@@ -389,8 +389,8 @@ fn deny(msg: impl Into<String>) -> Error {
 }
 
 impl EgressPolicy {
-    /// Policy from `TALON_EGRESS_ALLOW` / `TALON_EGRESS_DENY` (comma lists)
-    /// and `TALON_EGRESS_ALLOW_PRIVATE`.
+    /// Policy from `TALAHON_EGRESS_ALLOW` / `TALAHON_EGRESS_DENY` (comma lists)
+    /// and `TALAHON_EGRESS_ALLOW_PRIVATE`.
     pub fn from_env(env: &talon_core::env::EnvFile) -> Self {
         let list = |key: &str| -> Vec<String> {
             env.get(key)
@@ -404,9 +404,9 @@ impl EgressPolicy {
                 .unwrap_or_default()
         };
         Self {
-            allow_hosts: list("TALON_EGRESS_ALLOW"),
-            deny_hosts: list("TALON_EGRESS_DENY"),
-            allow_private: env.get_bool("TALON_EGRESS_ALLOW_PRIVATE"),
+            allow_hosts: list("TALAHON_EGRESS_ALLOW"),
+            deny_hosts: list("TALAHON_EGRESS_DENY"),
+            allow_private: env.get_bool("TALAHON_EGRESS_ALLOW_PRIVATE"),
         }
     }
 
@@ -1013,11 +1013,11 @@ mod tests {
     #[test]
     fn from_env_parses_lists() {
         let env = talon_core::env::EnvFile::from_str_content(
-            "TALON_EGRESS_ALLOW=ti.example.com, *.Corp.example\nTALON_EGRESS_DENY=bad.com;evil.org\nTALON_EGRESS_ALLOW_PRIVATE=true\n",
+            "TALAHON_EGRESS_ALLOW=ti.example.com, *.Corp.example\nTALAHON_EGRESS_DENY=bad.com;evil.org\nTALAHON_EGRESS_ALLOW_PRIVATE=true\n",
         );
-        if std::env::var("TALON_EGRESS_ALLOW").is_err()
-            && std::env::var("TALON_EGRESS_DENY").is_err()
-            && std::env::var("TALON_EGRESS_ALLOW_PRIVATE").is_err()
+        if !talon_core::env::process_var_is_set("TALAHON_EGRESS_ALLOW")
+            && !talon_core::env::process_var_is_set("TALAHON_EGRESS_DENY")
+            && !talon_core::env::process_var_is_set("TALAHON_EGRESS_ALLOW_PRIVATE")
         {
             let p = EgressPolicy::from_env(&env);
             assert_eq!(p.allow_hosts, vec!["ti.example.com", "*.corp.example"]);

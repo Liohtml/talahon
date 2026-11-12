@@ -1,5 +1,5 @@
 //! End-to-end tests against a real child process: a small Python MCP
-//! server (and bash wrappers around it, like Talon's real wrapper scripts).
+//! server (and bash wrappers around it, like Talahon's real wrapper scripts).
 #![cfg(unix)]
 // Test-only helpers: panicking on setup failure is the desired behaviour.
 #![allow(clippy::unwrap_used)]
@@ -406,7 +406,7 @@ async fn manager_spawn_mode_isolates_failures_and_refreshes() {
     assert!(wait_gone(pid, Duration::from_secs(3)).await);
 }
 
-/// What `talon-agent supervise` does: spawn the server itself, expose its
+/// What `talahon-agent supervise` does: spawn the server itself, expose its
 /// stdio on `<dir>/<server>.sock` via `bridge`, and let the agent connect
 /// with the manager in socket mode.
 #[tokio::test]

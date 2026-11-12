@@ -15,7 +15,7 @@
 - [ ] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
-- [ ] Container image rebuilt (`./container/build.sh`) if `container/` or `talon-agent` changed
+- [ ] Container image rebuilt (`./container/build.sh`) if `container/` or `talahon-agent` changed
 
 ## Security checklist
 

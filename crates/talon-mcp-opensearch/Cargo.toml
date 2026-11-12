@@ -1,6 +1,6 @@
 [package]
 name = "talahon-mcp-opensearch"
-description = "Native read-only OpenSearch MCP server (stdio) for the Talon agent container"
+description = "Native read-only OpenSearch MCP server (stdio) for the Talahon agent container"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -35,5 +35,5 @@ wiremock = { workspace = true }
 workspace = true
 
 [[bin]]
-name = "talon-opensearch-mcp"
+name = "talahon-opensearch-mcp"
 path = "src/main.rs"

@@ -1,4 +1,4 @@
-//! End-to-end tests of the `talon-agent run` binary against a wiremock fake
+//! End-to-end tests of the `talahon-agent run` binary against a wiremock fake
 //! vLLM (OpenAI-compatible SSE streaming) with a temporary workspace.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -29,7 +29,7 @@ fn tool_call_stream() -> String {
     sse(&[
         json!({"id":"c1","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":""}}]},"finish_reason":null}]}),
         json!({"id":"c1","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"notes.txt\","}}]},"finish_reason":null}]}),
-        json!({"id":"c1","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"content\":\"hello from talon\"}"}}]},"finish_reason":null}]}),
+        json!({"id":"c1","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"content\":\"hello from talahon\"}"}}]},"finish_reason":null}]}),
         json!({"id":"c1","object":"chat.completion.chunk","model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}),
         json!({"id":"c1","object":"chat.completion.chunk","model":"test-model","choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":64}}}),
     ])
@@ -74,7 +74,7 @@ impl Workspace {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
         std::fs::write(
-            root.join("group/CLAUDE.md"),
+            root.join("group/AGENT.md"),
             "# Test group\nAlways be brief.",
         )
         .unwrap();
@@ -86,18 +86,40 @@ impl Workspace {
     }
 
     fn spawn(&self) -> Child {
-        Command::new(env!("CARGO_BIN_EXE_talon-agent"))
-            .arg("run")
-            .env("TALON_AGENT_GROUP_DIR", self.p("group"))
-            .env("TALON_AGENT_GLOBAL_DIR", self.p("global"))
-            .env("TALON_AGENT_PROJECT_DIR", self.p("project"))
-            .env("TALON_AGENT_EXTRA_DIR", self.p("extra"))
-            .env("TALON_AGENT_IPC_DIR", self.p("ipc"))
-            .env("TALON_AGENT_STATE_DIR", self.p("state"))
-            .env("TALON_AGENT_IPC_POLL_MS", "20")
-            .env("TALON_LOG", "debug")
-            .env_remove("TALON_MCP_SOCKET_DIR")
-            .env_remove("TALON_AGENT_MCP_CONFIG")
+        self.spawn_with_prefix("TALAHON_")
+    }
+
+    /// Start the agent with its settings under `prefix`: `TALAHON_` (the
+    /// current spelling) or `TALON_` (the alias from before the rename).
+    /// Variables under the other prefix are removed.
+    fn spawn_with_prefix(&self, prefix: &str) -> Child {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_talahon-agent"));
+        cmd.arg("run");
+        for other in ["TALAHON_", "TALON_"] {
+            for name in [
+                "AGENT_GROUP_DIR",
+                "AGENT_GLOBAL_DIR",
+                "AGENT_PROJECT_DIR",
+                "AGENT_EXTRA_DIR",
+                "AGENT_IPC_DIR",
+                "AGENT_STATE_DIR",
+                "AGENT_IPC_POLL_MS",
+                "LOG",
+                "MCP_SOCKET_DIR",
+                "AGENT_MCP_CONFIG",
+            ] {
+                cmd.env_remove(format!("{other}{name}"));
+            }
+        }
+        let key = |name: &str| format!("{prefix}{name}");
+        cmd.env(key("AGENT_GROUP_DIR"), self.p("group"))
+            .env(key("AGENT_GLOBAL_DIR"), self.p("global"))
+            .env(key("AGENT_PROJECT_DIR"), self.p("project"))
+            .env(key("AGENT_EXTRA_DIR"), self.p("extra"))
+            .env(key("AGENT_IPC_DIR"), self.p("ipc"))
+            .env(key("AGENT_STATE_DIR"), self.p("state"))
+            .env(key("AGENT_IPC_POLL_MS"), "20")
+            .env(key("LOG"), "debug")
             .current_dir(self.p("group"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -211,7 +233,7 @@ async fn run_binary_against_fake_vllm() {
     // The tool really ran in the group folder.
     assert_eq!(
         std::fs::read_to_string(ws.p("group/notes.txt")).unwrap(),
-        "hello from talon"
+        "hello from talahon"
     );
 
     // End the session.
@@ -272,6 +294,58 @@ async fn run_binary_against_fake_vllm() {
     assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "write_file");
     assert_eq!(msgs[3]["role"], "tool");
     assert_eq!(msgs[3]["tool_call_id"], "call_1");
+}
+
+/// An image or unit file from before the rename still sets `TALON_*`: the
+/// agent reads them (flags and log filter alike) and says so once per key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_under_the_old_talon_prefix_still_work() {
+    let server = MockServer::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ScriptedVllm {
+            calls: calls.clone(),
+        })
+        .mount(&server)
+        .await;
+
+    let ws = Workspace::new();
+    let mut child = ws.spawn_with_prefix("TALON_");
+    feed(&mut child, input(&server, json!({}))).await;
+    let stdout = child.stdout.take().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+    let frames = read_frames(&mut lines, 1).await;
+    assert_eq!(frames[0].status, OutputStatus::Success, "{:?}", frames[0]);
+    let id = frames[0].new_session_id.clone().expect("session id");
+
+    // TALON_AGENT_GROUP_DIR and TALON_AGENT_STATE_DIR were honoured: the tool
+    // wrote into this workspace and the session was stored in it (the
+    // defaults are the container paths under /workspace and /home/agent).
+    assert_eq!(
+        std::fs::read_to_string(ws.p("group/notes.txt")).unwrap(),
+        "hello from talahon"
+    );
+    assert!(session_file(&ws.p("state"), &id).is_file());
+
+    // TALON_AGENT_IPC_DIR too: the close sentinel ends the session.
+    std::fs::write(ws.p("ipc/input/_close"), "").unwrap();
+    let (status, stderr) = finish(child).await;
+    assert!(status.success(), "exit {status:?}\n{stderr}");
+
+    // One deprecation warning per old key, however often it was read;
+    // TALON_LOG (read before the logger existed) is not lost, and it took
+    // effect: debug lines are present.
+    for key in [
+        "TALON_AGENT_GROUP_DIR",
+        "TALON_AGENT_STATE_DIR",
+        "TALON_LOG",
+    ] {
+        let warning = format!("{key} is deprecated: rename it to TALAHON_");
+        assert_eq!(stderr.matches(&warning).count(), 1, "{key}\n{stderr}");
+    }
+    assert!(stderr.contains("DEBUG"), "{stderr}");
+    assert!(!stderr.contains("TALAHON_LOG is deprecated"), "{stderr}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
