@@ -67,6 +67,19 @@ case "$(basename "$CONTAINER_RUNTIME")" in
     *)
         # RUN --mount cache mounts need BuildKit (default since Docker 23).
         export DOCKER_BUILDKIT=1
+        # BuildKit is driven through the buildx plugin, which distribution
+        # packages often ship separately (Debian/Ubuntu: docker.io without
+        # docker-buildx). Without it the build dies with "BuildKit is
+        # enabled but the buildx component is missing or broken".
+        if [[ "$(basename "$CONTAINER_RUNTIME")" == docker* ]] &&
+            ! "$CONTAINER_RUNTIME" buildx version >/dev/null 2>&1; then
+            echo "docker buildx is not available, but the image build needs BuildKit." >&2
+            echo "Install the buildx plugin and re-run:" >&2
+            echo "  Debian/Ubuntu (distribution packages): sudo apt-get install docker-buildx" >&2
+            echo "  Docker's own repository:               sudo apt-get install docker-buildx-plugin" >&2
+            echo "  other systems: https://docs.docker.com/go/buildx/" >&2
+            exit 1
+        fi
         ;;
 esac
 

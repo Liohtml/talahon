@@ -255,7 +255,10 @@ egress firewall and service installation, which a production setup needs.
 
 ### Prerequisites
 
-- Linux host (macOS works for development) with Docker or Podman
+- Linux host (macOS works for development) with Docker or Podman. Docker
+  needs the buildx plugin to build the agent image; distribution packages
+  ship it separately (Debian/Ubuntu: `docker-buildx` next to `docker.io`,
+  `docker-buildx-plugin` with Docker's own repository)
 - Rust 1.89+ (`rustup`) to build the host binary
 - A **vLLM** server reachable from the host ([docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md))
 - OpenSearch/Wazuh SIEM and a [CoPilot](https://github.com/Liohtml/CoPilot) instance with its MySQL/MariaDB database
