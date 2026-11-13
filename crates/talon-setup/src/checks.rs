@@ -295,6 +295,35 @@ fn load_ca_bundle(path: &Path) -> Result<Vec<reqwest::Certificate>, String> {
     Ok(certs)
 }
 
+/// Longest error description reported for a failed probe.
+const MAX_ERROR_CHAIN_CHARS: usize = 400;
+
+/// `e` with its whole `source()` chain, e.g. `error sending request: client
+/// error (Connect): invalid peer certificate: UnknownIssuer`. reqwest's own
+/// message alone ("error sending request") hides whether DNS, TCP or TLS
+/// failed. The request URL is stripped (it may carry credentials); headers,
+/// and with them the API key, are never part of these messages.
+fn error_chain(e: reqwest::Error) -> String {
+    use std::error::Error as _;
+    let e = e.without_url();
+    let mut parts = vec![e.to_string()];
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        // Wrappers often repeat their cause's text.
+        if !parts.iter().any(|p| p.contains(&text)) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    let mut out = parts.join(": ");
+    if out.chars().count() > MAX_ERROR_CHAIN_CHARS {
+        out = out.chars().take(MAX_ERROR_CHAIN_CHARS).collect();
+        out.push('…');
+    }
+    out
+}
+
 /// [`check_provider`] that additionally trusts the CA certificates in
 /// `ca_file` (a PEM bundle), as the LLM gateway does with
 /// `TALAHON_VLLM_CA_FILE` / `TALAHON_ANTHROPIC_CA_FILE`. An unusable file is
@@ -356,7 +385,7 @@ pub async fn check_provider_with_ca(
             };
             return VllmCheck::status(
                 VllmStatus::Unreachable,
-                Some(format!("{kind}: {}", e.without_url())),
+                Some(format!("{kind}: {}", error_chain(e))),
             );
         }
     };
@@ -388,7 +417,7 @@ pub async fn check_provider_with_ca(
             Ok(None) => break,
             Err(e) => {
                 check.status = VllmStatus::Unreachable;
-                check.error = Some(format!("read failed: {}", e.without_url()));
+                check.error = Some(format!("read failed: {}", error_chain(e)));
                 return check;
             }
         }
@@ -755,6 +784,22 @@ mod tests {
                 .unwrap_or_default()
                 .contains("contains no certificate")
         );
+    }
+
+    #[tokio::test]
+    async fn connection_failure_names_the_cause() {
+        // A port nothing listens on: bind, note the port, close.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let base = format!("http://user:hunter2@127.0.0.1:{port}");
+        let r = check_vllm(&base, "m", None, None, Duration::from_secs(5)).await;
+        assert_eq!(r.status, VllmStatus::Unreachable);
+        let err = r.error.unwrap_or_default();
+        assert!(err.starts_with("connection failed: "), "{err}");
+        // More than reqwest's top-level "error sending request".
+        assert!(err.to_lowercase().contains("refused"), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
     }
 
     #[tokio::test]
