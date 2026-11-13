@@ -650,6 +650,21 @@ async fn docker_group_stale(ctx: &SetupContext) -> bool {
     run_cmd(ctx, "docker", &["info"]).await.success()
 }
 
+/// What to do about [`docker_group_stale`]: the systemd user manager keeps
+/// the groups it started with, so the service gets "permission denied" on
+/// the docker socket (and restarts in a loop) until the manager restarts.
+fn docker_group_stale_next_step(uid: Option<u32>) -> String {
+    let unit = match uid {
+        Some(uid) => format!("user@{uid}.service"),
+        None => "user@$(id -u).service".to_string(),
+    };
+    format!(
+        "the systemd user manager started before this user joined the docker group: run \
+         `sudo systemctl restart {unit}` (restarts this user's other user services too) or \
+         reboot, then re-run `talahon setup service`"
+    )
+}
+
 async fn setup_systemd(
     ctx: &SetupContext,
     mut hardening: Hardening,
@@ -779,6 +794,7 @@ async fn setup_systemd(
     .field("HARDENING", hardening.as_str());
     if stale {
         block.set("DOCKER_GROUP_STALE", true);
+        block.set("NEXT_STEP", docker_group_stale_next_step(ctx.platform.uid));
     }
     block.set("LINGER_ENABLED", linger);
     Ok(started(block, active))
@@ -1122,6 +1138,7 @@ mod tests {
         assert_eq!(b.get("HARDENING"), Some("strict"));
         assert_eq!(b.get("LINGER_ENABLED"), Some("true"));
         assert_eq!(b.get("DOCKER_GROUP_STALE"), None);
+        assert_eq!(b.get("NEXT_STEP"), None);
         let unit =
             std::fs::read_to_string(ctx.home_dir.join(".config/systemd/user/talahon.service"))
                 .unwrap();
@@ -1150,6 +1167,11 @@ mod tests {
         assert_eq!(b.get("HARDENING"), Some("basic"));
         assert_eq!(b.get("SERVICE_LOADED"), Some("false"));
         assert_eq!(b.get("DOCKER_GROUP_STALE"), Some("true"));
+        let next = b.get("NEXT_STEP").unwrap_or_default();
+        assert!(
+            next.contains("sudo systemctl restart user@1000.service"),
+            "{next}"
+        );
         // A service that does not run is no success.
         assert_eq!(b.get("STATUS"), Some("failed"));
         assert_eq!(b.get("ERROR"), Some("service_not_running"));

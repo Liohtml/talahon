@@ -416,6 +416,14 @@ talahon setup service                     # systemd user unit (hardened) or laun
 talahon doctor                            # everything in one report
 ```
 
+> [!NOTE]
+> If you added your user to the `docker` group only shortly before, the
+> running systemd user manager does not have the group yet: the step reports
+> `DOCKER_GROUP_STALE: true`, and the service fails with "permission denied"
+> on the docker socket. Restart the user manager
+> (`sudo systemctl restart user@$(id -u).service`, which also restarts your
+> other user services) or reboot, then run `talahon setup service` again.
+
 Manual alternative: `systemctl --user enable --now talahon` with
 `ExecStart=/usr/local/bin/talahon run` and `WorkingDirectory=/opt/talahon`, or
 `launchd/com.talahon.plist` on macOS.
