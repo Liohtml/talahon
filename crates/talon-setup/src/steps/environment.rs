@@ -109,7 +109,14 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
     block.set("GATEWAY_PORT", ctx.config.llm_gateway_port);
     block.set("GATEWAY_PORT_FREE", port == PortStatus::Free);
     block.set("GATEWAY_PORT_STATUS", port.as_str());
-    if port != PortStatus::Free {
+    // A port held by the running Talahon itself is the healthy state.
+    let own_pid = (port == PortStatus::InUse)
+        .then(|| ctx.config.llm_gateway_bind.trim().parse().ok())
+        .flatten()
+        .and_then(|ip| crate::listener::talahon_listener(ip, ctx.config.llm_gateway_port));
+    if let Some(pid) = own_pid {
+        block.set("GATEWAY_PORT_OWNER", format!("talahon (pid {pid})"));
+    } else if port != PortStatus::Free {
         issues.push(format!("gateway_port_{}", port.as_str()));
     }
 
