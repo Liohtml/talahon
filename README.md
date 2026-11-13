@@ -399,7 +399,9 @@ sudo talahon setup egress --apply --allow ...                          # same ar
 ```
 
 Without `--allow` the rules block private address ranges and keep internet
-egress (`--keep-internet` combines both).
+egress (`--keep-internet` combines both). To cut agents off from everything
+except the LLM gateway when there is no destination to allow (yet), pass
+`--deny-all`: allowlist mode with an empty list.
 
 > [!NOTE]
 > The rules don't survive a reboot on their own. Add `--persist` to the
