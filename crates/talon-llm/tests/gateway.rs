@@ -731,6 +731,27 @@ async fn bind_conflict_is_a_config_error() {
     );
 }
 
+#[tokio::test]
+async fn unusable_upstream_ca_file_fails_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = GatewayConfig::new("https://llm.internal.example", "qwen");
+    cfg.bind = SocketAddr::from(([127, 0, 0, 1], 0));
+    cfg.upstream_ca_file = Some(dir.path().join("missing.pem"));
+    let err = LlmGateway::start(cfg.clone(), Arc::new(MemoryAuditSink::default()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LlmError::Config(_)), "{err:?}");
+    assert!(err.to_string().contains("missing.pem"), "{err}");
+
+    let ca = dir.path().join("ca.pem");
+    std::fs::write(&ca, include_str!("common/test-ca.pem")).unwrap();
+    cfg.upstream_ca_file = Some(ca);
+    let gw = LlmGateway::start(cfg, Arc::new(MemoryAuditSink::default()))
+        .await
+        .unwrap();
+    drop(gw);
+}
+
 // ---------------------------------------------------------------------------
 // Mythos hardening: MYTH-06 (talon-net serving), MYTH-07 (memory/concurrency
 // bounds), MYTH-08 (parameter allowlist, cache_salt).

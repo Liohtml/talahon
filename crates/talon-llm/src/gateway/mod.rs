@@ -40,6 +40,7 @@ mod tokens;
 use std::fmt;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -209,6 +210,29 @@ pub struct GatewayConfig {
     /// Honour `HTTP(S)_PROXY` for the upstream connection (off by default:
     /// the API key should go straight to vLLM).
     pub use_system_proxy: bool,
+    /// PEM bundle of CA certificates trusted for the upstream connection in
+    /// addition to the built-in roots (`TALAHON_VLLM_CA_FILE` /
+    /// `TALAHON_ANTHROPIC_CA_FILE`), for an HTTPS upstream behind a private
+    /// CA. A file that cannot be read or holds no certificate fails
+    /// [`LlmGateway::start`].
+    pub upstream_ca_file: Option<PathBuf>,
+}
+
+/// Read the CA certificates of a PEM bundle.
+///
+/// # Errors
+/// The file cannot be read, is not PEM, or contains no certificate. The
+/// message names the path, never the contents.
+pub fn load_ca_bundle(path: &Path) -> Result<Vec<reqwest::Certificate>, LlmError> {
+    let invalid =
+        |reason: String| LlmError::Config(format!("CA bundle {}: {reason}", path.display()));
+    let pem = std::fs::read(path).map_err(|e| invalid(format!("cannot read file: {e}")))?;
+    let certs = reqwest::Certificate::from_pem_bundle(&pem)
+        .map_err(|_| invalid("not a PEM certificate bundle".into()))?;
+    if certs.is_empty() {
+        return Err(invalid("contains no certificate".into()));
+    }
+    Ok(certs)
 }
 
 /// The API the gateway's upstream speaks.
@@ -273,6 +297,7 @@ impl GatewayConfig {
             max_response_bytes: crate::client::DEFAULT_MAX_RESPONSE_BYTES,
             audit_requests: false,
             use_system_proxy: false,
+            upstream_ca_file: None,
         }
     }
 
@@ -413,6 +438,11 @@ impl LlmGateway {
             .pool_idle_timeout(Duration::from_secs(90));
         if !config.use_system_proxy {
             builder = builder.no_proxy();
+        }
+        if let Some(path) = &config.upstream_ca_file {
+            for cert in load_ca_bundle(path)? {
+                builder = builder.add_root_certificate(cert);
+            }
         }
         let http = builder
             .build()
@@ -1876,6 +1906,24 @@ impl Drop for UsageTap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ca_bundle_is_loaded_or_rejected_with_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("ca.pem");
+        std::fs::write(&good, include_str!("../../tests/common/test-ca.pem")).unwrap();
+        assert_eq!(load_ca_bundle(&good).unwrap().len(), 1);
+
+        let missing = dir.path().join("missing.pem");
+        let err = load_ca_bundle(&missing).unwrap_err().to_string();
+        assert!(err.contains("missing.pem"), "{err}");
+        assert!(err.contains("cannot read file"), "{err}");
+
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "not a certificate\n").unwrap();
+        let err = load_ca_bundle(&empty).unwrap_err().to_string();
+        assert!(err.contains("contains no certificate"), "{err}");
+    }
 
     #[test]
     fn config_debug_redacts_key_and_from_vllm() {

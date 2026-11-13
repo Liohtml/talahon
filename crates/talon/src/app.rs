@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -132,6 +133,18 @@ fn normalize_base(url: &str) -> String {
     u.strip_suffix("/v1").unwrap_or(u).to_ascii_lowercase()
 }
 
+/// The PEM bundle of extra CA certificates for the provider's upstream
+/// (`TALAHON_VLLM_CA_FILE` / `TALAHON_ANTHROPIC_CA_FILE`); a relative path
+/// is resolved against the project root. `None` when unset or blank.
+pub fn upstream_ca_file(config: &TalonConfig, kind: ProviderKind) -> Option<PathBuf> {
+    config
+        .env
+        .get(kind.ca_file_env())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(|v| config.project_root.join(v))
+}
+
 /// Gateway configuration for the host's vLLM defaults, allowing every
 /// model a registered group may use. `None` when vLLM is not configured.
 pub fn gateway_config(
@@ -149,6 +162,7 @@ pub fn gateway_config(
         .map(str::to_string);
     let mut gw = GatewayConfig::from_provider(kind, vllm, api_key);
     gw.bind = bind;
+    gw.upstream_ca_file = upstream_ca_file(config, kind);
     if let Some(rpm) = config
         .env
         .get("TALAHON_LLM_GATEWAY_RPM")
@@ -570,6 +584,25 @@ mod tests {
             Path::new("/tmp/talon-test"),
             EnvFile::from_str_content(content),
         )
+    }
+
+    #[test]
+    fn upstream_ca_file_follows_the_provider_and_the_project_root() {
+        let none = cfg("TALAHON_VLLM_BASE_URL=https://llm.internal.example\n");
+        assert_eq!(upstream_ca_file(&none, ProviderKind::Vllm), None);
+        let blank = cfg("TALAHON_VLLM_CA_FILE=\"  \"\n");
+        assert_eq!(upstream_ca_file(&blank, ProviderKind::Vllm), None);
+
+        let c =
+            cfg("TALAHON_VLLM_CA_FILE=certs/ca.pem\nTALAHON_ANTHROPIC_CA_FILE=/etc/ssl/corp.pem\n");
+        assert_eq!(
+            upstream_ca_file(&c, ProviderKind::Vllm),
+            Some(PathBuf::from("/tmp/talon-test/certs/ca.pem"))
+        );
+        assert_eq!(
+            upstream_ca_file(&c, ProviderKind::Anthropic),
+            Some(PathBuf::from("/etc/ssl/corp.pem"))
+        );
     }
 
     fn group_with_model(model: &str, base: &str) -> RegisteredGroup {

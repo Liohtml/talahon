@@ -53,6 +53,10 @@ pub fn hint(issue: &str) -> &'static str {
              the LLM gateway does not start and every agent run fails"
         }
         "vllm_invalid_url" => "TALAHON_VLLM_BASE_URL must be an http(s) URL, e.g. http://vllm:8000",
+        "vllm_invalid_ca_file" => {
+            "TALAHON_VLLM_CA_FILE (TALAHON_ANTHROPIC_CA_FILE for the Anthropic provider) must name \
+             a readable PEM bundle with at least one CA certificate (see ERROR in CHECK_VLLM)"
+        }
         "vllm_unreachable" => {
             "vLLM is not reachable from this host (network, firewall, server down)"
         }

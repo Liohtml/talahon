@@ -157,6 +157,9 @@ pub enum VllmStatus {
     NotConfigured,
     /// The base URL is not a valid http(s) URL.
     InvalidUrl,
+    /// `TALAHON_VLLM_CA_FILE` / `TALAHON_ANTHROPIC_CA_FILE` cannot be read
+    /// or holds no certificate.
+    InvalidCaFile,
     /// Connection failed or timed out.
     Unreachable,
     /// 401 / 403 — `TALAHON_VLLM_API_KEY` missing or wrong.
@@ -176,6 +179,7 @@ impl VllmStatus {
             VllmStatus::Ok => "ok",
             VllmStatus::NotConfigured => "not_configured",
             VllmStatus::InvalidUrl => "invalid_url",
+            VllmStatus::InvalidCaFile => "invalid_ca_file",
             VllmStatus::Unreachable => "unreachable",
             VllmStatus::AuthFailed => "auth_failed",
             VllmStatus::HttpError => "http_error",
@@ -275,6 +279,35 @@ pub async fn check_provider(
     api_key: Option<&str>,
     timeout: Duration,
 ) -> VllmCheck {
+    check_provider_with_ca(kind, base_url, model, fast_model, api_key, None, timeout).await
+}
+
+/// The CA certificates of a PEM bundle, or why it is unusable (the message
+/// names the path, never the contents).
+fn load_ca_bundle(path: &Path) -> Result<Vec<reqwest::Certificate>, String> {
+    let invalid = |reason: String| format!("CA bundle {}: {reason}", path.display());
+    let pem = std::fs::read(path).map_err(|e| invalid(format!("cannot read file: {e}")))?;
+    let certs = reqwest::Certificate::from_pem_bundle(&pem)
+        .map_err(|_| invalid("not a PEM certificate bundle".into()))?;
+    if certs.is_empty() {
+        return Err(invalid("contains no certificate".into()));
+    }
+    Ok(certs)
+}
+
+/// [`check_provider`] that additionally trusts the CA certificates in
+/// `ca_file` (a PEM bundle), as the LLM gateway does with
+/// `TALAHON_VLLM_CA_FILE` / `TALAHON_ANTHROPIC_CA_FILE`. An unusable file is
+/// reported as [`VllmStatus::InvalidCaFile`], never ignored.
+pub async fn check_provider_with_ca(
+    kind: ProviderKind,
+    base_url: &str,
+    model: &str,
+    fast_model: Option<&str>,
+    api_key: Option<&str>,
+    ca_file: Option<&Path>,
+    timeout: Duration,
+) -> VllmCheck {
     if base_url.trim().is_empty() || model.trim().is_empty() {
         return VllmCheck::status(VllmStatus::NotConfigured, None);
     }
@@ -284,12 +317,21 @@ pub async fn check_provider(
             Some("base URL must be http(s)://host[:port]".into()),
         );
     };
-    let client = match reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(path) = ca_file {
+        match load_ca_bundle(path) {
+            Ok(certs) => {
+                for cert in certs {
+                    builder = builder.add_root_certificate(cert);
+                }
+            }
+            Err(e) => return VllmCheck::status(VllmStatus::InvalidCaFile, Some(e)),
+        }
+    }
+    let client = match builder.build() {
         Ok(c) => c,
         Err(e) => {
             return VllmCheck::status(VllmStatus::Unreachable, Some(e.without_url().to_string()));
@@ -387,12 +429,20 @@ pub async fn check_configured_vllm(
     };
     let kind = provider_kind(&ctx.config.provider_defaults).unwrap_or(ProviderKind::Vllm);
     let api_key = ctx.config.env.file_value(kind.api_key_env());
-    let check = check_provider(
+    let ca_file = ctx
+        .config
+        .env
+        .get(kind.ca_file_env())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(|v| ctx.project_root.join(v));
+    let check = check_provider_with_ca(
         kind,
         &v.base_url,
         &v.model,
         v.fast_model.as_deref(),
         api_key,
+        ca_file.as_deref(),
         ctx.http_timeout,
     )
     .await;
@@ -659,6 +709,52 @@ mod tests {
         assert_eq!(r.status, VllmStatus::ModelMissing);
         assert_eq!(r.fast_model_present, Some(false));
         assert_eq!(r.models, vec!["other"]);
+    }
+
+    #[tokio::test]
+    async fn unusable_ca_file_is_reported_not_ignored() {
+        // No request is made: the server would answer 200 if the file were ignored.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(models_body(&["m"])))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.pem");
+        let r = check_provider_with_ca(
+            ProviderKind::Vllm,
+            &server.uri(),
+            "m",
+            None,
+            None,
+            Some(&missing),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(r.status, VllmStatus::InvalidCaFile);
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("missing.pem"), "{err}");
+        assert!(err.contains("cannot read file"), "{err}");
+
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "no certificate here\n").unwrap();
+        let r = check_provider_with_ca(
+            ProviderKind::Vllm,
+            &server.uri(),
+            "m",
+            None,
+            None,
+            Some(&empty),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(r.status, VllmStatus::InvalidCaFile);
+        assert!(
+            r.error
+                .unwrap_or_default()
+                .contains("contains no certificate")
+        );
     }
 
     #[tokio::test]
