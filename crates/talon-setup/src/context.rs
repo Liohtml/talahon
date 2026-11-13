@@ -211,9 +211,15 @@ impl SetupContext {
     }
 
     /// Append a titled section to `logs/setup.log` (best effort).
+    ///
+    /// A root run (`sudo talahon setup egress --apply`) hands a `logs/`
+    /// directory or log file it had to create over to the owner of the
+    /// project directory; otherwise the later steps, run as that user, could
+    /// no longer append.
     pub fn append_log(&self, title: &str, body: &str) {
         use std::io::Write;
         let dir = self.logs_dir();
+        let dir_existed = dir.exists();
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
@@ -221,9 +227,13 @@ impl SetupContext {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)
+            .open(&path)
         {
             let _ = writeln!(f, "--- {} {title} ---\n{body}", talon_core::time::now_iso());
+            #[cfg(unix)]
+            if self.platform.is_root() {
+                owner::hand_over_log(&self.project_root, &dir, !dir_existed, &path, &f);
+            }
         }
     }
 
@@ -266,6 +276,79 @@ impl SetupContext {
     }
 }
 
+/// Ownership of the setup log after a root run.
+#[cfg(unix)]
+mod owner {
+    use std::fs::{File, Metadata};
+    use std::os::unix::fs::{MetadataExt, fchown, lchown};
+    use std::path::Path;
+
+    /// What matters about a file for the hand-over decision.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct Facts {
+        pub regular_file: bool,
+        pub uid: u32,
+        pub links: u64,
+    }
+
+    impl Facts {
+        fn of(meta: &Metadata) -> Self {
+            Self {
+                regular_file: meta.is_file(),
+                uid: meta.uid(),
+                links: meta.nlink(),
+            }
+        }
+    }
+
+    /// The `(uid, gid)` a root-owned log file is handed to, if any: only a
+    /// regular, root-owned file with a single link, and only when the
+    /// project directory belongs to another user.
+    pub(super) fn new_owner(project_owner: (u32, u32), log: Facts) -> Option<(u32, u32)> {
+        (project_owner.0 != 0 && log.regular_file && log.uid == 0 && log.links == 1)
+            .then_some(project_owner)
+    }
+
+    /// Give `log` (open as `file`) and, when this run created it, `dir` to
+    /// the owner of `project_root`. Best effort, and deliberately narrow:
+    /// the project directory is writable by an unprivileged user, so this
+    /// must not become a way to have root chown something else. The file is
+    /// changed through the open handle, after checking that the path is not
+    /// a symlink and still names that same inode; the directory with
+    /// `lchown`, which does not follow symlinks.
+    pub(super) fn hand_over_log(
+        project_root: &Path,
+        dir: &Path,
+        dir_created: bool,
+        log: &Path,
+        file: &File,
+    ) {
+        let Ok(root) = std::fs::metadata(project_root) else {
+            return;
+        };
+        let project_owner = (root.uid(), root.gid());
+        let (Ok(open), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(log)) else {
+            return;
+        };
+        let same_file = !named.file_type().is_symlink()
+            && named.dev() == open.dev()
+            && named.ino() == open.ino();
+        if !same_file {
+            return;
+        }
+        let Some((uid, gid)) = new_owner(project_owner, Facts::of(&open)) else {
+            return;
+        };
+        if let Err(e) = fchown(file, Some(uid), Some(gid)) {
+            tracing::debug!(error = %e, "could not hand logs/setup.log to the project owner");
+            return;
+        }
+        if dir_created && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == 0) {
+            let _ = lchown(dir, Some(uid), Some(gid));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +368,51 @@ mod tests {
         ctx.stdin = StdinSource::Text("abc".into());
         assert_eq!(ctx.read_stdin(10).await.unwrap(), "abc");
         assert!(ctx.read_stdin(2).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_owned_log_goes_to_the_project_owner_only_when_safe() {
+        use super::owner::{Facts, new_owner};
+        let fresh = Facts {
+            regular_file: true,
+            uid: 0,
+            links: 1,
+        };
+        assert_eq!(new_owner((1000, 1001), fresh), Some((1000, 1001)));
+        // Project owned by root: nothing to hand over.
+        assert_eq!(new_owner((0, 0), fresh), None);
+        // Already someone else's file, a hard link, or not a regular file.
+        assert_eq!(new_owner((1000, 1000), Facts { uid: 1000, ..fresh }), None);
+        assert_eq!(new_owner((1000, 1000), Facts { links: 2, ..fresh }), None);
+        assert_eq!(
+            new_owner(
+                (1000, 1000),
+                Facts {
+                    regular_file: false,
+                    ..fresh
+                }
+            ),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_log_as_pretend_root_leaves_a_user_owned_log_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = SetupContext::new(dir.path(), dir.path(), Arc::new(MockRunner::new()));
+        // The context believes it is root; the process (and so the file's
+        // owner) is whoever runs the tests, hence no ownership change.
+        ctx.platform.uid = Some(0);
+        ctx.append_log("egress", "applied");
+        ctx.append_log("egress", "applied again");
+        let path = dir.path().join(SETUP_LOG);
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(log.matches(" egress ---").count(), 2, "{log}");
+        let owner = std::fs::metadata(dir.path()).unwrap().uid();
+        assert_eq!(std::fs::metadata(&path).unwrap().uid(), owner);
     }
 
     #[test]
