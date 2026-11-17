@@ -33,10 +33,28 @@ TAG="[velociraptor-mcp]"
 _err() { echo "$TAG ERROR: $*" >&2; }
 
 _load_env() {
-    set -a
-    # shellcheck source=/dev/null
-    source "$1"
-    set +a
+    # Read literally, never `source`d: a `$`, a backtick or a `;` in a password
+    # is data, and a credentials file must not be able to run code. Same rules
+    # as Talahon's own .env reader (talon_core::env::parse_env): optional
+    # `export`, single or double quotes, ` # comment` after an unquoted value.
+    local line key value quote
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+        key="${BASH_REMATCH[2]}"
+        value="${BASH_REMATCH[3]}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        quote="${value:0:1}"
+        if [[ "$quote" == '"' || "$quote" == "'" ]] && [[ "${value:1}" == *"$quote"* ]]; then
+            value="${value:1}"
+            value="${value%%"$quote"*}"
+        else
+            if [[ "$value" =~ ^(.*[^[:space:]])?[[:space:]]+#.*$ ]]; then value="${BASH_REMATCH[1]}"; fi
+            if [[ "$value" == '#'* ]]; then value=""; fi
+            value="${value%"${value##*[![:space:]]}"}"
+        fi
+        export "$key=$value"
+    done < "$1"
 }
 
 _is_native_exec() {
