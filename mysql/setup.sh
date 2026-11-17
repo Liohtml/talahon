@@ -18,6 +18,8 @@ echo ""
 # ── .env ─────────────────────────────────────────────────────────────────────
 if [[ ! -f "$ENV_FILE" ]]; then
     cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
+    # Credentials: readable by the owner only.
+    chmod 600 "$ENV_FILE"
     echo ""
     echo "  Created .env from template."
     echo "  ➜ Edit $ENV_FILE with your MySQL credentials before starting Talahon."
