@@ -277,6 +277,9 @@ errors are `{"error": "…"}`.
 |----------|-------------|----------------------------|
 | `GET /health` | Liveness (no auth) | connector verification |
 | `GET /status` | Uptime, lanes/sessions, scheduled tasks, queue | `GET /api/talon/status`, `GET /api/talon/session/context` |
+| `GET /v2/health` | Overall state (`ok`, `degraded`, `down`), version, uptime and one entry per component: `api`, `database`, `queue`, `gateway`, and `model` for a vLLM server (the Anthropic API is not probed). `config` holds the model names and `v2_api: false`. Checked at most every 15 s, each part with a 4 s deadline | the AI Analyst page's health dashboard (`GET /api/talon/health`) |
+| `GET /v2/health/history?hours=24\|168` | Per component, how many checks were ok / warn / fail in each 5-minute bucket. Kept in memory for seven days; empty again after a restart | same |
+| `GET /v2/health/metrics?hours=24\|168` | Per 5-minute bucket: investigations completed and failed, their duration p50 / p95 (creation to completion, queue time included) and the deepest queue. Tool calls, model errors and cost are not measured and not sent | same |
 | `POST /investigate` | Queue an investigation `{alert_id, customer_code, triggered_by?, template_override?}` → 202 `{job_id, status, template_override, deduplicated}` (200 when deduplicated) | `POST /api/talon/investigate`, `POST /api/ai_analyst/reports/{id}/replay`, ingest auto-trigger, Customer Portal requests |
 | `GET /investigations[/{id}]` | Recent investigations / one job by **job id** | — |
 | `GET /templates` | Prompt templates for overrides | `GET /api/talon/templates` |

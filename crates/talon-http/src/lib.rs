@@ -25,6 +25,9 @@
 //! | GET  | `/health` | unauthenticated liveness |
 //! | GET  | `/status` | uptime, lanes, sessions, scheduled tasks, queue |
 //! | GET  | `/metrics` | Prometheus text exposition |
+//! | GET  | `/v2/health` | components, overall state, version (CoPilot's health dashboard; see [`health`]) |
+//! | GET  | `/v2/health/history` | `?hours=24\|168` check counts per component in 5-minute buckets |
+//! | GET  | `/v2/health/metrics` | `?hours=24\|168` investigations, durations, queue depth per bucket |
 //! | POST | `/session/reset` | `{scope: chat\|investigate\|all, user_id?}` |
 //! | POST | `/investigate` | `{alert_id, customer_code, triggered_by?, template_override?}` |
 //! | GET  | `/investigations` | `?limit=` recent investigation jobs |
@@ -62,6 +65,7 @@ pub mod auth;
 pub mod channel;
 pub mod config;
 mod files;
+pub mod health;
 pub mod investigate;
 pub mod lanes;
 mod metrics;
@@ -79,6 +83,7 @@ mod testutil;
 pub use auth::{KeyVerifier, SecurityKeyVerifier};
 pub use channel::HttpChannel;
 pub use config::{ApiKey, HttpConfig};
+pub use health::{ComponentCheck, ComponentGroup, ComponentStatus, HealthModels, HealthProbe};
 pub use lanes::{InvalidUserId, LaneIds, UserId, is_valid_user_id, lane_jid_for_user};
 pub use palace::{
     CommandPalaceRunner, DisabledPalaceRunner, PalaceError, PalaceRunner, ScriptPalaceRunner,

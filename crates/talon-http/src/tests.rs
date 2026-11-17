@@ -1927,6 +1927,7 @@ async fn default_config_binds_loopback_only() {
             audit: Arc::new(talon_core::audit::MemoryAuditSink::default()),
             verifier: Arc::new(crate::auth::test_support::LocalVerifier),
             palace: Arc::new(crate::DisabledPalaceRunner),
+            probes: Vec::new(),
         },
     );
     let channel = HttpChannel::from_state(state);
