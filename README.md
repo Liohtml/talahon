@@ -408,6 +408,17 @@ except the LLM gateway when there is no destination to allow (yet), pass
 > `--apply` call (systemd hosts): it installs `talahon-egress.service`, which
 > re-applies the same rules at every boot. `--uninstall --apply` removes it.
 
+> [!IMPORTANT]
+> Host firewall with a default-deny input policy (ufw, firewalld, your own
+> nftables rules)? The egress rules only restrict traffic; they never accept
+> anything past other rules. Agent containers reach the LLM gateway on the
+> host through the `br-talon` bridge, so allow that yourself, for example
+> `sudo ufw allow in on br-talon to any port 3001 proto tcp`. Otherwise
+> every agent run times out connecting to the gateway. The gateway listens
+> on the address of the runtime's default bridge (e.g. `172.17.0.1`, shown
+> as `GATEWAY_BIND` by `talahon setup environment` and as `BIND` in
+> `talahon doctor`), not on the `br-talon` address.
+
 ### 7. Register groups and install the service
 
 ```bash

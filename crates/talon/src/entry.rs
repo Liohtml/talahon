@@ -109,7 +109,7 @@ async fn dispatch(cli: Cli, root: PathBuf, invoked: InvokedAs) -> i32 {
         }
         Command::Setup(args) => {
             let _ = bootstrap(&root, LogTarget::Stderr, "info", invoked);
-            let ctx = talon_setup::SetupContext::detect(&root);
+            let ctx = crate::app::setup_context(&root).await;
             match talon_setup::run_step_by_name(&args.step, &args.args, &ctx).await {
                 Ok(outcome) => {
                     println!("{}", outcome.render());

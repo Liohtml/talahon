@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -244,6 +244,24 @@ pub async fn gateway_bind_ip(
             .with_context(|| format!("TALAHON_LLM_GATEWAY_BIND {raw:?} is not an IP address")),
         None => Ok(talon_container::detect_gateway_bind_addr(runtime).await),
     }
+}
+
+/// The context `talahon setup <step>` and `talahon doctor` run with. Its
+/// gateway bind address is the one [`gateway_bind_ip`] resolves — what
+/// `talahon run` will bind — instead of the `127.0.0.1` placeholder the
+/// configuration holds while `TALAHON_LLM_GATEWAY_BIND` is unset, so
+/// `setup environment` shows and probes the real address (on Linux with
+/// docker: the default bridge, e.g. `172.17.0.1`).
+pub async fn setup_context(project_root: &Path) -> talon_setup::SetupContext {
+    let mut ctx = talon_setup::SetupContext::detect(project_root);
+    if ctx.config.env.get("TALAHON_LLM_GATEWAY_BIND").is_none()
+        && let Ok(runtime) = ContainerRuntime::detect(&ctx.config.container_runtime)
+    {
+        ctx.config.llm_gateway_bind = talon_container::detect_gateway_bind_addr(&runtime)
+            .await
+            .to_string();
+    }
+    ctx
 }
 
 async fn start_gateway(
@@ -572,8 +590,6 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use talon_core::env::EnvFile;
     use talon_core::types::{ContainerConfig, ProviderKind, VllmConfig};
 

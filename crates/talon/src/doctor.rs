@@ -25,7 +25,7 @@ use talon_db::{Db, DbOptions, default_db_path};
 use talon_http::HttpConfig;
 use talon_security::instructions::InstructionFiles;
 use talon_setup::checks::check_port;
-use talon_setup::{SetupContext, StatusBlock, Step, StepArgs, run_step};
+use talon_setup::{StatusBlock, Step, StepArgs, run_step};
 
 use crate::app::{ApiKeyPolicy, DEFAULT_CONTAINER_HOST, api_key_policy, gateway_bind_ip};
 
@@ -590,7 +590,7 @@ pub fn summary_block(issues: &[String]) -> StatusBlock {
 
 /// Run every check and print the blocks. Returns the exit code.
 pub async fn run(project_root: &Path, config: &TalonConfig) -> i32 {
-    let ctx = SetupContext::detect(project_root);
+    let ctx = crate::app::setup_context(project_root).await;
     let no_args = StepArgs::new(Vec::<String>::new());
     let mut issues: Vec<String> = Vec::new();
 
@@ -603,8 +603,8 @@ pub async fn run(project_root: &Path, config: &TalonConfig) -> i32 {
 
     let (gateway, gw_issues) = gateway_block(config).await;
     println!("{gateway}");
-    // The environment step already probed 127.0.0.1:<port>; the gateway
-    // block probes the real bind address, which supersedes it.
+    // The environment step already probed the gateway port; the gateway
+    // block reports it in more detail and supersedes it.
     issues.retain(|i| !i.starts_with("gateway_port_"));
     issues.extend(gw_issues);
 
