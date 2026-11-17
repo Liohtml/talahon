@@ -48,6 +48,7 @@ pub mod cli;
 pub mod doctor;
 pub mod entry;
 pub mod eval_cmd;
+pub mod health;
 pub mod investigation;
 pub mod logging;
 pub mod orchestrator;

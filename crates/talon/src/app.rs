@@ -37,7 +37,7 @@ use talon_core::config::TalonConfig;
 use talon_core::provider::{effective_vllm, merge_container_config, provider_kind};
 use talon_core::types::{ProviderKind, RegisteredGroup};
 use talon_db::{Db, DbAuditSink, DbOptions, default_db_path};
-use talon_http::{HttpChannel, HttpConfig};
+use talon_http::{HttpChannel, HttpConfig, HttpDeps, HttpState};
 use talon_ipc::{IpcHost, IpcWatcher, IpcWatcherConfig};
 use talon_llm::gateway::{GatewayConfig, GatewayHandle, LlmGateway};
 use talon_scheduler::{GroupQueue, QueueConfig, SchedulerConfig, TaskScheduler};
@@ -48,6 +48,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{GatewayLlm, LlmAccess, RunnerLauncher};
 use crate::allowlist::AllowlistSource;
+use crate::health::HostHealthProbe;
 use crate::orchestrator::{Orchestrator, OrchestratorDeps, Settings};
 use crate::palace::host_palace_runner;
 
@@ -467,12 +468,16 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
     let http_config =
         HttpConfig::from_talon_config(&config).map_err(|e| anyhow!("HTTP channel: {e}"))?;
     let palace = host_palace_runner(&config, &http_config, &runtime, agent_network);
-    let mut candidates: Vec<Arc<dyn Channel>> = vec![Arc::new(HttpChannel::with_palace(
-        http_config,
+    let http_deps = HttpDeps::new(
+        &http_config,
         host.clone(),
-        db.clone(),
+        Arc::new(db.clone()),
         audit.clone(),
-        palace,
+    )
+    .with_palace(palace)
+    .with_health_probe(Arc::new(HostHealthProbe::new(&config, gateway.clone())));
+    let mut candidates: Vec<Arc<dyn Channel>> = vec![Arc::new(HttpChannel::from_state(
+        HttpState::new(http_config, http_deps),
     ))];
     candidates.extend(talon_channels::build_channels(
         host.clone(),
