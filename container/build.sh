@@ -66,12 +66,20 @@ case "$(basename "$CONTAINER_RUNTIME")" in
         ;;
     *)
         # RUN --mount cache mounts need BuildKit (default since Docker 23).
+        # That is all the build needs: no buildx-only feature is used.
         export DOCKER_BUILDKIT=1
-        # BuildKit is driven through the buildx plugin, which distribution
-        # packages often ship separately (Debian/Ubuntu: docker.io without
-        # docker-buildx). Without it the build dies with "BuildKit is
-        # enabled but the buildx component is missing or broken".
-        if [[ "$(basename "$CONTAINER_RUNTIME")" == docker* ]] &&
+        # Docker 23 and later drive BuildKit through the buildx plugin,
+        # which distribution packages often ship separately (Debian/Ubuntu:
+        # docker.io without docker-buildx). Without it the build dies with
+        # "BuildKit is enabled but the buildx component is missing or
+        # broken". Older Docker (e.g. Debian 12's docker.io 20.10) has
+        # BuildKit built into the CLI, and the podman-docker shim builds
+        # with podman ("podman version ..."): neither needs buildx. A client
+        # whose version cannot be read is not stopped here either; the
+        # build itself then says what is missing.
+        client_version="$("$CONTAINER_RUNTIME" --version 2>/dev/null || true)"
+        if [[ "$client_version" =~ ^Docker\ version\ ([0-9]+)\. ]] &&
+            ((10#${BASH_REMATCH[1]} >= 23)) &&
             ! "$CONTAINER_RUNTIME" buildx version >/dev/null 2>&1; then
             echo "docker buildx is not available, but the image build needs BuildKit." >&2
             echo "Install the buildx plugin and re-run:" >&2
