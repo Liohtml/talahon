@@ -58,7 +58,11 @@ pub fn service_unit(
          TimeoutStartSec=3h\n\
          Nice=10\n\
          IOSchedulingClass=idle\n\
-         NoNewPrivileges=yes\n"
+         NoNewPrivileges=yes\n\
+         LockPersonality=yes\n\
+         RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK\n\
+         # A run needs about 100 MB; a hostile feed must not exhaust the host.\n\
+         MemoryMax=1G\n"
     ))
 }
 
