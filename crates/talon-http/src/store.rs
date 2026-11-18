@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use talon_core::types::{ScheduledTask, SessionRow};
 use talon_core::{Error, Result};
-use talon_db::{Db, Investigation};
+use talon_db::{Db, Investigation, InvestigationTiming};
 
 /// Persistence operations used by the HTTP channel.
 pub trait HttpStore: Send + Sync {
@@ -40,6 +40,43 @@ pub trait HttpStore: Send + Sync {
         }
         Ok(counts)
     }
+    /// Completed and failed investigations whose last status change
+    /// (`updated_at`) is at or after `since`, latest change first, at most
+    /// `limit` (for the health metrics). The default reads every row; the
+    /// database answers it from an index.
+    fn finished_investigations_since(
+        &self,
+        since: &str,
+        limit: usize,
+    ) -> Result<Vec<InvestigationTiming>> {
+        Ok(finished_since(
+            self.list_investigations(usize::MAX)?,
+            since,
+            limit,
+        ))
+    }
+}
+
+/// [`HttpStore::finished_investigations_since`] over full rows.
+pub(crate) fn finished_since(
+    rows: Vec<Investigation>,
+    since: &str,
+    limit: usize,
+) -> Vec<InvestigationTiming> {
+    let mut finished: Vec<InvestigationTiming> = rows
+        .into_iter()
+        .filter(|i| {
+            i.updated_at.as_str() >= since && matches!(i.status.as_str(), "completed" | "failed")
+        })
+        .map(|i| InvestigationTiming {
+            status: i.status,
+            created_at: i.created_at,
+            updated_at: i.updated_at,
+        })
+        .collect();
+    finished.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    finished.truncate(limit);
+    finished
 }
 
 impl HttpStore for Db {
@@ -72,6 +109,13 @@ impl HttpStore for Db {
     }
     fn investigation_status_counts(&self) -> Result<BTreeMap<String, u64>> {
         Db::investigation_status_counts(self)
+    }
+    fn finished_investigations_since(
+        &self,
+        since: &str,
+        limit: usize,
+    ) -> Result<Vec<InvestigationTiming>> {
+        Db::finished_investigations_since(self, since, limit)
     }
 }
 

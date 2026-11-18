@@ -17,14 +17,15 @@ use talon_core::audit::MemoryAuditSink;
 use talon_core::channel::{ChannelHost, QueueStatus};
 use talon_core::types::{ChatMetadata, NewMessage, RegisteredGroup, ScheduledTask, SessionRow};
 use talon_core::{Error, Result};
-use talon_db::Investigation;
+use talon_db::{Investigation, InvestigationTiming};
 use tower::ServiceExt;
 
 use crate::auth::test_support::LocalVerifier;
 use crate::config::{ApiKey, HttpConfig};
+use crate::health::HealthProbe;
 use crate::palace::{PalaceError, PalaceRunner};
 use crate::server::{HttpDeps, HttpState, router};
-use crate::store::HttpStore;
+use crate::store::{HttpStore, finished_since};
 
 pub(crate) const KEY: &str = "test-key-0123456789abcdef";
 
@@ -112,6 +113,12 @@ pub(crate) struct MemoryStore {
     pub sessions: Mutex<Vec<SessionRow>>,
     pub investigations: Mutex<Vec<Investigation>>,
     pub fail_investigations: bool,
+    /// Makes investigation reads fail.
+    pub fail_reads: bool,
+    /// Calls of `finished_investigations_since`.
+    pub metrics_reads: AtomicUsize,
+    /// When set, `finished_investigations_since` blocks until it receives.
+    pub metrics_gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
 impl MemoryStore {
@@ -177,6 +184,9 @@ impl HttpStore for MemoryStore {
             .cloned())
     }
     fn list_investigations(&self, limit: usize) -> Result<Vec<Investigation>> {
+        if self.fail_reads {
+            return Err(Error::Db("disk full".into()));
+        }
         let mut list = self.investigations.lock().unwrap().clone();
         list.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
         list.truncate(limit);
@@ -187,6 +197,21 @@ impl HttpStore for MemoryStore {
             .list_investigations(usize::MAX)?
             .into_iter()
             .find(|i| i.alert_id == alert_id))
+    }
+    fn finished_investigations_since(
+        &self,
+        since: &str,
+        limit: usize,
+    ) -> Result<Vec<InvestigationTiming>> {
+        self.metrics_reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = self.metrics_gate.lock().unwrap().as_ref() {
+            let _ = gate.recv();
+        }
+        Ok(finished_since(
+            self.list_investigations(usize::MAX)?,
+            since,
+            limit,
+        ))
     }
 }
 
@@ -249,7 +274,20 @@ impl Harness {
         Self::with(f, MemoryStore::default(), FakeHost::default())
     }
 
+    pub fn with_probes(probes: Vec<Arc<dyn HealthProbe>>) -> Self {
+        Self::build(|_| {}, MemoryStore::default(), FakeHost::default(), probes)
+    }
+
     pub fn with(f: impl FnOnce(&mut HttpConfig), store: MemoryStore, host: FakeHost) -> Self {
+        Self::build(f, store, host, Vec::new())
+    }
+
+    fn build(
+        f: impl FnOnce(&mut HttpConfig),
+        store: MemoryStore,
+        host: FakeHost,
+        probes: Vec<Arc<dyn HealthProbe>>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = config_in(dir.path());
         f(&mut cfg);
@@ -263,6 +301,7 @@ impl Harness {
             audit: Arc::new(audit.clone()),
             verifier: Arc::new(LocalVerifier),
             palace: palace.clone(),
+            probes,
         };
         Self {
             state: HttpState::new(cfg, deps),

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use rusqlite::{OptionalExtension, Row, params};
 use talon_core::{Error, Result};
 
-use crate::{Db, Investigation, SqlResultExt, col, sql_limit};
+use crate::{Db, Investigation, InvestigationTiming, SqlResultExt, col, sql_limit};
 
 /// Valid values of [`Investigation::status`].
 pub const INVESTIGATION_STATUSES: &[&str] = &["queued", "running", "completed", "failed"];
@@ -144,6 +144,38 @@ impl Db {
         })
     }
 
+    /// Completed and failed investigations whose last status change is at or
+    /// after `since` (an ISO-8601 timestamp in the stored format, so string
+    /// order is time order), latest change first, at most `limit`. Reads only
+    /// the status and the two timestamps.
+    pub fn finished_investigations_since(
+        &self,
+        since: &str,
+        limit: usize,
+    ) -> Result<Vec<InvestigationTiming>> {
+        self.with_read(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT status, created_at, updated_at FROM investigations
+                     WHERE updated_at >= ?1 AND status IN ('completed', 'failed')
+                     ORDER BY updated_at DESC, rowid DESC LIMIT ?2",
+                )
+                .db()?;
+            let rows = stmt
+                .query_map(params![since, sql_limit(limit)], |r| {
+                    Ok(InvestigationTiming {
+                        status: col::text(r, "status")?,
+                        created_at: col::text(r, "created_at")?,
+                        updated_at: col::text(r, "updated_at")?,
+                    })
+                })
+                .db()?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .db()?;
+            Ok(rows)
+        })
+    }
+
     /// Number of investigations per status (for `/metrics`).
     pub fn investigation_status_counts(&self) -> Result<BTreeMap<String, u64>> {
         self.with_read(|conn| {
@@ -262,6 +294,79 @@ mod tests {
             ok.status = (*status).to_string();
             db.upsert_investigation(&ok).unwrap();
         }
+    }
+
+    #[test]
+    fn finished_since_reads_the_window_by_last_change() {
+        let db = Db::open_in_memory().unwrap();
+        let row = |id: &str, status: &str, created: &str, updated: &str| {
+            let mut i = inv(id, "1", created);
+            i.status = status.into();
+            i.updated_at = updated.into();
+            i.verdict = Some(json!({ "verdict": "true_positive" }));
+            db.upsert_investigation(&i).unwrap();
+        };
+        // Created long before the window, finished inside it: counted.
+        row(
+            "old-start",
+            "completed",
+            "2026-01-01T00:00:00.000Z",
+            "2026-01-02T10:00:00.000Z",
+        );
+        row(
+            "failed",
+            "failed",
+            "2026-01-02T09:00:00.000Z",
+            "2026-01-02T11:00:00.000Z",
+        );
+        // Exactly at the bound: counted.
+        row(
+            "edge",
+            "completed",
+            "2026-01-02T08:00:00.000Z",
+            "2026-01-02T09:00:00.000Z",
+        );
+        row(
+            "before",
+            "completed",
+            "2026-01-02T07:00:00.000Z",
+            "2026-01-02T08:59:59.999Z",
+        );
+        row(
+            "running",
+            "running",
+            "2026-01-02T09:00:00.000Z",
+            "2026-01-02T12:00:00.000Z",
+        );
+        let rows = db
+            .finished_investigations_since("2026-01-02T09:00:00.000Z", 10)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                InvestigationTiming {
+                    status: "failed".into(),
+                    created_at: "2026-01-02T09:00:00.000Z".into(),
+                    updated_at: "2026-01-02T11:00:00.000Z".into(),
+                },
+                InvestigationTiming {
+                    status: "completed".into(),
+                    created_at: "2026-01-01T00:00:00.000Z".into(),
+                    updated_at: "2026-01-02T10:00:00.000Z".into(),
+                },
+                InvestigationTiming {
+                    status: "completed".into(),
+                    created_at: "2026-01-02T08:00:00.000Z".into(),
+                    updated_at: "2026-01-02T09:00:00.000Z".into(),
+                },
+            ]
+        );
+        // The cap keeps the latest changes.
+        let capped = db
+            .finished_investigations_since("2026-01-02T09:00:00.000Z", 1)
+            .unwrap();
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].updated_at, "2026-01-02T11:00:00.000Z");
     }
 
     #[test]

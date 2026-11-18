@@ -37,6 +37,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::auth::{AuthThrottle, KeyVerifier, SecurityKeyVerifier};
 use crate::config::HttpConfig;
 use crate::files;
+use crate::health::{self, HealthProbe, HealthState};
 use crate::investigate::{
     self, InvestigationRequest, STATUS_QUEUED, STATUS_RUNNING, investigation_prompt,
     investigation_record, investigation_task, is_duplicate, job_id,
@@ -93,6 +94,9 @@ pub struct HttpDeps {
     pub verifier: Arc<dyn KeyVerifier>,
     /// MemPalace bridge ([`DisabledPalaceRunner`] unless one is supplied).
     pub palace: Arc<dyn PalaceRunner>,
+    /// Health checks of the host (LLM gateway, model server) shown by
+    /// `GET /v2/health` beside the channel's own.
+    pub probes: Vec<Arc<dyn HealthProbe>>,
 }
 
 impl HttpDeps {
@@ -117,7 +121,14 @@ impl HttpDeps {
             audit,
             verifier: Arc::new(SecurityKeyVerifier),
             palace: default_palace_runner(config),
+            probes: Vec::new(),
         }
+    }
+
+    /// Add a host health check to `GET /v2/health`.
+    pub fn with_health_probe(mut self, probe: Arc<dyn HealthProbe>) -> Self {
+        self.probes.push(probe);
+        self
     }
 
     /// Use `palace` for the `/palace/*` endpoints (replaces the default,
@@ -166,6 +177,8 @@ pub(crate) struct Shared {
     pub audit: SharedAuditSink,
     pub verifier: Arc<dyn KeyVerifier>,
     pub palace: Arc<dyn PalaceRunner>,
+    pub probes: Vec<Arc<dyn HealthProbe>>,
+    pub health: HealthState,
     pub streams: Arc<StreamRegistry>,
     pub throttle: AuthThrottle,
     pub metrics: Metrics,
@@ -207,6 +220,8 @@ impl HttpState {
             audit: deps.audit,
             verifier: deps.verifier,
             palace: deps.palace,
+            probes: deps.probes,
+            health: HealthState::default(),
             streams: Arc::new(StreamRegistry::default()),
             metrics: Metrics::default(),
             started_at: Instant::now(),
@@ -496,11 +511,11 @@ impl ApiError {
         }
     }
 
-    fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
-    fn internal(message: impl Into<String>) -> Self {
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
 }
@@ -591,6 +606,9 @@ pub fn router(state: HttpState) -> Router {
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/metrics", get(metrics_handler))
+        .route("/v2/health", get(health::health_v2))
+        .route("/v2/health/history", get(health::health_history))
+        .route("/v2/health/metrics", get(health::health_metrics))
         .route("/session/reset", post(session_reset))
         .route("/investigate", post(investigate_handler))
         .route("/investigations", get(list_investigations))

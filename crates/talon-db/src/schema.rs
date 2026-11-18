@@ -133,6 +133,9 @@ const RUST_SCHEMA: &str = r#"
     );
     CREATE INDEX IF NOT EXISTS idx_investigations_alert ON investigations(alert_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_investigations_created ON investigations(created_at);
+    -- Health metrics: finished investigations by the time of their last
+    -- status change (`Db::finished_investigations_since`).
+    CREATE INDEX IF NOT EXISTS idx_investigations_updated ON investigations(updated_at);
 
     CREATE TABLE IF NOT EXISTS ioc_sightings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

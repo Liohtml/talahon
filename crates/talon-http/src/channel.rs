@@ -45,6 +45,7 @@ struct Running {
     cancel: CancellationToken,
     server: JoinHandle<()>,
     sweeper: JoinHandle<()>,
+    sampler: JoinHandle<()>,
     addr: SocketAddr,
 }
 
@@ -164,6 +165,21 @@ async fn sweep_loop(state: HttpState, cancel: CancellationToken) {
     }
 }
 
+/// Runs the health check once a minute, so `/v2/health/history` has no holes
+/// while nobody asks for `/v2/health`.
+async fn health_sample_loop(state: HttpState, cancel: CancellationToken) {
+    let mut tick = tokio::time::interval(crate::health::SAMPLE_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tick.tick() => {
+                state.health_snapshot().await;
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Channel for HttpChannel {
     fn name(&self) -> &str {
@@ -207,18 +223,21 @@ impl Channel for HttpChannel {
             cancel.clone(),
         ));
         let sweeper = tokio::spawn(sweep_loop(self.state.clone(), cancel.clone()));
+        let sampler = tokio::spawn(health_sample_loop(self.state.clone(), cancel.clone()));
 
         tracing::info!(%addr, palace = self.state.0.palace.mode(), "HTTP channel listening");
         tracing::info!(
             "HTTP channel endpoints: POST /message, POST /investigate, GET /investigations[/{{id}}], \
              GET /evals/{{alert_id}}, GET /templates, POST /palace/lesson, GET /palace/search, \
-             POST /palace/forget, GET /status, GET /metrics, POST /session/reset, GET /health"
+             POST /palace/forget, GET /status, GET /metrics, GET /v2/health[/history|/metrics], \
+             POST /session/reset, GET /health"
         );
         *self.local_addr.lock().unwrap_or_else(|e| e.into_inner()) = Some(addr);
         *running = Some(Running {
             cancel,
             server,
             sweeper,
+            sampler,
             addr,
         });
         self.connected
@@ -287,6 +306,7 @@ impl Channel for HttpChannel {
             r.server.abort();
         }
         r.sweeper.abort();
+        r.sampler.abort();
         *self.local_addr.lock().unwrap_or_else(|e| e.into_inner()) = None;
         tracing::info!(addr = %r.addr, "HTTP channel stopped");
         Ok(())

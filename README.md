@@ -518,6 +518,7 @@ All endpoints except `/health` require `X-Api-Key` or `Authorization: Bearer`.
 | `POST /message` | Analyst chat (SSE stream), per-user lanes via `user_id` |
 | `POST /session/reset` | `{scope, user_id?}` with scope `chat`, `investigate` or `all` |
 | `GET /status`, `GET /metrics` | Queue, lanes, sessions, tasks; Prometheus metrics |
+| `GET /v2/health`, `GET /v2/health/history`, `GET /v2/health/metrics` | Component health (API, database, queue, LLM gateway, model server), its history and investigation metrics, in the shape CoPilot's health dashboard reads |
 | `GET /templates`, `GET /evals/{alert_id}` | Investigation templates and eval records |
 | `POST /palace/lesson`, `GET /palace/search`, `POST /palace/forget` | MemPalace memory |
 
