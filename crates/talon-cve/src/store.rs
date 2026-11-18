@@ -469,11 +469,21 @@ pub struct Status {
 }
 
 impl Status {
-    /// Whole days since the last sync at `now`; `None` when the file never
-    /// recorded one (or the timestamp cannot be read).
+    /// Whole days at `now` since the data was current: the last sync, or
+    /// the time the NVD data is as of when that is earlier (a sync can
+    /// succeed while NVD's feed has stopped changing). `None` when the file
+    /// never recorded a sync (or the timestamp cannot be read).
     pub fn age_days(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
-        let synced = chrono::DateTime::parse_from_rfc3339(self.synced_at.as_deref()?).ok()?;
-        Some((now - synced.with_timezone(&chrono::Utc)).num_days().max(0))
+        let parse = |text: &str| chrono::DateTime::parse_from_rfc3339(text).ok();
+        let mut current = parse(self.synced_at.as_deref()?)?;
+        if let Some(nvd) = self.nvd_synced_at.as_deref().and_then(parse) {
+            current = current.min(nvd);
+        }
+        Some(
+            (now - current.with_timezone(&chrono::Utc))
+                .num_days()
+                .max(0),
+        )
     }
 }
 

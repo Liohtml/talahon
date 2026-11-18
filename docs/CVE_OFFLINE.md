@@ -95,6 +95,10 @@ entries). During a run the directory briefly holds two copies plus one
 download, so plan for about three times the database size in
 `cve-mcp/data/`.
 
+The timer's service is limited to 1 GB of memory (`MemoryMax`). A data
+directory on a tmpfs counts against that limit and does not fit; keep it on
+disk.
+
 ## Tools
 
 All tools only read. Every answer names the time of the data (`data_as_of`)

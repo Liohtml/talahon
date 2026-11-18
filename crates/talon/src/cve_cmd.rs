@@ -97,7 +97,7 @@ impl Default for Limits {
         Self {
             meta: 4 * 1024,
             nvd_gz: 512 * 1024 * 1024,
-            nvd_json: 6 * 1024 * 1024 * 1024,
+            nvd_json: 2 * 1024 * 1024 * 1024,
             epss_gz: 64 * 1024 * 1024,
             epss_csv: 512 * 1024 * 1024,
             kev: 64 * 1024 * 1024,
@@ -394,9 +394,13 @@ pub async fn sync(
         .ok_or_else(|| anyhow!("the database path has no file name"))?
         .to_string_lossy()
         .into_owned();
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    // The container reads the file as another user: public data, world-readable.
-    set_mode(&dir, 0o755).with_context(|| format!("setting the mode of {}", dir.display()))?;
+    // The container reads the file as another user, so a directory made here
+    // is world-readable (public data). One that already exists keeps its
+    // mode: it may be a home directory, or belong to someone else.
+    if !dir.is_dir() {
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        set_mode(&dir, 0o755).with_context(|| format!("setting the mode of {}", dir.display()))?;
+    }
 
     let lock_path = dir.join(".cve-sync.lock");
     let lock =
@@ -444,6 +448,12 @@ pub async fn sync(
     } else {
         sources.years.iter().map(i32::to_string).collect()
     };
+    // What the data is current as of. An incremental run only has what the
+    // `modified` feed holds, so a feed that stopped being regenerated must
+    // not make the data look fresh: the stamp stays at the feed's own time,
+    // `doctor` reports the age, and after INCREMENTAL_MAX_AGE_DAYS the next
+    // run is a full one.
+    let mut nvd_applied_at = now;
     for feed in &feeds {
         let what = format!("NVD feed {feed}");
         let base = format!("{}/nvdcve-2.0-{feed}", sources.nvd_base);
@@ -460,6 +470,9 @@ pub async fn sync(
             bail!("{what}: its .meta file was not found (404)");
         };
         let meta = FeedMeta::parse(&meta_text).map_err(|e| anyhow!("{what}: {e}"))?;
+        if incremental && let Ok(generated) = DateTime::parse_from_rfc3339(&meta.last_modified) {
+            nvd_applied_at = nvd_applied_at.min(generated.with_timezone(&Utc));
+        }
         let key = format!("{META_NVD_FEED_PREFIX}{feed}");
         if writer.meta(&key).map_err(|e| anyhow!("{e}"))?.as_deref() == Some(&meta.sha256) {
             report.nvd_feeds_unchanged += 1;
@@ -499,7 +512,7 @@ pub async fn sync(
         );
     }
     writer
-        .set_meta(META_NVD_SYNCED_AT, &now.to_rfc3339())
+        .set_meta(META_NVD_SYNCED_AT, &nvd_applied_at.to_rfc3339())
         .map_err(|e| anyhow!("{e}"))?;
 
     // --- EPSS ---
@@ -884,6 +897,12 @@ mod tests {
             (0, 1)
         );
         assert_eq!(requests_for(&server, "modified.json.gz").await, 1);
+        // The feed was generated on the 17th and has not changed since: the
+        // NVD data is as of then, not as of this run.
+        assert_eq!(
+            Reader::new(&db).status().unwrap().nvd_synced_at.as_deref(),
+            Some("2026-11-17T08:00:00+00:00")
+        );
 
         // After a gap longer than the modified feed covers: a full pass,
         // which downloads only the years whose checksum changed (none).
