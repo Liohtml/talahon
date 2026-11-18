@@ -1,18 +1,23 @@
 //! Who holds a listening TCP port?
 //!
 //! `talahon doctor` and `talahon setup environment` check that the LLM
-//! gateway port is free. While the service runs it is not — Talahon itself
-//! listens there — and that must not count as a problem. On Linux the
-//! listening process is identified from `/proc` (the listening socket's
+//! gateway port is free. While the service runs it is not — this project's
+//! Talahon listens there — and that must not count as a problem. On Linux
+//! the listening process is identified from `/proc` (the listening socket's
 //! inode in `/proc/net/tcp{,6}`, the process whose `fd/` holds that socket,
-//! and its `exe` link), without sending anything to the port. Elsewhere, or
-//! when the process belongs to another user (its `fd/` is unreadable), the
-//! owner is unknown and the caller keeps treating the port as taken.
+//! and its `exe` and `cwd` links), without sending anything to the port. A
+//! Talahon of another project or checkout, or an unrelated program that is
+//! merely called `talon`, would stop `talahon run` from binding just the
+//! same, so the process must also belong to this project (see
+//! [`is_project_talahon`]). Elsewhere, or when the process belongs to
+//! another user (its `fd/` is unreadable), the owner is unknown and the
+//! caller keeps treating the port as taken.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::context::{BINARY_NAME, LEGACY_BINARY_NAME};
+use crate::steps::service::{legacy_pid_file_path, pid_file_path};
 
 /// Listening sockets in the text of `/proc/net/tcp` or `/proc/net/tcp6`:
 /// `(local address, local port, socket inode)` per `LISTEN` line.
@@ -121,12 +126,69 @@ pub fn listener_pids(ip: IpAddr, port: u16) -> Vec<u32> {
     pids
 }
 
-/// The pid of a Talahon host process listening on `ip:port`, if this user
-/// can tell (see the module documentation).
-pub fn talahon_listener(ip: IpAddr, port: u16) -> Option<u32> {
-    listener_pids(ip, port).into_iter().find(|pid| {
-        std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| is_talahon_exe(&exe))
-    })
+/// What `/proc` shows about a process, as far as this user may read it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessFacts {
+    /// The process id.
+    pub pid: u32,
+    /// Target of `/proc/<pid>/exe`, `None` when unreadable.
+    pub exe: Option<PathBuf>,
+    /// Target of `/proc/<pid>/cwd`, `None` when unreadable.
+    pub cwd: Option<PathBuf>,
+}
+
+impl ProcessFacts {
+    /// Read the facts of `pid` from `/proc` (all `None` elsewhere, and for
+    /// another user's process).
+    pub fn read(pid: u32) -> Self {
+        let link = |name: &str| std::fs::read_link(format!("/proc/{pid}/{name}")).ok();
+        Self {
+            pid,
+            exe: link("exe"),
+            cwd: link("cwd"),
+        }
+    }
+}
+
+/// `process` is this project's Talahon: it runs the host binary
+/// ([`is_talahon_exe`]) and belongs to the project, i.e. its working
+/// directory is `project_root` (canonical; the systemd unit and the launchd
+/// plist set `WorkingDirectory`, the nohup wrapper `cd`s there) or its pid
+/// is one of `recorded_pids` (the project's pid files). What cannot be read
+/// counts against it: an unknown process is never taken for ours.
+pub fn is_project_talahon(
+    process: &ProcessFacts,
+    project_root: &Path,
+    recorded_pids: &[u32],
+) -> bool {
+    process.exe.as_deref().is_some_and(is_talahon_exe)
+        && (process.cwd.as_deref() == Some(project_root) || recorded_pids.contains(&process.pid))
+}
+
+/// Pids in the project's pid files: `talahon.pid`, and `talon.pid` of an
+/// instance started before the rename (both written by the nohup wrapper).
+/// Missing or unparsable files contribute nothing.
+pub fn recorded_pids(project_root: &Path) -> Vec<u32> {
+    [
+        pid_file_path(project_root),
+        legacy_pid_file_path(project_root),
+    ]
+    .iter()
+    .filter_map(|path| std::fs::read_to_string(path).ok())
+    .filter_map(|raw| raw.trim().parse().ok())
+    .collect()
+}
+
+/// The pid of this project's Talahon host process listening on `ip:port`,
+/// if this user can tell (see the module documentation and
+/// [`is_project_talahon`]).
+pub fn project_talahon_listener(ip: IpAddr, port: u16, project_root: &Path) -> Option<u32> {
+    // `/proc/<pid>/cwd` shows the resolved path.
+    let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let recorded = recorded_pids(project_root);
+    listener_pids(ip, port)
+        .into_iter()
+        .find(|&pid| is_project_talahon(&ProcessFacts::read(pid), &root, &recorded))
 }
 
 #[cfg(test)]
@@ -193,14 +255,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_talahon_of_this_project_counts_as_ours() {
+        let root = Path::new("/home/user/talahon");
+        let ours = ProcessFacts {
+            pid: 4242,
+            exe: Some(PathBuf::from("/usr/local/bin/talahon")),
+            cwd: Some(root.to_path_buf()),
+        };
+        // Started by the service unit / nohup wrapper in the project root.
+        assert!(is_project_talahon(&ours, root, &[]));
+        // A Talahon of another checkout or project.
+        let elsewhere = ProcessFacts {
+            cwd: Some(PathBuf::from("/home/user/talahon-dev")),
+            ..ours.clone()
+        };
+        assert!(!is_project_talahon(&elsewhere, root, &[]));
+        assert!(!is_project_talahon(&elsewhere, root, &[1, 4243]));
+        // ... unless the project's pid file names it.
+        assert!(is_project_talahon(&elsewhere, root, &[4242]));
+        // A working directory that cannot be read: only the pid file helps.
+        let no_cwd = ProcessFacts {
+            cwd: None,
+            ..ours.clone()
+        };
+        assert!(!is_project_talahon(&no_cwd, root, &[]));
+        assert!(is_project_talahon(&no_cwd, root, &[4242]));
+        // Not the host binary (or unknown), even in the project root and
+        // named in the pid file.
+        for exe in [None, Some(PathBuf::from("/usr/bin/python3"))] {
+            let other = ProcessFacts {
+                exe,
+                ..ours.clone()
+            };
+            assert!(!is_project_talahon(&other, root, &[4242]));
+        }
+        // Nothing readable at all (another user's process, not Linux).
+        let unknown = ProcessFacts {
+            pid: 4242,
+            ..ProcessFacts::default()
+        };
+        assert!(!is_project_talahon(&unknown, root, &[4242]));
+    }
+
+    #[test]
+    fn pid_files_of_both_names_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(recorded_pids(dir.path()).is_empty());
+        std::fs::write(dir.path().join("talahon.pid"), "4242\n").unwrap();
+        assert_eq!(recorded_pids(dir.path()), vec![4242]);
+        std::fs::write(dir.path().join("talon.pid"), "17\n").unwrap();
+        assert_eq!(recorded_pids(dir.path()), vec![4242, 17]);
+        std::fs::write(dir.path().join("talahon.pid"), "garbage").unwrap();
+        assert_eq!(recorded_pids(dir.path()), vec![17]);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_listener_of_this_process_is_found_but_is_not_talahon() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         assert!(listener_pids(addr.ip(), addr.port()).contains(&std::process::id()));
-        // The test binary is not the host binary.
-        assert_eq!(talahon_listener(addr.ip(), addr.port()), None);
+        // This process's links are readable; its cwd is the resolved path.
+        let me = ProcessFacts::read(std::process::id());
+        let cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        assert_eq!(me.cwd.as_deref(), Some(cwd.as_path()));
+        assert!(me.exe.is_some());
+        // The test binary is not the host binary, even in "its" project.
+        assert_eq!(project_talahon_listener(addr.ip(), addr.port(), &cwd), None);
         drop(listener);
         assert!(listener_pids(addr.ip(), addr.port()).is_empty());
     }

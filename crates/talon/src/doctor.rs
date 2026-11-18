@@ -77,8 +77,10 @@ pub fn hint(issue: &str) -> &'static str {
         }
         "gateway_port_in_use" => {
             "TALAHON_LLM_GATEWAY_PORT is in use by another process (stop it or pick another port). \
-             A running Talahon is recognised and not reported — except on non-Linux hosts and \
-             when it runs as a different user than `talahon doctor`"
+             This project's running Talahon (started in the project directory or named in \
+             talahon.pid) is recognised and not reported — except on non-Linux hosts and when it \
+             runs as a different user than `talahon doctor`; a Talahon of another project is \
+             reported, it would keep this one from binding"
         }
         "gateway_port_unavailable" | "gateway_bind_unavailable" => {
             "the LLM gateway cannot bind its address: set TALAHON_LLM_GATEWAY_BIND to a local address"
@@ -177,15 +179,17 @@ async fn gateway_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
         block.set("PORT_STATUS", port.as_str());
         match port.as_str() {
             "free" => {}
-            // Held by the running Talahon itself: the healthy state, not a
-            // problem. Anything else (or a listener this user cannot
-            // inspect) stays an issue.
-            "in_use" => {
-                match talon_setup::listener::talahon_listener(ip, config.llm_gateway_port) {
-                    Some(pid) => block.set("PORT_OWNER", format!("talahon (pid {pid})")),
-                    None => issues.push("gateway_port_in_use".to_string()),
-                }
-            }
+            // Held by this project's running Talahon: the healthy state,
+            // not a problem. Anything else (another project's Talahon, or a
+            // listener this user cannot inspect) stays an issue.
+            "in_use" => match talon_setup::listener::project_talahon_listener(
+                ip,
+                config.llm_gateway_port,
+                &config.project_root,
+            ) {
+                Some(pid) => block.set("PORT_OWNER", format!("talahon (pid {pid})")),
+                None => issues.push("gateway_port_in_use".to_string()),
+            },
             _ => issues.push("gateway_bind_unavailable".to_string()),
         }
         let linux = runtime
