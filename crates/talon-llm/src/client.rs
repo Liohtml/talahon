@@ -444,6 +444,8 @@ impl VllmClient {
 
     /// Liveness check: vLLM `GET /health`, falling back to `GET /v1/models`
     /// when `/health` is not served (e.g. through the gateway). No retries.
+    /// vLLM answers `/health` without checking `--api-key`, so this does not
+    /// prove the key is accepted; [`Self::list_models`] does.
     pub async fn health(&self) -> Result<(), LlmError> {
         let url = format!("{}/health", self.urls.root);
         let resp = self

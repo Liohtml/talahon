@@ -4,13 +4,17 @@
 //! - **`gateway`** is read from the running gateway's own counters; nothing
 //!   is sent. Without a gateway no agent turn can reach a model, so that is a
 //!   critical failure.
-//! - **`model`** is a real request to the vLLM server (`GET /health`, falling
-//!   back to `GET /v1/models`) with the host's API key and a short deadline,
-//!   made from the host and not through the gateway: a gateway token would
-//!   count as another lane there. A refused key is critical; an unreachable
+//! - **`model`** is a real request to the vLLM server (`GET /v1/models`)
+//!   with the host's API key, made from the host and not through the
+//!   gateway: a gateway token would count as another lane there. It is not
+//!   `GET /health`: vLLM's `--api-key` guards only `/v1/*`, so `/health`
+//!   answers a wrong key too. A refused key is critical; an unreachable
 //!   server only degrades (chat and investigations queue until it is back).
-//!   The Anthropic provider is **not** probed: its API has no free liveness
-//!   call, so no `model` component is reported for it.
+//!   The request has its own deadline ([`MODEL_DEADLINE`]) below the
+//!   channel's deadline for the whole probe, so a slow model server never
+//!   costs the `gateway` component. The Anthropic provider is **not** probed:
+//!   its API has no free liveness call, so no `model` component is reported
+//!   for it.
 //!
 //! Details are fixed texts: a backend's error message names hosts and ports
 //! and is only logged.
@@ -22,15 +26,18 @@ use async_trait::async_trait;
 use talon_core::config::TalonConfig;
 use talon_core::provider::{effective_vllm, provider_kind};
 use talon_core::types::ProviderKind;
+use talon_http::health::CHECK_DEADLINE;
 use talon_http::{ComponentCheck, ComponentGroup, ComponentStatus, HealthModels, HealthProbe};
 use talon_llm::gateway::GatewayStats;
-use talon_llm::{ClientConfig, GatewayHandle, LlmError, VllmClient};
+use talon_llm::{ClientConfig, GatewayHandle, LlmError, RetryPolicy, VllmClient};
 
 use crate::app::api_key_env;
 
-/// Deadline of the model server request (below the channel's own deadline
-/// for a whole probe).
+/// Deadline of the whole model server check. The channel discards a probe
+/// that misses [`CHECK_DEADLINE`] together with its `gateway` component, so
+/// this stays safely below it.
 const MODEL_DEADLINE: Duration = Duration::from_secs(3);
+const _: () = assert!(MODEL_DEADLINE.as_millis() + 500 <= CHECK_DEADLINE.as_millis());
 
 type StatsFn = Arc<dyn Fn() -> GatewayStats + Send + Sync>;
 
@@ -38,6 +45,8 @@ type StatsFn = Arc<dyn Fn() -> GatewayStats + Send + Sync>;
 pub struct HostHealthProbe {
     gateway: Option<StatsFn>,
     model: Option<VllmClient>,
+    /// Bound on [`Self::model_component`]; [`MODEL_DEADLINE`] outside tests.
+    model_deadline: Duration,
     anthropic: bool,
     models: Option<HealthModels>,
 }
@@ -64,11 +73,14 @@ impl HostHealthProbe {
                 .map(str::to_string);
             client.request_timeout = MODEL_DEADLINE;
             client.connect_timeout = MODEL_DEADLINE;
+            // One request: a retry with backoff would not fit the deadline.
+            client.retry = RetryPolicy::none();
             VllmClient::new(client).ok()
         });
         Self {
             gateway: gateway.map(|g| Arc::new(move || g.stats()) as StatsFn),
             model,
+            model_deadline: MODEL_DEADLINE,
             anthropic,
             // One model serves both: Talahon has no separate chat model.
             models: vllm.map(|v| HealthModels {
@@ -103,15 +115,24 @@ impl HostHealthProbe {
         }
     }
 
-    async fn model_component(client: &VllmClient) -> ComponentCheck {
+    async fn model_component(client: &VllmClient, deadline: Duration) -> ComponentCheck {
         let started = Instant::now();
-        let result = client.health().await;
+        // An authenticated endpoint, so a wrong key shows here and not only
+        // in every agent turn.
+        let result = tokio::time::timeout(deadline, client.list_models())
+            .await
+            .unwrap_or_else(|_| {
+                Err(LlmError::Timeout(format!(
+                    "no answer within {} ms",
+                    deadline.as_millis()
+                )))
+            });
         let base = |status| {
             ComponentCheck::new("model", "Model server", ComponentGroup::Model, status)
                 .latency(started.elapsed())
         };
         match result {
-            Ok(()) => base(ComponentStatus::Ok).detail("The model server answered"),
+            Ok(_) => base(ComponentStatus::Ok).detail("The model server answered"),
             Err(e) => {
                 tracing::warn!(err = %e, "health: the model server check failed");
                 match e {
@@ -154,7 +175,7 @@ impl HealthProbe for HostHealthProbe {
     async fn check(&self) -> Vec<ComponentCheck> {
         let mut components = vec![self.gateway_component()];
         if let Some(client) = &self.model {
-            components.push(Self::model_component(client).await);
+            components.push(Self::model_component(client, self.model_deadline).await);
         }
         components
     }
@@ -195,6 +216,13 @@ mod tests {
         )
     }
 
+    fn model_list() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": "list",
+            "data": [{ "id": "test-model", "object": "model", "owned_by": "vllm" }],
+        }))
+    }
+
     #[tokio::test]
     async fn no_provider_is_a_critical_gateway_failure_and_no_model_component() {
         let p = probe("", false);
@@ -210,9 +238,9 @@ mod tests {
     async fn a_healthy_model_server_is_asked_with_the_hosts_key() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/health"))
+            .and(path("/v1/models"))
             .and(header("authorization", "Bearer upstream-key"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(model_list())
             .expect(1)
             .mount(&server)
             .await;
@@ -259,6 +287,66 @@ mod tests {
         assert!(!down[1].critical);
         // The backend's own text (it names the address) is not relayed.
         assert!(!format!("{:?}", down[1]).contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_key_is_caught_although_health_answers_without_one() {
+        // As vLLM with `--api-key`: `/health` is open, `/v1/*` checks the key.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer the-servers-key"))
+            .respond_with(model_list())
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let components = probe(&vllm_env(&server.uri()), true).check().await;
+        let model = &components[1];
+        assert_eq!(model.id, "model");
+        assert_eq!(model.status, ComponentStatus::Fail);
+        assert!(model.critical, "a refused key takes Talahon down");
+        assert_eq!(
+            model.detail.as_deref(),
+            Some("The model server refused Talahon's API key")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_model_server_fails_in_time_and_keeps_the_gateway() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(model_list().set_delay(Duration::from_secs(30)))
+            .mount(&server)
+            .await;
+        let mut p = probe(&vllm_env(&server.uri()), true);
+        // Shorter than the client's own request timeout, so this bound is
+        // what ends the check.
+        p.model_deadline = Duration::from_millis(200);
+        let started = Instant::now();
+        let components = p.check().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "ended by the probe's bound, not the client's 3 s timeout"
+        );
+        let ids: Vec<&str> = components.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["gateway", "model"]);
+        assert_eq!(components[0].status, ComponentStatus::Ok);
+        assert_eq!(components[1].status, ComponentStatus::Fail);
+        assert!(!components[1].critical);
+        assert_eq!(
+            components[1].detail.as_deref(),
+            Some("The model server could not be reached in time")
+        );
     }
 
     #[tokio::test]

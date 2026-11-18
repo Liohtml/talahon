@@ -17,14 +17,18 @@
 //! - **Metrics.** Finished and failed investigations and their duration come
 //!   from the investigation table (bucketed by the time of the last status
 //!   change; the duration runs from creation to that change, so it includes
-//!   the time spent queued). The deepest queue per bucket comes from the
+//!   the time spent queued). Only the status and timestamps of rows changed
+//!   inside the window are read. The deepest queue per bucket comes from the
 //!   in-memory samples. Tool calls, model errors and cost are not measured and
 //!   therefore absent.
 //!
 //! A check is cached for [`CACHE_TTL`] and runs one at a time; every part has
 //! its own deadline ([`CHECK_DEADLINE`]), so the routes answer even when the
-//! database or the model server hangs. Texts are fixed: no error message of a
-//! backend (which may name hosts) is relayed.
+//! database or the model server hangs. The metrics are cached per window for
+//! [`METRICS_CACHE_TTL`] and read one at a time: a read that outlives its
+//! request's deadline is awaited by the next request instead of being started
+//! again. Texts are fixed: no error message of a backend (which may name
+//! hosts) is relayed.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -38,9 +42,10 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use serde_json::{Map, Value, json};
 use talon_core::channel::QueueStatus;
-use talon_core::time::parse_iso;
-use talon_db::Investigation;
+use talon_core::time::{parse_iso, to_iso};
+use talon_db::InvestigationTiming;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::task::JoinHandle;
 
 use crate::investigate::STATUS_FAILED;
 use crate::server::{ApiError, HttpState};
@@ -61,8 +66,11 @@ pub const CHECK_DEADLINE: Duration = Duration::from_secs(4);
 /// How often the background sampler checks, so the history has no holes
 /// while nobody opens the dashboard.
 pub(crate) const SAMPLE_PERIOD: Duration = Duration::from_secs(60);
-/// Most recent investigations read for the metrics.
-const METRICS_ROWS: usize = 20_000;
+/// How long a metrics body is served from the cache.
+pub const METRICS_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Safety cap on the finished investigations read for one metrics body
+/// (the latest changes are kept; see [`metrics_json`]).
+const METRICS_ROWS: usize = 50_000;
 const STATUS_COMPLETED: &str = "completed";
 
 /// The dashboard's component groups.
@@ -202,7 +210,10 @@ pub trait HealthProbe: Send + Sync {
     /// Group of that component.
     fn group(&self) -> ComponentGroup;
     /// Run the check. Bounded by [`CHECK_DEADLINE`] from outside; may return
-    /// several components.
+    /// several components. When the deadline is missed everything the check
+    /// would have returned is replaced by one failed component (see
+    /// [`Self::id`]), so a probe reporting several components bounds its slow
+    /// parts itself, safely below that deadline.
     async fn check(&self) -> Vec<ComponentCheck>;
     /// The configured models, when this probe knows them.
     fn models(&self) -> Option<HealthModels> {
@@ -320,14 +331,15 @@ fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
 
 /// The `/v2/health/metrics` body: one entry per bucket of the last `hours`.
 ///
-/// `investigations` are the most recent rows, `truncated` says the read hit
-/// its row limit: then buckets older than the oldest row carry no
-/// investigation numbers (they would be undercounted). `queue_depths` holds
-/// the sampled buckets only.
+/// `investigations` are the finished rows changed inside the window, latest
+/// change first. `truncated` says the read hit its row cap, so it holds only
+/// the latest changes: then the bucket of the oldest row and every bucket
+/// before it carry no investigation numbers (they would be undercounted).
+/// `queue_depths` holds the sampled buckets only.
 pub(crate) fn metrics_json(
     now: DateTime<Utc>,
     hours: i64,
-    investigations: &[Investigation],
+    investigations: &[InvestigationTiming],
     truncated: bool,
     queue_depths: &HashMap<i64, u64>,
 ) -> Value {
@@ -363,8 +375,8 @@ pub(crate) fn metrics_json(
             entry.failed += 1;
         }
     }
-    // With a truncated read, the bucket holding the oldest row is itself
-    // incomplete.
+    // A truncated read dropped the oldest changes: the bucket holding the
+    // oldest row read is itself incomplete, and older ones are empty.
     let counted_from = match (truncated, oldest_row) {
         (true, Some(oldest)) => oldest + BUCKET_SECS,
         _ => from,
@@ -405,11 +417,25 @@ pub(crate) struct Snapshot {
     pub components: Vec<ComponentCheck>,
 }
 
+type MetricsRead = JoinHandle<talon_core::Result<Vec<InvestigationTiming>>>;
+
+/// The metrics of one window.
+#[derive(Default)]
+struct MetricsSlot {
+    /// The last body and when it was computed (tokio's clock).
+    body: Option<(tokio::time::Instant, Arc<Value>)>,
+    /// A read whose request gave up waiting: the next request awaits it
+    /// instead of starting another.
+    read: Option<MetricsRead>,
+}
+
 /// The cache and the history behind the health routes.
 #[derive(Default)]
 pub(crate) struct HealthState {
     // tokio's clock, so tests can advance it.
     cache: AsyncMutex<Option<(tokio::time::Instant, Arc<Snapshot>)>>,
+    /// Per `hours` window; one metrics read at a time.
+    metrics: AsyncMutex<HashMap<i64, MetricsSlot>>,
     history: Mutex<History>,
 }
 
@@ -551,6 +577,55 @@ impl HttpState {
         *cache = Some((tokio::time::Instant::now(), Arc::clone(&snapshot)));
         snapshot
     }
+
+    /// The `/v2/health/metrics` body for the last `hours`: cached for
+    /// [`METRICS_CACHE_TTL`], one read at a time. Dropping the returned
+    /// future (a request deadline) leaves a started read in place for the
+    /// next call to await.
+    pub(crate) async fn health_metrics_body(&self, hours: i64) -> talon_core::Result<Arc<Value>> {
+        let s = &self.0;
+        let mut slots = s.health.metrics.lock().await;
+        let slot = slots.entry(hours).or_default();
+        if let Some((at, body)) = &slot.body
+            && at.elapsed() < METRICS_CACHE_TTL
+        {
+            return Ok(Arc::clone(body));
+        }
+        let read = slot.read.get_or_insert_with(|| {
+            let store = Arc::clone(&s.store);
+            // Stored timestamps are `to_iso` strings: string order is time
+            // order. The window starts at its first bucket.
+            let since = Utc
+                .timestamp_opt(bucket_of(Utc::now()) - hours * 3600, 0)
+                .single()
+                .map(to_iso)
+                .unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                store.finished_investigations_since(&since, METRICS_ROWS)
+            })
+        });
+        let joined = read.await;
+        slot.read = None;
+        let rows =
+            joined.map_err(|e| talon_core::Error::Db(format!("store task failed: {e}")))??;
+        let truncated = rows.len() >= METRICS_ROWS;
+        if truncated {
+            tracing::warn!(
+                rows = rows.len(),
+                hours,
+                "health metrics: the investigation read hit its cap; older buckets carry no \
+                 investigation numbers"
+            );
+        }
+        let now = Utc::now();
+        let depths = s
+            .health
+            .history()
+            .queue_depths(bucket_of(now) - hours * 3600);
+        let body = Arc::new(metrics_json(now, hours, &rows, truncated, &depths));
+        slot.body = Some((tokio::time::Instant::now(), Arc::clone(&body)));
+        Ok(body)
+    }
 }
 
 fn component_json(c: &ComponentCheck, checked_at: &str) -> Value {
@@ -632,29 +707,29 @@ pub(crate) async fn health_metrics(
     query: Result<Query<HashMap<String, String>>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let hours = hours_param(query)?;
-    let rows = tokio::time::timeout(
-        CHECK_DEADLINE,
-        run_blocking(&st.0.store, |store| store.list_investigations(METRICS_ROWS)),
-    )
-    .await
-    .map_err(|_| ApiError::internal("failed to read metrics"))?
-    .map_err(|e| {
-        tracing::error!(err = %e, "GET /v2/health/metrics failed");
-        ApiError::internal("failed to read metrics")
-    })?;
-    let now = Utc::now();
-    let depths =
-        st.0.health
-            .history()
-            .queue_depths(bucket_of(now) - hours * 3600);
-    let truncated = rows.len() >= METRICS_ROWS;
-    Ok(Json(metrics_json(now, hours, &rows, truncated, &depths)).into_response())
+    let body = tokio::time::timeout(CHECK_DEADLINE, st.health_metrics_body(hours))
+        .await
+        .map_err(|_| {
+            tracing::warn!(
+                hours,
+                "GET /v2/health/metrics: the read did not finish in time"
+            );
+            ApiError::internal("failed to read metrics")
+        })?
+        .map_err(|e| {
+            tracing::error!(err = %e, "GET /v2/health/metrics failed");
+            ApiError::internal("failed to read metrics")
+        })?;
+    Ok(Json(Value::clone(&body)).into_response())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+
     use axum::http::StatusCode;
     use chrono::Duration as ChronoDuration;
+    use talon_db::Investigation;
 
     use super::*;
     use crate::testutil::*;
@@ -665,6 +740,14 @@ mod tests {
 
     fn check(id: &str, status: ComponentStatus) -> ComponentCheck {
         ComponentCheck::new(id, id, ComponentGroup::Core, status)
+    }
+
+    fn timing(status: &str, created: &str, updated: &str) -> InvestigationTiming {
+        InvestigationTiming {
+            status: status.into(),
+            created_at: created.into(),
+            updated_at: updated.into(),
+        }
     }
 
     fn investigation(id: &str, status: &str, created: &str, updated: &str) -> Investigation {
@@ -797,36 +880,11 @@ mod tests {
     fn metrics_report_only_what_was_measured() {
         let now = at("2026-01-02T10:07:00Z");
         let rows = [
-            investigation(
-                "a",
-                "completed",
-                "2026-01-02T10:00:00Z",
-                "2026-01-02T10:01:40Z",
-            ),
-            investigation(
-                "b",
-                "completed",
-                "2026-01-02T09:58:00Z",
-                "2026-01-02T10:03:00Z",
-            ),
-            investigation(
-                "c",
-                "failed",
-                "2026-01-02T10:00:00Z",
-                "2026-01-02T10:04:00Z",
-            ),
-            investigation(
-                "d",
-                "running",
-                "2026-01-02T10:00:00Z",
-                "2026-01-02T10:02:00Z",
-            ),
-            investigation(
-                "old",
-                "completed",
-                "2025-12-01T10:00:00Z",
-                "2025-12-01T10:02:00Z",
-            ),
+            timing("failed", "2026-01-02T10:00:00Z", "2026-01-02T10:04:00Z"),
+            timing("completed", "2026-01-02T09:58:00Z", "2026-01-02T10:03:00Z"),
+            timing("running", "2026-01-02T10:00:00Z", "2026-01-02T10:02:00Z"),
+            timing("completed", "2026-01-02T10:00:00Z", "2026-01-02T10:01:40Z"),
+            timing("completed", "2025-12-01T10:00:00Z", "2025-12-01T10:02:00Z"),
         ];
         let depths = HashMap::from([(at("2026-01-02T10:05:00Z").timestamp(), 2)]);
         let body = metrics_json(now, 24, &rows, false, &depths);
@@ -865,19 +923,10 @@ mod tests {
     #[test]
     fn a_truncated_read_leaves_older_buckets_without_investigation_numbers() {
         let now = at("2026-01-02T10:07:00Z");
+        // The latest changes, as the capped read returns them.
         let rows = [
-            investigation(
-                "a",
-                "completed",
-                "2026-01-02T10:00:00Z",
-                "2026-01-02T10:01:00Z",
-            ),
-            investigation(
-                "b",
-                "completed",
-                "2026-01-02T09:00:00Z",
-                "2026-01-02T09:01:00Z",
-            ),
+            timing("completed", "2026-01-02T10:00:00Z", "2026-01-02T10:01:00Z"),
+            timing("completed", "2026-01-02T09:00:00Z", "2026-01-02T09:01:00Z"),
         ];
         let depths = HashMap::from([(at("2026-01-02T08:00:00Z").timestamp(), 0)]);
         let body = metrics_json(now, 24, &rows, true, &depths);
@@ -1052,5 +1101,60 @@ mod tests {
         assert_eq!(last["investigations_completed"], 1);
         assert_eq!(last["duration_p50_s"], 90.0);
         assert!(last.get("tool_calls").is_none() && last.get("cost_usd").is_none());
+    }
+
+    #[tokio::test]
+    async fn metrics_count_an_investigation_created_before_the_window_by_its_finish() {
+        let h = Harness::new();
+        let now = Utc::now();
+        h.store.investigations.lock().unwrap().push(investigation(
+            "long",
+            "completed",
+            &to_iso(now - ChronoDuration::days(3)),
+            &to_iso(now),
+        ));
+        let body = h.state.health_metrics_body(24).await.unwrap();
+        let last = body["series"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["investigations_completed"], 1);
+        assert_eq!(last["duration_p50_s"], 3.0 * 86_400.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn metrics_are_cached_per_window() {
+        let h = Harness::new();
+        let reads = || h.store.metrics_reads.load(Ordering::SeqCst);
+        let first = h.state.health_metrics_body(24).await.unwrap();
+        let again = h.state.health_metrics_body(24).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &again), "served from the cache");
+        assert_eq!(reads(), 1);
+        h.state.health_metrics_body(168).await.unwrap();
+        assert_eq!(reads(), 2, "each window has its own entry");
+        tokio::time::advance(METRICS_CACHE_TTL + Duration::from_secs(1)).await;
+        let later = h.state.health_metrics_body(24).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &later));
+        assert_eq!(reads(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_slow_metrics_read_is_awaited_again_not_started_again() {
+        let (release, gate) = std::sync::mpsc::channel();
+        let store = MemoryStore {
+            metrics_gate: std::sync::Mutex::new(Some(gate)),
+            ..MemoryStore::default()
+        };
+        let h = Harness::with(|_| {}, store, FakeHost::default());
+        // Requests that give up waiting (as at the route's deadline) leave
+        // the read running; the next ones wait for that read.
+        for _ in 0..3 {
+            let gave_up =
+                tokio::time::timeout(Duration::from_millis(50), h.state.health_metrics_body(24))
+                    .await;
+            assert!(gave_up.is_err());
+        }
+        assert_eq!(h.store.metrics_reads.load(Ordering::SeqCst), 1);
+        release.send(()).unwrap();
+        h.state.health_metrics_body(24).await.unwrap();
+        h.state.health_metrics_body(24).await.unwrap();
+        assert_eq!(h.store.metrics_reads.load(Ordering::SeqCst), 1);
     }
 }

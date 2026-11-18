@@ -131,6 +131,18 @@ pub struct Investigation {
     pub error: Option<String>,
 }
 
+/// The status and timestamps of an investigation, without its payload
+/// (read by [`Db::finished_investigations_since`] for the health metrics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvestigationTiming {
+    /// `completed` or `failed`.
+    pub status: String,
+    /// ISO-8601 creation time.
+    pub created_at: String,
+    /// ISO-8601 time of the last status change.
+    pub updated_at: String,
+}
+
 /// An IOC observed in an alert/investigation, for cross-alert correlation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IocSighting {
