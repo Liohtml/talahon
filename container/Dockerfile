@@ -10,8 +10,8 @@
 # sent — never .env, store/, data/, groups/ or target/).
 #
 # Stages
-#   rust-builder  compiles talahon-agent, talahon-anon-proxy, talahon-opensearch-mcp
-#                 and talahon-mysql-mcp from the workspace
+#   rust-builder  compiles talahon-agent, talahon-anon-proxy, talahon-opensearch-mcp,
+#                 talahon-mysql-mcp and talahon-cve-mcp from the workspace
 #   py-builder    builds the Python MCP server virtualenvs under /opt
 #   runtime       debian:bookworm-slim: no compilers, no node, no sudo
 #
@@ -46,11 +46,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     set -eux; \
     cargo build --release --locked --bin talahon-agent --bin talahon-anon-proxy \
-        --bin talahon-opensearch-mcp --bin talahon-mysql-mcp; \
+        --bin talahon-opensearch-mcp --bin talahon-mysql-mcp --bin talahon-cve-mcp; \
     install -D -m 0755 target/release/talahon-agent /out/talahon-agent; \
     install -D -m 0755 target/release/talahon-anon-proxy /out/talahon-anon-proxy; \
     install -D -m 0755 target/release/talahon-opensearch-mcp /out/talahon-opensearch-mcp; \
-    install -D -m 0755 target/release/talahon-mysql-mcp /out/talahon-mysql-mcp
+    install -D -m 0755 target/release/talahon-mysql-mcp /out/talahon-mysql-mcp; \
+    install -D -m 0755 target/release/talahon-cve-mcp /out/talahon-cve-mcp
 
 # ---------------------------------------------------------------------------
 # 2. Python MCP servers (built here so the runtime has no compilers)
@@ -195,6 +196,10 @@ COPY --from=rust-builder /out/talahon-opensearch-mcp /usr/local/bin/talahon-open
 # Native MySQL MCP server; used instead of the Python one only when
 # mysql.env sets TALAHON_MYSQL_MCP=rust (mysql/mysql-mcp.sh).
 COPY --from=rust-builder /out/talahon-mysql-mcp /usr/local/bin/talahon-mysql-mcp
+# Offline CVE / EPSS / KEV MCP server (no network; reads the database the
+# host writes with `talahon cve sync`); used instead of the online one only
+# when cve.env sets TALAHON_CVE_MCP=offline (cve-mcp/cve-mcp.sh).
+COPY --from=rust-builder /out/talahon-cve-mcp /usr/local/bin/talahon-cve-mcp
 COPY container/entrypoint.sh /usr/local/bin/talahon-entrypoint
 COPY container/mysql-tools/mysql_query.py /opt/mysql-tools/lib/mysql_query.py
 COPY container/mysql-tools/mysql-query /usr/local/bin/mysql-query
@@ -211,7 +216,8 @@ RUN set -eux; \
     chown -R root:root /usr/local/bin /opt; \
     chmod 0755 /usr/local/bin/talahon-entrypoint /usr/local/bin/talahon-agent \
         /usr/local/bin/talahon-anon-proxy /usr/local/bin/talahon-opensearch-mcp \
-        /usr/local/bin/talahon-mysql-mcp /usr/local/bin/mysql-query; \
+        /usr/local/bin/talahon-mysql-mcp /usr/local/bin/talahon-cve-mcp \
+        /usr/local/bin/mysql-query; \
     chmod -R go-w /opt; \
     # pymysql + helper usable by mcp-mysql only.
     chown -R mcp-mysql:mcp-mysql /opt/mysql-tools; \

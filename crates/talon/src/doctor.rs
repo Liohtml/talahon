@@ -135,6 +135,21 @@ pub fn hint(issue: &str) -> &'static str {
              file (see CHECK_INSTRUCTIONS UNSAFE): every run in that folder is refused. Replace \
              it with a regular file, or remove it"
         }
+        "cve_db_missing" => {
+            "cve-mcp/.env selects the offline CVE server (TALAHON_CVE_MCP=offline) but its \
+             database does not exist: run `talahon cve sync` once, and `talahon setup cve-sync` \
+             for the daily refresh"
+        }
+        "cve_db_stale" => {
+            "the offline CVE database is older than TALAHON_CVE_MAX_AGE_DAYS (see CHECK_CVE): the \
+             daily refresh is failing. Run `talahon cve sync` and read its ERROR line; check \
+             `systemctl --user status talahon-cve-sync.timer` and that the host reaches \
+             nvd.nist.gov, epss.empiricalsecurity.com and www.cisa.gov on port 443"
+        }
+        "cve_db_unreadable" => {
+            "the offline CVE database cannot be read or was written by another version: run \
+             `talahon cve sync --full`"
+        }
         _ => "see the blocks above",
     }
 }
@@ -573,6 +588,30 @@ fn audit_block(config: &TalonConfig) -> Option<(StatusBlock, Vec<String>)> {
     }
 }
 
+/// `CHECK_CVE`: the offline vulnerability database, when the installation
+/// uses it. `None` when `cve-mcp/.env` does not select the offline CVE
+/// server and no database exists (nothing to check).
+///
+/// A missing, unreadable or stale database is an issue only when the
+/// offline server is selected (`OFFLINE_SELECTED: true`); otherwise the
+/// block is informational.
+pub fn cve_block(
+    config: &TalonConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<(StatusBlock, Vec<String>)> {
+    let selected = crate::cve_cmd::offline_selected(&config.project_root);
+    let (mut block, issue) = crate::cve_cmd::status_block(config, now);
+    if !selected && issue == Some("cve_db_missing") {
+        return None;
+    }
+    block.set("OFFLINE_SELECTED", selected);
+    let issues = match issue {
+        Some(issue) if selected => vec![issue.to_string()],
+        _ => Vec::new(),
+    };
+    Some((block, issues))
+}
+
 /// The final `DOCTOR` block.
 pub fn summary_block(issues: &[String]) -> StatusBlock {
     let mut block = StatusBlock::new("DOCTOR").field("VERSION", crate::VERSION);
@@ -647,6 +686,11 @@ pub async fn run(project_root: &Path, config: &TalonConfig) -> i32 {
     if let Some((block, audit_issues)) = audit_block(config) {
         println!("{block}");
         issues.extend(audit_issues);
+    }
+
+    if let Some((block, cve_issues)) = cve_block(config, chrono::Utc::now()) {
+        println!("{block}");
+        issues.extend(cve_issues);
     }
 
     let mut seen = std::collections::HashSet::new();
@@ -1013,5 +1057,63 @@ mod tests {
 
         let many: Vec<String> = (0..60).map(|i| format!("g{i}")).collect();
         assert!(listed(&many).ends_with(",... (10 more)"));
+    }
+
+    #[test]
+    fn cve_block_reports_only_what_the_installation_uses() {
+        use talon_cve::store::{META_SYNCED_AT, Writer};
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            TalonConfig::from_env(dir.path(), talon_core::env::EnvFile::from_str_content(""));
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Online (the default), no database: nothing to say.
+        assert!(cve_block(&config, now).is_none());
+
+        // Offline selected, no database: an issue with a hint.
+        std::fs::create_dir_all(dir.path().join("cve-mcp/data")).unwrap();
+        std::fs::write(dir.path().join("cve-mcp/.env"), "TALAHON_CVE_MCP=offline\n").unwrap();
+        let (block, issues) = cve_block(&config, now).unwrap();
+        assert_eq!(block.get("STATUS"), Some("missing"));
+        assert_eq!(issues, ["cve_db_missing"]);
+        assert!(hint("cve_db_missing").contains("talahon cve sync"));
+
+        // A database synced yesterday is fine; one synced last week is stale.
+        let db = dir.path().join("cve-mcp/data/cve.sqlite");
+        let write = |synced: &str| {
+            let _ = std::fs::remove_file(&db);
+            let w = Writer::open(&db).unwrap();
+            w.set_meta(META_SYNCED_AT, synced).unwrap();
+            w.finish().unwrap();
+        };
+        write("2026-11-16T03:00:00Z");
+        let (block, issues) = cve_block(&config, now).unwrap();
+        assert_eq!(
+            (block.get("STATUS"), block.get("AGE_DAYS")),
+            (Some("ok"), Some("1"))
+        );
+        assert!(issues.is_empty());
+        write("2026-11-10T03:00:00Z");
+        let (block, issues) = cve_block(&config, now).unwrap();
+        assert_eq!(
+            (block.get("STATUS"), block.get("AGE_DAYS")),
+            (Some("stale"), Some("7"))
+        );
+        assert_eq!(issues, ["cve_db_stale"]);
+        assert!(hint("cve_db_stale").contains("nvd.nist.gov"));
+
+        // Not a database.
+        std::fs::write(&db, b"garbage").unwrap();
+        let (block, issues) = cve_block(&config, now).unwrap();
+        assert_eq!(block.get("STATUS"), Some("unreadable"));
+        assert_eq!(issues, ["cve_db_unreadable"]);
+
+        // Back to online: the stale file is shown but is no issue.
+        write("2026-11-10T03:00:00Z");
+        std::fs::write(dir.path().join("cve-mcp/.env"), "NVD_API_KEY=x\n").unwrap();
+        let (block, issues) = cve_block(&config, now).unwrap();
+        assert_eq!(block.get("OFFLINE_SELECTED"), Some("false"));
+        assert!(issues.is_empty());
     }
 }

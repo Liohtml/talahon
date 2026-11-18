@@ -59,7 +59,7 @@ pub enum Command {
     /// Run the orchestrator (default).
     Run,
     /// Run a setup step (`timezone`, `environment`, `vllm`, `container`,
-    /// `groups`, `register`, `mounts`, `egress`, `service`, `verify`).
+    /// `groups`, `register`, `mounts`, `egress`, `service`, `cve-sync`, `verify`).
     Setup(SetupArgs),
     /// Diagnose the environment: container runtime, image, vLLM, LLM
     /// gateway, directories, audit chain.
@@ -78,8 +78,38 @@ pub enum Command {
         #[command(subcommand)]
         command: EvalCommand,
     },
+    /// Offline vulnerability data (NVD, EPSS, CISA KEV) for the agent's
+    /// CVE server: download it, or show what the local copy holds.
+    Cve {
+        /// CVE subcommand.
+        #[command(subcommand)]
+        command: CveCommand,
+    },
     /// Print the version.
     Version,
+}
+
+/// `talahon cve` subcommands.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum CveCommand {
+    /// Download NVD, EPSS and CISA KEV and rebuild the local database
+    /// (`cve-mcp/data/cve.sqlite`). Contacts only `nvd.nist.gov`,
+    /// `epss.empiricalsecurity.com` and `www.cisa.gov`. Exit code 1 if the
+    /// run failed; the existing database is then unchanged.
+    Sync(CveSyncArgs),
+    /// Show what the local database holds and how old it is; exit code 1
+    /// if it is missing, unreadable or stale.
+    Status,
+}
+
+/// Arguments of `talahon cve sync`.
+#[derive(Debug, Args, PartialEq, Eq, Default)]
+pub struct CveSyncArgs {
+    /// Check every yearly NVD feed instead of only the changes of the last
+    /// eight days (done automatically on the first run and after a gap of
+    /// a week).
+    #[arg(long)]
+    pub full: bool,
 }
 
 /// `talahon eval` subcommands.

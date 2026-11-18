@@ -48,7 +48,9 @@ jobs:
           grep -qE '^ARG DEBIAN_IMAGE=.+@sha256:[0-9a-f]{64}$' container/Dockerfile
 
       - name: Wrappers read .env literally
-        run: ./container/test-load-env.sh
+        run: |
+          ./container/test-load-env.sh
+          ./container/test-cve-wrapper.sh
 
       - name: Build
         run: ./container/build.sh ci
@@ -61,6 +63,12 @@ jobs:
           run /usr/local/bin/talahon-anon-proxy --help >/dev/null
           run /usr/local/bin/talahon-opensearch-mcp --help >/dev/null
           run /usr/local/bin/talahon-mysql-mcp --help >/dev/null
+          run /usr/local/bin/talahon-cve-mcp --help >/dev/null
+          # Offline CVE server: without a database it must say so and fail,
+          # not hang or reach for the network (the container has none).
+          if run /usr/local/bin/talahon-cve-mcp --check 2>/dev/null; then
+            echo "talahon-cve-mcp --check succeeded without a database" >&2; exit 1
+          fi
           # The pre-rename names are symlinks to the same binaries (aliases
           # for one major version).
           for name in agent anon-proxy opensearch-mcp mysql-mcp entrypoint; do

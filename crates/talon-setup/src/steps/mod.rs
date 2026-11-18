@@ -2,6 +2,7 @@
 //! dispatcher the host CLI (`talahon setup <step> [args...]`) calls.
 
 pub mod container;
+pub mod cve_sync;
 pub mod egress;
 pub mod environment;
 pub mod groups;
@@ -87,13 +88,16 @@ pub enum Step {
     Egress,
     /// Install the systemd / launchd service (`SETUP_SERVICE`).
     Service,
+    /// Install the daily refresh of the offline CVE data (`SETUP_CVE_SYNC`).
+    /// Optional: only for installations that run the CVE server offline.
+    CveSync,
     /// End-to-end health report (`VERIFY`).
     Verify,
 }
 
 impl Step {
     /// All steps in the order the setup skill runs them.
-    pub const ALL: [Step; 10] = [
+    pub const ALL: [Step; 11] = [
         Step::Timezone,
         Step::Environment,
         Step::Vllm,
@@ -103,6 +107,7 @@ impl Step {
         Step::Mounts,
         Step::Egress,
         Step::Service,
+        Step::CveSync,
         Step::Verify,
     ];
 
@@ -118,6 +123,7 @@ impl Step {
             Step::Mounts => "mounts",
             Step::Egress => "egress",
             Step::Service => "service",
+            Step::CveSync => "cve-sync",
             Step::Verify => "verify",
         }
     }
@@ -152,6 +158,7 @@ pub async fn run_step(step: Step, args: &StepArgs, ctx: &SetupContext) -> StepOu
         Step::Mounts => mounts::run(args, ctx).await,
         Step::Egress => egress::run(args, ctx).await,
         Step::Service => service::run(args, ctx).await,
+        Step::CveSync => cve_sync::run(args, ctx).await,
         Step::Verify => verify::run(args, ctx).await,
     };
     match result {

@@ -189,6 +189,7 @@ Each crate lives in `crates/talon-*` and is published on crates.io as
 | `talon-anon` | [`talahon-anon`](https://crates.io/crates/talahon-anon) | PII anonymizer and `talahon-anon-proxy` |
 | `talon-mcp-opensearch` | [`talahon-mcp-opensearch`](https://crates.io/crates/talahon-mcp-opensearch) | Native read-only OpenSearch MCP server `talahon-opensearch-mcp` (opt-in) |
 | `talon-mcp-mysql` | [`talahon-mcp-mysql`](https://crates.io/crates/talahon-mcp-mysql) | Native MySQL MCP server `talahon-mysql-mcp` (opt-in) |
+| `talon-cve` | [`talahon-cve`](https://crates.io/crates/talahon-cve) | Offline CVE / EPSS / KEV database and MCP server `talahon-cve-mcp` (opt-in) |
 | `talon-security` | [`talahon-security`](https://crates.io/crates/talahon-security) | Injection guard, redaction, egress, mounts, senders, IPC authz, auth |
 | `talon-container` | [`talahon-container`](https://crates.io/crates/talahon-container) | Hardened docker/podman launcher, mounts, output parser |
 | `talon-net` | [`talahon-net`](https://crates.io/crates/talahon-net) | Hardened HTTP serving: header timeouts, connection caps |
@@ -358,7 +359,7 @@ container they are readable only by that server's user.
 | `wazuh-mcp/` | `bash wazuh-mcp/setup.sh` | `WAZUH_PROD_URL`, `WAZUH_PROD_USERNAME`, `WAZUH_PROD_PASSWORD` |
 | `velociraptor-mcp/` | `bash velociraptor-mcp/setup.sh` + `api.config.yaml` | Velociraptor API client config |
 | `shuffle-mcp/` *(optional)* | `bash shuffle-mcp/setup.sh` | `SHUFFLE_URL`, `SHUFFLE_API_KEY` |
-| `cve-mcp/` *(optional)* | `bash cve-mcp/setup.sh` | `NVD_API_KEY`, optional VirusTotal/Shodan/AbuseIPDB/GreyNoise/urlscan keys |
+| `cve-mcp/` *(optional)* | `bash cve-mcp/setup.sh` | `NVD_API_KEY`, optional VirusTotal/Shodan/AbuseIPDB/GreyNoise/urlscan keys; or `TALAHON_CVE_MCP=offline` (no keys, no internet) |
 | `mempalace/` *(optional)* | `bash mempalace/setup.sh` | — (local ChromaDB + SQLite in `mempalace-data/`) |
 
 The wrappers read these `.env` files literally; they are not shell scripts.
@@ -388,6 +389,21 @@ statements (connect and query timeouts, row and byte limits). Like the Python
 server it runs any single statement the database account may run, so what the
 agent can change is decided by that account's grants. TLS follows
 `MYSQL_SSL_MODE` (see [`mysql/.env.example`](mysql/.env.example)).
+
+`TALAHON_CVE_MCP=offline` in `cve-mcp/.env` (opt-in) replaces the online CVE
+server with `talahon-cve-mcp`, which answers CVE, EPSS and CISA KEV questions
+from a local database and makes no network connection. The host downloads the
+data once a day, so the agent network needs no internet access for it:
+
+```bash
+talahon cve sync                                   # first download: NVD, EPSS, CISA KEV
+talahon setup cve-sync                             # daily refresh (systemd user timer, no sudo)
+echo 'TALAHON_CVE_MCP=offline' >> cve-mcp/.env
+```
+
+The host needs outbound HTTPS to `nvd.nist.gov`, `epss.empiricalsecurity.com`
+and `www.cisa.gov`, and nothing else. Sizes, tools and details:
+[docs/CVE_OFFLINE.md](docs/CVE_OFFLINE.md).
 
 Services on the Talahon host are reachable from containers as
 `host.docker.internal`. Which servers a group uses, and as which user, is
@@ -472,10 +488,12 @@ interface if CoPilot runs on another host, and terminate TLS in front of it.
 |---|---|
 | `talahon run` | Run the service (default) |
 | `talahon doctor` | Diagnose runtime, image, vLLM, gateway, directories, audit chain |
-| `talahon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `egress`, `service`, `verify` |
+| `talahon setup <step>` | `timezone`, `environment`, `vllm`, `container`, `groups`, `register`, `mounts`, `egress`, `service`, `cve-sync`, `verify` |
 | `talahon audit verify` | Verify the audit chain, its MACs and the truncation checkpoint (exit code 1 on tampering) |
 | `talahon audit head` | Print the newest row's id, hash and sequence number, for anchoring off-host |
 | `talahon audit tail -n 50 --kind ipc.` | Recent audit events as JSON lines |
+| `talahon cve sync [--full]` | Download NVD, EPSS and CISA KEV into the offline CVE database ([docs/CVE_OFFLINE.md](docs/CVE_OFFLINE.md)) |
+| `talahon cve status` | What the offline CVE database holds and how old it is (exit code 1 if missing or outdated) |
 | `talahon eval score --reports <dir>` | Score saved verdicts against the golden set (offline) |
 | `talahon eval run` | Investigate every golden case through a running Talahon, then score |
 
@@ -613,6 +631,7 @@ to crates.io with the same version.
 | [docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md) | vLLM setup, model and parser choice, gateway settings |
 | [docs/COPILOT_INTEGRATION.md](docs/COPILOT_INTEGRATION.md) | CoPilot integration, MySQL schema, MCP tool reference |
 | [docs/ANON_PROXY.md](docs/ANON_PROXY.md) | Anonymizing proxy: flow, token types, `fields.yaml` |
+| [docs/CVE_OFFLINE.md](docs/CVE_OFFLINE.md) | Offline CVE / EPSS / KEV data: setup, firewall hosts, tools |
 | [groups/copilot/prompts/README.md](groups/copilot/prompts/README.md) | Writing investigation templates |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
 

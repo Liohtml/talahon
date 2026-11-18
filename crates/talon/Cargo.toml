@@ -40,6 +40,8 @@ talon-channels = { workspace = true }
 talon-http = { workspace = true }
 talon-intel = { workspace = true }
 talon-setup = { workspace = true }
+# `talahon cve sync`: importers and the database of the offline CVE data.
+talon-cve = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -62,6 +64,10 @@ tempfile = { workspace = true }
 # Tampering with the audit log behind talon-db's back (audit tests).
 rusqlite = { workspace = true }
 wiremock = { workspace = true }
+# Fixtures of the `talahon cve sync` tests (gzip, feed checksums).
+flate2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [lints]
 workspace = true

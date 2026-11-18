@@ -10,6 +10,8 @@
 //! | `talahon doctor` | environment, vLLM, container runtime and LLM gateway diagnostics |
 //! | `talahon audit verify` | recompute the hash-chained audit log |
 //! | `talahon audit tail [-n N] [--kind prefix]` | recent audit events as JSON lines |
+//! | `talahon cve sync [--full]` | download NVD, EPSS and CISA KEV into the offline CVE database |
+//! | `talahon cve status` | what the offline CVE database holds and how old it is |
 //! | `talahon eval score --reports DIR` | score saved reports against the golden set (`evals/golden/`) |
 //! | `talahon eval run` | investigate every golden case through a running Talahon, then score |
 //! | `talahon version` | print the version |
@@ -45,6 +47,7 @@ pub mod allowlist;
 pub mod app;
 pub mod audit_cmd;
 pub mod cli;
+pub mod cve_cmd;
 pub mod doctor;
 pub mod entry;
 pub mod eval_cmd;
