@@ -148,10 +148,8 @@ impl FeedMeta {
                 "lastModifiedDate" => last_modified = clip(value, 64),
                 "size" => size = value.parse::<u64>().ok(),
                 "gzSize" => gz_size = value.parse::<u64>().ok(),
-                "sha256" => {
-                    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        sha256 = Some(value.to_ascii_lowercase());
-                    }
+                "sha256" if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                    sha256 = Some(value.to_ascii_lowercase());
                 }
                 _ => {}
             }
