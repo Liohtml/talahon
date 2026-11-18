@@ -10,6 +10,10 @@ on:
     branches: [main]
     paths:
       - "container/**"
+      - "*-mcp/**"
+      - "siem/**"
+      - "mysql/**"
+      - "mempalace/**"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -43,6 +47,9 @@ jobs:
           grep -qE '^ARG RUST_IMAGE=.+@sha256:[0-9a-f]{64}$' container/Dockerfile
           grep -qE '^ARG DEBIAN_IMAGE=.+@sha256:[0-9a-f]{64}$' container/Dockerfile
 
+      - name: Wrappers read .env literally
+        run: ./container/test-load-env.sh
+
       - name: Build
         run: ./container/build.sh ci
 
@@ -72,5 +79,9 @@ jobs:
           test "$(ver mysql-mcp mysql-mcp-server)" = "$MYSQL_MCP_VERSION"
           test "$(ver mempalace mempalace)" = "$MEMPALACE_VERSION"
           test "$(ver mempalace chromadb)" = "$CHROMADB_VERSION"
+          test "$(ver cve-mcp mcp)" = "$CVE_MCP_SDK_VERSION"
+          # The CVE server imports against the SDK it was written for (an
+          # unpinned 2.x SDK broke it at import, with every other check green).
+          run /opt/cve-mcp/bin/python3 -c 'import cve_mcp.server'
           # No privilege-escalation helper, no setuid binaries.
           run /bin/sh -c '! command -v sudo && test -z "$(find / -xdev -perm /6000 -type f 2>/dev/null)"'

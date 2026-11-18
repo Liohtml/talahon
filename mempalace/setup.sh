@@ -87,6 +87,8 @@ fi
 # ── .env ─────────────────────────────────────────────────────────────────────
 ENV_FILE="$SCRIPT_DIR/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
+    # No credentials in here, and the host palace one-shot reads it as uid
+    # 61008, so it keeps the default mode.
     cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
     echo ""
     echo "  Created .env from template."

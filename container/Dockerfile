@@ -116,6 +116,7 @@ RUN . /tmp/mcp-versions.env \
 RUN . /tmp/mcp-versions.env \
     && python3 -m venv /opt/cve-mcp \
     && /opt/cve-mcp/bin/pip install --quiet \
+       "mcp[cli]==${CVE_MCP_SDK_VERSION}" \
        "git+https://github.com/mukul975/cve-mcp-server.git@${CVE_MCP_REF}"
 
 # MemPalace (semantic memory; chromadb is large — keep this layer last).

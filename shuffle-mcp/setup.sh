@@ -61,7 +61,9 @@ echo "shuffle-mcp-server installed  ✓"
 
 # ── .env ─────────────────────────────────────────────────────────────────────
 if [[ ! -f "$ENV_FILE" ]]; then
-    cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
+    # Credentials: readable by the owner only, from the first byte on.
+    (umask 077 && cp "$SCRIPT_DIR/.env.example" "$ENV_FILE")
+    chmod 600 "$ENV_FILE"
     echo ""
     echo "  Created .env from template."
     echo "  ➜ Edit $ENV_FILE with your Shuffle API key."
