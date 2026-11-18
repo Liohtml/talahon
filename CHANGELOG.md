@@ -2,6 +2,10 @@
 
 All notable changes to Talon are documented in this file.
 
+## [3.2.0] - 2026-11-18
+
+- feat(cve): offline CVE data, synced by the host and read by a local MCP server (#24)
+
 ## [3.1.0] - 2026-11-18
 
 - docs: replace the Talon bird with the Talahon logo (#23)

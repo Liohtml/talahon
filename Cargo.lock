@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "talahon"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1998,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-agent"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-anon"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-channels"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-container"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2094,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-core"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-cve"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-db"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "chrono",
  "hex",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-http"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-intel"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-ipc"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-llm"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2263,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-mcp"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-mcp-mysql"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "async-trait",
  "mysql_async",
@@ -2297,7 +2297,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-mcp-opensearch"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-net"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "axum",
  "http",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-router"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-scheduler"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-security"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -2393,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-setup"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "talahon-tools"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
