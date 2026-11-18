@@ -2,6 +2,14 @@
 
 All notable changes to Talon are documented in this file.
 
+## [3.1.0] - 2026-11-18
+
+- docs: replace the Talon bird with the Talahon logo (#23)
+- feat(http): serve /v2/health, its history and metrics for CoPilot's health dashboard (#20)
+- fix(setup): first-install papercuts (private CA, egress, doctor, setup.log) (#21)
+- feat(orchestrator): keep copies of MEMORY.md from before each run (#22)
+- fix(mcp): pin the CVE server's MCP SDK, read wrapper .env files literally (#19)
+
 ## [3.0.0] - 2026-11-12
 
 - feat!: rename the user-facing surface from Talon to Talahon; group instructions in AGENT.md (#18)
