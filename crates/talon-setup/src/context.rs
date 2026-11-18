@@ -212,10 +212,13 @@ impl SetupContext {
 
     /// Append a titled section to `logs/setup.log` (best effort).
     ///
-    /// A root run (`sudo talahon setup egress --apply`) hands a `logs/`
-    /// directory or log file it had to create over to the owner of the
-    /// project directory; otherwise the later steps, run as that user, could
-    /// no longer append.
+    /// A root run (`sudo talahon setup egress --apply`) writes only to a
+    /// regular `setup.log` inside a real `logs/` directory: the project
+    /// directory is writable by its unprivileged owner, so a symlink at
+    /// either name is refused with a warning instead of being written
+    /// through. It then hands a `logs/` directory or log file it had to
+    /// create over to the owner of the project directory; otherwise the
+    /// later steps, run as that user, could no longer append.
     pub fn append_log(&self, title: &str, body: &str) {
         use std::io::Write;
         let dir = self.logs_dir();
@@ -223,17 +226,18 @@ impl SetupContext {
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
-        let path = dir.join("setup.log");
+        let entry = format!("--- {} {title} ---\n{body}\n", talon_core::time::now_iso());
+        #[cfg(unix)]
+        if self.platform.is_root() {
+            owner::append_as_root(&self.project_root, &dir, !dir_existed, &entry);
+            return;
+        }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(dir.join("setup.log"))
         {
-            let _ = writeln!(f, "--- {} {title} ---\n{body}", talon_core::time::now_iso());
-            #[cfg(unix)]
-            if self.platform.is_root() {
-                owner::hand_over_log(&self.project_root, &dir, !dir_existed, &path, &f);
-            }
+            let _ = f.write_all(entry.as_bytes());
         }
     }
 
@@ -276,12 +280,18 @@ impl SetupContext {
     }
 }
 
-/// Ownership of the setup log after a root run.
+/// Writing the setup log as root, and its ownership afterwards.
 #[cfg(unix)]
 mod owner {
     use std::fs::{File, Metadata};
-    use std::os::unix::fs::{MetadataExt, fchown, lchown};
+    use std::io::{self, Write};
+    use std::os::unix::fs::{MetadataExt, fchown};
     use std::path::Path;
+
+    use rustix::fs::{self as rfs, Mode, OFlags};
+
+    /// The log file's name inside `logs/`.
+    const LOG_FILE: &str = "setup.log";
 
     /// What matters about a file for the hand-over decision.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,42 +319,88 @@ mod owner {
             .then_some(project_owner)
     }
 
-    /// Give `log` (open as `file`) and, when this run created it, `dir` to
-    /// the owner of `project_root`. Best effort, and deliberately narrow:
-    /// the project directory is writable by an unprivileged user, so this
-    /// must not become a way to have root chown something else. The file is
-    /// changed through the open handle, after checking that the path is not
-    /// a symlink and still names that same inode; the directory with
-    /// `lchown`, which does not follow symlinks.
-    pub(super) fn hand_over_log(
-        project_root: &Path,
-        dir: &Path,
-        dir_created: bool,
-        log: &Path,
-        file: &File,
-    ) {
+    /// Open `dir` and `dir/setup.log` (for appending, created with mode
+    /// `0o644` before umask) without following a symlink at either name:
+    /// `dir` itself must be a real directory, not a symlink to one, and the
+    /// file is opened relative to that handle with `O_NOFOLLOW`, so a
+    /// swapped path cannot redirect it. `O_NONBLOCK` keeps a FIFO from
+    /// blocking the open. Returns the directory handle and the file.
+    ///
+    /// # Errors
+    /// `dir` is a symlink or not a directory, `setup.log` is a symlink or
+    /// not a regular file, or either cannot be opened.
+    pub(super) fn open_log_nofollow(dir: &Path) -> io::Result<(File, File)> {
+        let dir = File::from(rfs::open(
+            dir,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+        let log = File::from(rfs::openat(
+            &dir,
+            LOG_FILE,
+            OFlags::WRONLY
+                | OFlags::APPEND
+                | OFlags::CREATE
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::NOCTTY
+                | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o644),
+        )?);
+        if !log.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        Ok((dir, log))
+    }
+
+    /// Append `entry` to `<dir>/setup.log` as root, then hand the file and,
+    /// when this run created it, `dir` to the owner of `project_root`. A
+    /// `logs/` or `setup.log` that [`open_log_nofollow`] refuses (a symlink,
+    /// say) gets neither the entry nor an ownership change, only a warning;
+    /// the step itself carries on.
+    pub(super) fn append_as_root(project_root: &Path, dir: &Path, dir_created: bool, entry: &str) {
+        let (dir_handle, mut log) = match open_log_nofollow(dir) {
+            Ok(handles) => handles,
+            Err(e) => {
+                tracing::warn!(
+                    log = %dir.join(LOG_FILE).display(),
+                    error = %e,
+                    "not writing the setup log as root: logs/ must be a real directory and \
+                     logs/setup.log a regular file, neither a symlink"
+                );
+                return;
+            }
+        };
+        let _ = log.write_all(entry.as_bytes());
+        hand_over(project_root, &dir_handle, dir_created, &log);
+    }
+
+    /// Give `log` and, when `dir_created`, `dir` (handles from
+    /// [`open_log_nofollow`]) to the owner of `project_root`. Best effort,
+    /// and deliberately narrow: the project directory is writable by an
+    /// unprivileged user, so this must not become a way to have root chown
+    /// something else. Ownership changes only through the handles, which
+    /// name the real `logs/` directory and the regular file in it.
+    fn hand_over(project_root: &Path, dir: &File, dir_created: bool, log: &File) {
         let Ok(root) = std::fs::metadata(project_root) else {
             return;
         };
         let project_owner = (root.uid(), root.gid());
-        let (Ok(open), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(log)) else {
+        let Ok(open) = log.metadata() else {
             return;
         };
-        let same_file = !named.file_type().is_symlink()
-            && named.dev() == open.dev()
-            && named.ino() == open.ino();
-        if !same_file {
-            return;
-        }
         let Some((uid, gid)) = new_owner(project_owner, Facts::of(&open)) else {
             return;
         };
-        if let Err(e) = fchown(file, Some(uid), Some(gid)) {
+        if let Err(e) = fchown(log, Some(uid), Some(gid)) {
             tracing::debug!(error = %e, "could not hand logs/setup.log to the project owner");
             return;
         }
-        if dir_created && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == 0) {
-            let _ = lchown(dir, Some(uid), Some(gid));
+        if dir_created && dir.metadata().is_ok_and(|m| m.is_dir() && m.uid() == 0) {
+            let _ = fchown(dir, Some(uid), Some(gid));
         }
     }
 }
@@ -413,6 +469,91 @@ mod tests {
         assert_eq!(log.matches(" egress ---").count(), 2, "{log}");
         let owner = std::fs::metadata(dir.path()).unwrap().uid();
         assert_eq!(std::fs::metadata(&path).unwrap().uid(), owner);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_opens_the_log_only_as_a_regular_file_in_a_real_logs_dir() {
+        use super::owner::open_log_nofollow;
+        use std::io::Write;
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let mkdir = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::create_dir(&p).unwrap();
+            p
+        };
+
+        // Normal case: created on first use, appended to afterwards.
+        let logs = mkdir("logs");
+        open_log_nofollow(&logs)
+            .unwrap()
+            .1
+            .write_all(b"one\n")
+            .unwrap();
+        open_log_nofollow(&logs)
+            .unwrap()
+            .1
+            .write_all(b"two\n")
+            .unwrap();
+        let text = std::fs::read_to_string(logs.join("setup.log")).unwrap();
+        assert_eq!(text, "one\ntwo\n");
+
+        // `logs` is a symlink to another directory: refused, whether or not
+        // that directory already has a setup.log.
+        let etc = mkdir("etc");
+        let linked = dir.path().join("linked-logs");
+        symlink(&etc, &linked).unwrap();
+        assert!(open_log_nofollow(&linked).is_err());
+        assert!(!etc.join("setup.log").exists());
+        std::fs::write(etc.join("setup.log"), "victim\n").unwrap();
+        assert!(open_log_nofollow(&linked).is_err());
+        assert_eq!(
+            std::fs::read_to_string(etc.join("setup.log")).unwrap(),
+            "victim\n"
+        );
+
+        // `setup.log` is a symlink: refused, and a dangling one does not
+        // create its target.
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "victim\n").unwrap();
+        let logs = mkdir("logs-file-link");
+        symlink(&victim, logs.join("setup.log")).unwrap();
+        assert!(open_log_nofollow(&logs).is_err());
+        let logs = mkdir("logs-dangling-link");
+        let target = dir.path().join("new-target");
+        symlink(&target, logs.join("setup.log")).unwrap();
+        assert!(open_log_nofollow(&logs).is_err());
+        assert!(!target.exists());
+
+        // A FIFO neither blocks the open nor is accepted.
+        let logs = mkdir("logs-fifo");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            logs.join("setup.log"),
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .unwrap();
+        assert!(open_log_nofollow(&logs).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_log_as_pretend_root_does_not_write_through_a_symlinked_logs_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let elsewhere = dir.path().join("etc");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, project.join("logs")).unwrap();
+        let mut ctx = SetupContext::new(&project, &project, Arc::new(MockRunner::new()));
+        ctx.platform.uid = Some(0);
+        ctx.append_log("egress", "applied");
+        assert!(!elsewhere.join("setup.log").exists());
+        // An unprivileged run may keep logs/ elsewhere, as before.
+        ctx.platform.uid = Some(1000);
+        ctx.append_log("egress", "applied");
+        assert!(elsewhere.join("setup.log").exists());
     }
 
     #[test]

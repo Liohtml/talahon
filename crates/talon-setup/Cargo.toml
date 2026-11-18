@@ -30,6 +30,12 @@ regex = { workspace = true }
 # Private (0700) directory for the nftables ruleset applied by `egress --apply`.
 tempfile = { workspace = true }
 
+# A root run opens logs/setup.log relative to an `O_NOFOLLOW` handle of
+# logs/ (no `unsafe`, no libc FFI in our code; same crate and features as
+# talon-security, so nothing new is built).
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+
 [dev-dependencies]
 wiremock = { workspace = true }
 
