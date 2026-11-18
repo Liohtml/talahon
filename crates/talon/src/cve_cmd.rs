@@ -666,7 +666,6 @@ pub fn offline_selected(project_root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
 
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
