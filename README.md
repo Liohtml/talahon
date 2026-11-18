@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/talon-final-512.png" alt="Talahon" width="220">
+<img src="assets/talahon-logo-512.png" alt="Talahon" width="220">
 
 # Talahon
 
