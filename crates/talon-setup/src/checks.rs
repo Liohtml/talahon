@@ -157,8 +157,8 @@ pub enum VllmStatus {
     NotConfigured,
     /// The base URL is not a valid http(s) URL.
     InvalidUrl,
-    /// `TALAHON_VLLM_CA_FILE` / `TALAHON_ANTHROPIC_CA_FILE` cannot be read
-    /// or holds no certificate.
+    /// `TALAHON_VLLM_CA_FILE` / `TALAHON_ANTHROPIC_CA_FILE` cannot be read,
+    /// holds no certificate, or holds certificate data that cannot be used.
     InvalidCaFile,
     /// Connection failed or timed out.
     Unreachable,
@@ -362,8 +362,23 @@ pub async fn check_provider_with_ca(
     }
     let client = match builder.build() {
         Ok(c) => c,
+        // With a CA bundle, a failure here means its blocks parsed as PEM
+        // but hold no usable certificate (bad DER): a CA file problem, not
+        // a connection one.
         Err(e) => {
-            return VllmCheck::status(VllmStatus::Unreachable, Some(e.without_url().to_string()));
+            return match ca_file {
+                Some(path) => VllmCheck::status(
+                    VllmStatus::InvalidCaFile,
+                    Some(format!(
+                        "CA bundle {}: unusable certificate data: {}",
+                        path.display(),
+                        error_chain(e)
+                    )),
+                ),
+                None => {
+                    VllmCheck::status(VllmStatus::Unreachable, Some(e.without_url().to_string()))
+                }
+            };
         }
     };
     let mut req = client.get(&url).header("accept", "application/json");
@@ -784,6 +799,29 @@ mod tests {
                 .unwrap_or_default()
                 .contains("contains no certificate")
         );
+
+        // Valid PEM framing around bytes that are no certificate: rejected
+        // when the client is built, still a CA file problem.
+        let garbage = dir.path().join("garbage.pem");
+        std::fs::write(
+            &garbage,
+            "-----BEGIN CERTIFICATE-----\nAAECAwQFBgcICQoLDA0ODw==\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let r = check_provider_with_ca(
+            ProviderKind::Vllm,
+            &server.uri(),
+            "m",
+            None,
+            None,
+            Some(&garbage),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(r.status, VllmStatus::InvalidCaFile, "{:?}", r.error);
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("garbage.pem"), "{err}");
+        assert!(err.contains("unusable certificate data"), "{err}");
     }
 
     #[tokio::test]
