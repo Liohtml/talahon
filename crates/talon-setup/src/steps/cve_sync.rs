@@ -58,8 +58,7 @@ pub fn service_unit(
          TimeoutStartSec=3h\n\
          Nice=10\n\
          IOSchedulingClass=idle\n\
-         NoNewPrivileges=yes\n\
-         PrivateTmp=yes\n"
+         NoNewPrivileges=yes\n"
     ))
 }
 

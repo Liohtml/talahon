@@ -293,8 +293,8 @@ pub fn cpe_vendor_product(criteria: &str) -> Option<(String, String)> {
     if fields.len() < 5 || fields[0] != "cpe" || fields[1] != "2.3" {
         return None;
     }
-    let vendor = fields[3].to_lowercase();
-    let product = fields[4].to_lowercase();
+    let vendor = clip(&fields[3].to_lowercase(), 100);
+    let product = clip(&fields[4].to_lowercase(), 100);
     if matches!(vendor.as_str(), "" | "*" | "-") || matches!(product.as_str(), "" | "*" | "-") {
         return None;
     }
@@ -374,7 +374,8 @@ fn record_of(raw: RawCve) -> CveRecord {
         // NVD repeats a link once per source; merge the tags.
         if let Some(existing) = references.iter_mut().find(|e| e.url == r.url) {
             for tag in r.tags {
-                if !existing.tags.contains(&tag) {
+                let tag = clip(&tag, 40);
+                if existing.tags.len() < 8 && !existing.tags.contains(&tag) {
                     existing.tags.push(tag);
                 }
             }
