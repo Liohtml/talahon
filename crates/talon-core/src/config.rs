@@ -53,7 +53,10 @@ pub struct TalonConfig {
 
     /// Host LLM gateway listen port (containers reach vLLM through it).
     pub llm_gateway_port: u16,
-    /// Bind address for host-side services containers must reach.
+    /// `TALAHON_LLM_GATEWAY_BIND`, or `127.0.0.1` as a placeholder while it
+    /// is unset: the host then binds the container bridge address it
+    /// detects at startup (`talahon setup` / `talahon doctor` fill this
+    /// field with that address).
     pub llm_gateway_bind: String,
     pub onecli_url: String,
 

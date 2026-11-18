@@ -255,7 +255,10 @@ egress firewall and service installation, which a production setup needs.
 
 ### Prerequisites
 
-- Linux host (macOS works for development) with Docker or Podman
+- Linux host (macOS works for development) with Docker or Podman. Docker
+  needs the buildx plugin to build the agent image; distribution packages
+  ship it separately (Debian/Ubuntu: `docker-buildx` next to `docker.io`,
+  `docker-buildx-plugin` with Docker's own repository)
 - Rust 1.89+ (`rustup`) to build the host binary
 - A **vLLM** server reachable from the host ([docs/PROVIDER_SELECTION.md](docs/PROVIDER_SELECTION.md))
 - OpenSearch/Wazuh SIEM and a [CoPilot](https://github.com/Liohtml/CoPilot) instance with its MySQL/MariaDB database
@@ -406,12 +409,25 @@ sudo talahon setup egress --apply --allow ...                          # same ar
 ```
 
 Without `--allow` the rules block private address ranges and keep internet
-egress (`--keep-internet` combines both).
+egress (`--keep-internet` combines both). To cut agents off from everything
+except the LLM gateway when there is no destination to allow (yet), pass
+`--deny-all`: allowlist mode with an empty list.
 
 > [!NOTE]
 > The rules don't survive a reboot on their own. Add `--persist` to the
 > `--apply` call (systemd hosts): it installs `talahon-egress.service`, which
 > re-applies the same rules at every boot. `--uninstall --apply` removes it.
+
+> [!IMPORTANT]
+> Host firewall with a default-deny input policy (ufw, firewalld, your own
+> nftables rules)? The egress rules only restrict traffic; they never accept
+> anything past other rules. Agent containers reach the LLM gateway on the
+> host through the `br-talon` bridge, so allow that yourself, for example
+> `sudo ufw allow in on br-talon to any port 3001 proto tcp`. Otherwise
+> every agent run times out connecting to the gateway. The gateway listens
+> on the address of the runtime's default bridge (e.g. `172.17.0.1`, shown
+> as `GATEWAY_BIND` by `talahon setup environment` and as `BIND` in
+> `talahon doctor`), not on the `br-talon` address.
 
 ### 7. Register groups and install the service
 
@@ -422,6 +438,14 @@ talahon setup register --jid http:copilot --name CoPilot --folder copilot \
 talahon setup service                     # systemd user unit (hardened) or launchd plist
 talahon doctor                            # everything in one report
 ```
+
+> [!NOTE]
+> If you added your user to the `docker` group only shortly before, the
+> running systemd user manager does not have the group yet: the step reports
+> `DOCKER_GROUP_STALE: true`, and the service fails with "permission denied"
+> on the docker socket. Restart the user manager
+> (`sudo systemctl restart user@$(id -u).service`, which also restarts your
+> other user services) or reboot, then run `talahon setup service` again.
 
 Manual alternative: `systemctl --user enable --now talahon` with
 `ExecStart=/usr/local/bin/talahon run` and `WorkingDirectory=/opt/talahon`, or

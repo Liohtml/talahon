@@ -98,6 +98,7 @@ it is invisible to `docker inspect` and to tool subprocesses. The gateway:
 | `TALAHON_VLLM_ENABLE_THINKING` | — | `chat_template_kwargs.enable_thinking` |
 | `TALAHON_VLLM_TIMEOUT_SECS` | — | per-request timeout |
 | `TALAHON_VLLM_API_KEY` | — | secret; read from `.env` only, held by the gateway |
+| `TALAHON_VLLM_CA_FILE` | — | PEM bundle of CA certificates trusted for the upstream in addition to the built-in roots, for an `https://` upstream behind a private CA (absolute, or relative to the project directory). Used by the gateway, `talahon setup vllm` and `talahon doctor`; an unreadable or empty file is an error (`invalid_ca_file`), never ignored. `TALAHON_ANTHROPIC_CA_FILE` is the same for the Anthropic provider |
 | `TALAHON_LLM_GATEWAY_PORT` | 3001 | gateway port |
 | `TALAHON_LLM_GATEWAY_BIND` | auto | override the auto-detected bind address |
 | `TALAHON_LLM_GATEWAY_RPM` | 120 | requests per minute per run token (`0` disables) |

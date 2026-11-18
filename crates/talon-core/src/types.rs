@@ -99,6 +99,16 @@ impl ProviderKind {
             ProviderKind::Vllm | ProviderKind::Unsupported => "TALAHON_VLLM_API_KEY",
         }
     }
+
+    /// The `.env` key naming a PEM bundle of extra CA certificates trusted
+    /// for this provider's upstream (an HTTPS endpoint behind a private CA).
+    /// Read only by the host (gateway, setup, doctor).
+    pub fn ca_file_env(&self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "TALAHON_ANTHROPIC_CA_FILE",
+            ProviderKind::Vllm | ProviderKind::Unsupported => "TALAHON_VLLM_CA_FILE",
+        }
+    }
 }
 
 /// Connection + sampling settings of the configured model provider.

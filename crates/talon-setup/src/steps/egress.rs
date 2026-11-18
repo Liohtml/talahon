@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! talahon setup egress [--apply [--persist]] [--uninstall] [--allow <cidr[:port]>]...
-//!                    [--keep-internet] [--gateway-port N] [--nft|--iptables]
+//!                    [--keep-internet | --deny-all] [--gateway-port N] [--nft|--iptables]
 //! ```
 //!
 //! Agent containers run on the dedicated docker network [`AGENT_NETWORK`]
@@ -24,9 +24,10 @@
 //!    metadata service `169.254.169.254`, `169.254.0.0/16`, `fe80::/10`,
 //!    AWS's `fd00:ec2::254`) are always dropped; established/related
 //!    traffic and the `--allow` destinations pass; then
-//!    - **allowlist mode** (the default when `--allow` is given): everything
-//!      else is dropped — agents reach only the listed destinations and the
-//!      LLM gateway;
+//!    - **allowlist mode** (the default when `--allow` is given, or
+//!      `--deny-all` for an installation without any destination to allow):
+//!      everything else is dropped — agents reach only the listed
+//!      destinations and the LLM gateway;
 //!    - **block-private mode** (no `--allow`, or `--keep-internet`):
 //!      private destinations ([`PRIVATE_DESTINATIONS`]: RFC 1918, CGNAT,
 //!      ULA) are dropped and internet egress is kept.
@@ -1116,6 +1117,9 @@ pub struct EgressOptions {
     pub allow: Vec<AllowEntry>,
     /// `--keep-internet`: block-private mode even with `--allow`.
     pub keep_internet: bool,
+    /// `--deny-all`: allowlist mode even without `--allow` — agents reach
+    /// only the LLM gateway (plus any `--allow` destinations).
+    pub deny_all: bool,
     /// `--persist`: with `--apply`, install the boot-time unit as well.
     pub persist: bool,
 }
@@ -1143,6 +1147,7 @@ impl EgressOptions {
             gateway_port: default_gateway_port,
             allow: Vec::new(),
             keep_internet: false,
+            deny_all: false,
             persist: false,
         };
         let err = |code: &'static str, value: &str| ArgError {
@@ -1156,6 +1161,7 @@ impl EgressOptions {
                 "--apply" => opts.apply = true,
                 "--uninstall" => opts.action = EgressAction::Uninstall,
                 "--keep-internet" => opts.keep_internet = true,
+                "--deny-all" => opts.deny_all = true,
                 "--persist" => opts.persist = true,
                 "--nft" | "--iptables" => {
                     let b = if arg == "--nft" {
@@ -1186,6 +1192,9 @@ impl EgressOptions {
             }
             i += 1;
         }
+        if opts.deny_all && opts.keep_internet {
+            return Err(err("conflicting_modes", "--deny-all"));
+        }
         if opts.persist && (!opts.apply || opts.action == EgressAction::Uninstall) {
             return Err(err("persist_requires_apply", "--persist"));
         }
@@ -1194,7 +1203,12 @@ impl EgressOptions {
 
     /// The policy these options describe.
     pub fn policy(&self) -> EgressPolicy {
-        EgressPolicy::new(self.allow.clone(), self.gateway_port, self.keep_internet)
+        let mut policy =
+            EgressPolicy::new(self.allow.clone(), self.gateway_port, self.keep_internet);
+        if self.deny_all {
+            policy.mode = EgressMode::Allowlist;
+        }
+        policy
     }
 
     /// Canonical arguments reproducing these options with `--apply`.
@@ -1212,6 +1226,10 @@ impl EgressOptions {
         }
         if self.keep_internet && !self.allow.is_empty() {
             args.push("--keep-internet".into());
+        }
+        // Without it an empty allow list would re-apply as block-private.
+        if self.deny_all && self.allow.is_empty() {
+            args.push("--deny-all".into());
         }
         args
     }
@@ -1369,7 +1387,8 @@ fn outcome(script: &str, block: StatusBlock, exit_code: i32) -> StepOutcome {
 /// Run the step.
 ///
 /// Arguments: `--apply`, `--persist`, `--uninstall`, `--allow <cidr[:port]>`
-/// (repeatable), `--keep-internet`, `--gateway-port N`, `--nft` | `--iptables`.
+/// (repeatable), `--keep-internet` | `--deny-all`, `--gateway-port N`,
+/// `--nft` | `--iptables`.
 ///
 /// Exit codes: 0 printed / applied, 1 apply failed or needs root, 4 invalid
 /// arguments.

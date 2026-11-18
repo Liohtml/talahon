@@ -630,6 +630,61 @@ fn options_parse_everything() {
 }
 
 #[test]
+fn deny_all_is_allowlist_mode_without_destinations() {
+    let o = parse(&["--deny-all"]).unwrap();
+    assert!(o.deny_all);
+    let policy = o.policy();
+    assert_eq!(policy.mode, EgressMode::Allowlist);
+    assert!(policy.allow.is_empty());
+    // Internet and private destinations are both closed.
+    assert!(!policy.permits(ip("8.8.8.8"), 443));
+    assert!(!policy.permits(ip("10.0.0.5"), 9200));
+    // The persisted / sudo command line keeps the mode.
+    assert_eq!(
+        o.apply_args(Backend::Nft),
+        vec!["--apply", "--nft", "--gateway-port", "3001", "--deny-all"]
+    );
+    assert_eq!(
+        parse(&["--apply", "--nft", "--gateway-port", "3001", "--deny-all"])
+            .unwrap()
+            .policy(),
+        policy
+    );
+
+    // The forward chain ends in a drop, without the block-private accepts.
+    let ruleset = nft_ruleset(&policy, EgressAction::Install);
+    let block_private = nft_ruleset(&private_policy(), EgressAction::Install);
+    assert_ne!(ruleset, block_private);
+    assert_eq!(
+        ruleset,
+        nft_ruleset(
+            &EgressPolicy {
+                mode: EgressMode::Allowlist,
+                ..private_policy()
+            },
+            EgressAction::Install
+        )
+    );
+    let script = render_script(&policy, Backend::Nft, EgressAction::Install);
+    assert!(script.contains("Mode allowlist"), "{script}");
+
+    // With destinations it is the mode --allow selects anyway.
+    let o = parse(&["--deny-all", "--allow", "10.0.0.5:9200"]).unwrap();
+    assert_eq!(o.policy().mode, EgressMode::Allowlist);
+    assert_eq!(
+        o.apply_args(Backend::Nft),
+        vec![
+            "--apply",
+            "--nft",
+            "--gateway-port",
+            "3001",
+            "--allow",
+            "10.0.0.5/32:9200"
+        ]
+    );
+}
+
+#[test]
 fn options_reject_bad_input() {
     for (args, code, value) in [
         (vec!["--alow", "10.0.0.5"], "unknown_argument", "--alow"),
@@ -652,6 +707,16 @@ fn options_reject_bad_input() {
             vec!["--nft", "--iptables"],
             "conflicting_backends",
             "--iptables",
+        ),
+        (
+            vec!["--deny-all", "--keep-internet"],
+            "conflicting_modes",
+            "--deny-all",
+        ),
+        (
+            vec!["--keep-internet", "--allow", "10.0.0.5", "--deny-all"],
+            "conflicting_modes",
+            "--deny-all",
         ),
     ] {
         let err = parse(&args).unwrap_err();

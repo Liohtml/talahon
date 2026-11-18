@@ -2375,6 +2375,7 @@ dependencies = [
  "chrono",
  "regex",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "talahon-core",

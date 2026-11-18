@@ -59,7 +59,7 @@ pub enum Command {
     /// Run the orchestrator (default).
     Run,
     /// Run a setup step (`timezone`, `environment`, `vllm`, `container`,
-    /// `groups`, `register`, `mounts`, `service`, `verify`).
+    /// `groups`, `register`, `mounts`, `egress`, `service`, `verify`).
     Setup(SetupArgs),
     /// Diagnose the environment: container runtime, image, vLLM, LLM
     /// gateway, directories, audit chain.
@@ -171,6 +171,7 @@ pub struct SetupArgs {
     /// Step name.
     pub step: String,
     /// Step arguments, passed through verbatim (e.g. `--tz Europe/Berlin`).
+    /// `--project-root DIR` is accepted here too.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
 }
@@ -199,6 +200,34 @@ impl Cli {
     /// The subcommand to run (`run` when none was given).
     pub fn command(&self) -> &Command {
         self.command.as_ref().unwrap_or(&Command::Run)
+    }
+
+    /// Honour `--project-root DIR` / `--project-root=DIR` written among a
+    /// setup step's arguments. `setup` passes everything from the first
+    /// step argument on to the step verbatim, so clap does not see the
+    /// global option there and the step would reject it as an unknown
+    /// argument — although the same position works for every other
+    /// subcommand. The option is removed
+    /// from the step arguments; the last occurrence wins, also over one
+    /// given before `setup` or through the environment. An occurrence
+    /// without a value is left for the step to reject.
+    pub fn lift_setup_project_root(&mut self) {
+        const FLAG: &str = "--project-root";
+        let Some(Command::Setup(setup)) = &mut self.command else {
+            return;
+        };
+        let mut kept = Vec::with_capacity(setup.args.len());
+        let mut args = std::mem::take(&mut setup.args).into_iter().peekable();
+        while let Some(arg) = args.next() {
+            if arg == FLAG && args.peek().is_some() {
+                self.project_root = args.next().map(PathBuf::from);
+            } else if let Some(value) = arg.strip_prefix(FLAG).and_then(|v| v.strip_prefix('=')) {
+                self.project_root = Some(PathBuf::from(value));
+            } else {
+                kept.push(arg);
+            }
+        }
+        setup.args = kept;
     }
 
     /// Project root: `--project-root`, `TALAHON_PROJECT_ROOT`, else the
@@ -273,6 +302,80 @@ mod tests {
                 args: vec!["--tz".into(), "Europe/Berlin".into(), "--force".into()],
             })
         );
+    }
+
+    #[test]
+    fn project_root_after_a_setup_step_is_not_handed_to_the_step() {
+        let setup_args = |cli: &Cli| match cli.command() {
+            Command::Setup(s) => s.args.clone(),
+            other => panic!("not setup: {other:?}"),
+        };
+        let mut cli = parse(&[
+            "talahon",
+            "setup",
+            "egress",
+            "--apply",
+            "--project-root",
+            "/srv/talahon",
+            "--allow",
+            "192.0.2.10:9200",
+        ]);
+        cli.lift_setup_project_root();
+        assert_eq!(
+            cli.resolve_project_root().unwrap(),
+            PathBuf::from("/srv/talahon")
+        );
+        assert_eq!(setup_args(&cli), ["--apply", "--allow", "192.0.2.10:9200"]);
+
+        // `=` form; the trailing occurrence wins over the leading one.
+        let mut cli = parse(&[
+            "talahon",
+            "--project-root",
+            "/srv/first",
+            "setup",
+            "verify",
+            "--project-root=/srv/second",
+        ]);
+        cli.lift_setup_project_root();
+        assert_eq!(
+            cli.resolve_project_root().unwrap(),
+            PathBuf::from("/srv/second")
+        );
+        assert!(setup_args(&cli).is_empty());
+
+        // Without a value the step gets (and rejects) it; other steps'
+        // arguments and other subcommands are untouched.
+        let mut cli = parse(&["talahon", "setup", "egress", "--apply", "--project-root"]);
+        cli.lift_setup_project_root();
+        assert_eq!(cli.project_root, None);
+        assert_eq!(setup_args(&cli), ["--apply", "--project-root"]);
+        let mut cli = parse(&["talahon", "setup", "timezone", "--tz", "Europe/Berlin"]);
+        cli.lift_setup_project_root();
+        assert_eq!(setup_args(&cli), ["--tz", "Europe/Berlin"]);
+    }
+
+    #[test]
+    fn help_lists_every_setup_step() {
+        let help = <Cli as CommandFactory>::command()
+            .render_long_help()
+            .to_string();
+        for step in [
+            "timezone",
+            "environment",
+            "vllm",
+            "container",
+            "groups",
+            "register",
+            "mounts",
+            "egress",
+            "service",
+            "verify",
+        ] {
+            assert!(
+                help.contains(&format!("`{step}`")),
+                "{step} missing:\n{help}"
+            );
+        }
     }
 
     #[test]

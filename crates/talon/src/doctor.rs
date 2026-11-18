@@ -25,7 +25,7 @@ use talon_db::{Db, DbOptions, default_db_path};
 use talon_http::HttpConfig;
 use talon_security::instructions::InstructionFiles;
 use talon_setup::checks::check_port;
-use talon_setup::{SetupContext, StatusBlock, Step, StepArgs, run_step};
+use talon_setup::{StatusBlock, Step, StepArgs, run_step};
 
 use crate::app::{ApiKeyPolicy, DEFAULT_CONTAINER_HOST, api_key_policy, gateway_bind_ip};
 
@@ -53,6 +53,10 @@ pub fn hint(issue: &str) -> &'static str {
              the LLM gateway does not start and every agent run fails"
         }
         "vllm_invalid_url" => "TALAHON_VLLM_BASE_URL must be an http(s) URL, e.g. http://vllm:8000",
+        "vllm_invalid_ca_file" => {
+            "TALAHON_VLLM_CA_FILE (TALAHON_ANTHROPIC_CA_FILE for the Anthropic provider) must name \
+             a readable PEM bundle with at least one CA certificate (see ERROR in CHECK_VLLM)"
+        }
         "vllm_unreachable" => {
             "vLLM is not reachable from this host (network, firewall, server down)"
         }
@@ -72,7 +76,11 @@ pub fn hint(issue: &str) -> &'static str {
             "vLLM answered /v1/models unexpectedly; check TALAHON_VLLM_BASE_URL points at vLLM"
         }
         "gateway_port_in_use" => {
-            "TALAHON_LLM_GATEWAY_PORT is in use (expected while talahon is running; otherwise pick another port)"
+            "TALAHON_LLM_GATEWAY_PORT is in use by another process (stop it or pick another port). \
+             This project's running Talahon (started in the project directory or named in \
+             talahon.pid) is recognised and not reported — except on non-Linux hosts and when it \
+             runs as a different user than `talahon doctor`; a Talahon of another project is \
+             reported, it would keep this one from binding"
         }
         "gateway_port_unavailable" | "gateway_bind_unavailable" => {
             "the LLM gateway cannot bind its address: set TALAHON_LLM_GATEWAY_BIND to a local address"
@@ -171,7 +179,17 @@ async fn gateway_block(config: &TalonConfig) -> (StatusBlock, Vec<String>) {
         block.set("PORT_STATUS", port.as_str());
         match port.as_str() {
             "free" => {}
-            "in_use" => issues.push("gateway_port_in_use".to_string()),
+            // Held by this project's running Talahon: the healthy state,
+            // not a problem. Anything else (another project's Talahon, or a
+            // listener this user cannot inspect) stays an issue.
+            "in_use" => match talon_setup::listener::project_talahon_listener(
+                ip,
+                config.llm_gateway_port,
+                &config.project_root,
+            ) {
+                Some(pid) => block.set("PORT_OWNER", format!("talahon (pid {pid})")),
+                None => issues.push("gateway_port_in_use".to_string()),
+            },
             _ => issues.push("gateway_bind_unavailable".to_string()),
         }
         let linux = runtime
@@ -576,7 +594,7 @@ pub fn summary_block(issues: &[String]) -> StatusBlock {
 
 /// Run every check and print the blocks. Returns the exit code.
 pub async fn run(project_root: &Path, config: &TalonConfig) -> i32 {
-    let ctx = SetupContext::detect(project_root);
+    let ctx = crate::app::setup_context(project_root).await;
     let no_args = StepArgs::new(Vec::<String>::new());
     let mut issues: Vec<String> = Vec::new();
 
@@ -589,8 +607,8 @@ pub async fn run(project_root: &Path, config: &TalonConfig) -> i32 {
 
     let (gateway, gw_issues) = gateway_block(config).await;
     println!("{gateway}");
-    // The environment step already probed 127.0.0.1:<port>; the gateway
-    // block probes the real bind address, which supersedes it.
+    // The environment step already probed the gateway port; the gateway
+    // block reports it in more detail and supersedes it.
     issues.retain(|i| !i.starts_with("gateway_port_"));
     issues.extend(gw_issues);
 

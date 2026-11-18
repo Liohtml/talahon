@@ -71,6 +71,9 @@ pub async fn run(_args: &StepArgs, ctx: &SetupContext) -> anyhow::Result<StepOut
     } else if !ok {
         block.set("ERROR", check.status.as_str());
     }
+    // The block references the log, so the probe result goes there too
+    // (URL credentials are redacted, the API key is only "set"/"unset").
+    ctx.append_log("vllm", &block.to_string());
     block.set("LOG", SETUP_LOG);
     Ok(StepOutcome::with_code(block, if ok { 0 } else { 1 }))
 }
@@ -84,6 +87,17 @@ mod tests {
 
     use super::*;
     use crate::runner::mock::MockRunner;
+
+    #[tokio::test]
+    async fn result_is_written_to_the_setup_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SetupContext::new(dir.path(), dir.path(), Arc::new(MockRunner::new()));
+        let out = run(&StepArgs::default(), &ctx).await.unwrap();
+        assert_eq!(out.block.unwrap().get("LOG"), Some(SETUP_LOG));
+        let log = std::fs::read_to_string(dir.path().join(SETUP_LOG)).unwrap();
+        assert!(log.contains(" vllm ---"), "{log}");
+        assert!(log.contains("CHECK_VLLM"), "{log}");
+    }
 
     #[tokio::test]
     async fn not_configured_fails() {

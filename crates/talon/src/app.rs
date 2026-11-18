@@ -26,6 +26,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -132,6 +133,18 @@ fn normalize_base(url: &str) -> String {
     u.strip_suffix("/v1").unwrap_or(u).to_ascii_lowercase()
 }
 
+/// The PEM bundle of extra CA certificates for the provider's upstream
+/// (`TALAHON_VLLM_CA_FILE` / `TALAHON_ANTHROPIC_CA_FILE`); a relative path
+/// is resolved against the project root. `None` when unset or blank.
+pub fn upstream_ca_file(config: &TalonConfig, kind: ProviderKind) -> Option<PathBuf> {
+    config
+        .env
+        .get(kind.ca_file_env())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(|v| config.project_root.join(v))
+}
+
 /// Gateway configuration for the host's vLLM defaults, allowing every
 /// model a registered group may use. `None` when vLLM is not configured.
 pub fn gateway_config(
@@ -149,6 +162,7 @@ pub fn gateway_config(
         .map(str::to_string);
     let mut gw = GatewayConfig::from_provider(kind, vllm, api_key);
     gw.bind = bind;
+    gw.upstream_ca_file = upstream_ca_file(config, kind);
     if let Some(rpm) = config
         .env
         .get("TALAHON_LLM_GATEWAY_RPM")
@@ -229,6 +243,38 @@ pub async fn gateway_bind_ip(
             .parse::<IpAddr>()
             .with_context(|| format!("TALAHON_LLM_GATEWAY_BIND {raw:?} is not an IP address")),
         None => Ok(talon_container::detect_gateway_bind_addr(runtime).await),
+    }
+}
+
+/// The context `talahon doctor` and `talahon setup environment` run with
+/// (see [`setup_step_context`]). Its gateway bind address is the one
+/// [`gateway_bind_ip`] resolves — what `talahon run` will bind — instead of
+/// the `127.0.0.1` placeholder the configuration holds while
+/// `TALAHON_LLM_GATEWAY_BIND` is unset, so `setup environment` shows and
+/// probes the real address (on Linux with docker: the default bridge, e.g.
+/// `172.17.0.1`).
+pub async fn setup_context(project_root: &Path) -> talon_setup::SetupContext {
+    let mut ctx = talon_setup::SetupContext::detect(project_root);
+    if ctx.config.env.get("TALAHON_LLM_GATEWAY_BIND").is_none()
+        && let Ok(runtime) = ContainerRuntime::detect(&ctx.config.container_runtime)
+    {
+        ctx.config.llm_gateway_bind = talon_container::detect_gateway_bind_addr(&runtime)
+            .await
+            .to_string();
+    }
+    ctx
+}
+
+/// The context `talahon setup <step>` runs with: [`setup_context`] for the
+/// `environment` step, the only one that reads the gateway bind address;
+/// the plain detected context for every other step, which so does not pay
+/// for the container runtime queries (each with a 30 s timeout) or print
+/// their loopback fallback warning.
+pub async fn setup_step_context(project_root: &Path, step: &str) -> talon_setup::SetupContext {
+    if talon_setup::Step::parse(step) == Some(talon_setup::Step::Environment) {
+        setup_context(project_root).await
+    } else {
+        talon_setup::SetupContext::detect(project_root)
     }
 }
 
@@ -558,8 +604,6 @@ pub async fn run(config: Arc<TalonConfig>, redactor: Arc<Redactor>) -> anyhow::R
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use talon_core::env::EnvFile;
     use talon_core::types::{ContainerConfig, ProviderKind, VllmConfig};
 
@@ -570,6 +614,40 @@ mod tests {
             Path::new("/tmp/talon-test"),
             EnvFile::from_str_content(content),
         )
+    }
+
+    #[test]
+    fn upstream_ca_file_follows_the_provider_and_the_project_root() {
+        let none = cfg("TALAHON_VLLM_BASE_URL=https://llm.internal.example\n");
+        assert_eq!(upstream_ca_file(&none, ProviderKind::Vllm), None);
+        let blank = cfg("TALAHON_VLLM_CA_FILE=\"  \"\n");
+        assert_eq!(upstream_ca_file(&blank, ProviderKind::Vllm), None);
+
+        let c =
+            cfg("TALAHON_VLLM_CA_FILE=certs/ca.pem\nTALAHON_ANTHROPIC_CA_FILE=/etc/ssl/corp.pem\n");
+        assert_eq!(
+            upstream_ca_file(&c, ProviderKind::Vllm),
+            Some(PathBuf::from("/tmp/talon-test/certs/ca.pem"))
+        );
+        assert_eq!(
+            upstream_ca_file(&c, ProviderKind::Anthropic),
+            Some(PathBuf::from("/etc/ssl/corp.pem"))
+        );
+    }
+
+    #[tokio::test]
+    async fn steps_other_than_environment_keep_the_configured_gateway_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        // Whatever the configuration says (the `127.0.0.1` placeholder
+        // here): no container runtime is asked for the bridge address.
+        let configured = TalonConfig::from_env(dir.path(), EnvFile::load(dir.path()));
+        for step in ["timezone", "egress", "service", "verify", "no-such-step"] {
+            let ctx = setup_step_context(dir.path(), step).await;
+            assert_eq!(
+                ctx.config.llm_gateway_bind, configured.llm_gateway_bind,
+                "{step}"
+            );
+        }
     }
 
     fn group_with_model(model: &str, base: &str) -> RegisteredGroup {

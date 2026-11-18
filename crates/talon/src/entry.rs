@@ -109,7 +109,7 @@ async fn dispatch(cli: Cli, root: PathBuf, invoked: InvokedAs) -> i32 {
         }
         Command::Setup(args) => {
             let _ = bootstrap(&root, LogTarget::Stderr, "info", invoked);
-            let ctx = talon_setup::SetupContext::detect(&root);
+            let ctx = crate::app::setup_step_context(&root, &args.step).await;
             match talon_setup::run_step_by_name(&args.step, &args.args, &ctx).await {
                 Ok(outcome) => {
                     println!("{}", outcome.render());
@@ -157,7 +157,8 @@ pub fn main(alias: InvokedAs) -> ExitCode {
         InvokedAs::Legacy => InvokedAs::Legacy,
         InvokedAs::Current => InvokedAs::from_arg0(std::env::args_os().next().as_deref()),
     };
-    let cli = Cli::parse_with_legacy_env();
+    let mut cli = Cli::parse_with_legacy_env();
+    cli.lift_setup_project_root();
     let root = match cli.resolve_project_root() {
         Ok(root) => root,
         Err(e) => {

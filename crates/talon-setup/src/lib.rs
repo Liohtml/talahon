@@ -44,6 +44,7 @@
 pub mod checks;
 pub mod context;
 pub mod fsutil;
+pub mod listener;
 pub mod platform;
 pub mod runner;
 pub mod status;
