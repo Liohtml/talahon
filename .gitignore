@@ -36,6 +36,8 @@ shuffle-mcp/.env
 shuffle-mcp/.venv/
 cve-mcp/.env
 cve-mcp/.venv/
+# Offline CVE database, written by `talahon cve sync`
+cve-mcp/data/
 
 # Temp files
 .tmp-*

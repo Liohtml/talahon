@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::cli::{AuditCommand, Cli, Command, EvalCommand};
+use crate::cli::{AuditCommand, Cli, Command, CveCommand, EvalCommand};
 use crate::logging::{self, LogFormat, LogTarget};
 use talon_core::config::TalonConfig;
 use talon_core::env::EnvFile;
@@ -130,6 +130,13 @@ async fn dispatch(cli: Cli, root: PathBuf, invoked: InvokedAs) -> i32 {
             match command {
                 EvalCommand::Score(args) => crate::eval_cmd::score(&root, args),
                 EvalCommand::Run(args) => crate::eval_cmd::run(&root, &config, args).await,
+            }
+        }
+        Command::Cve { command } => {
+            let (config, _) = bootstrap(&root, LogTarget::Stderr, "info", invoked);
+            match command {
+                CveCommand::Sync(args) => crate::cve_cmd::sync_cmd(&config, args).await,
+                CveCommand::Status => crate::cve_cmd::status_cmd(&config),
             }
         }
         Command::Audit { command } => {

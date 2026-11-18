@@ -1,0 +1,44 @@
+[package]
+name = "talahon-cve"
+description = "Offline CVE / EPSS / KEV database and its MCP server (stdio, no network) for the Talahon agent container"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities"]
+
+[lib]
+name = "talon_cve"
+
+[dependencies]
+talon-core = { workspace = true }
+talon-mcp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+# gzip of the NVD and EPSS downloads; pure Rust (miniz_oxide), already in the
+# dependency tree.
+flate2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "talahon-cve-mcp"
+path = "src/main.rs"

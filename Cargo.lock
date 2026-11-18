@@ -1965,16 +1965,20 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "flate2",
  "futures",
+ "hex",
  "regex",
  "reqwest",
  "rusqlite",
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "talahon-channels",
  "talahon-container",
  "talahon-core",
+ "talahon-cve",
  "talahon-db",
  "talahon-http",
  "talahon-intel",
@@ -2105,6 +2109,27 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "talahon-cve"
+version = "3.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "flate2",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "talahon-core",
+ "talahon-mcp",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

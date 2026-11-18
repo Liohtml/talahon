@@ -216,6 +216,8 @@ Run lookups in parallel where possible. Tools that don't need an API key are not
 - `mcp__cve__search_exploits` — Exploit-DB / GitHub exploit code references
 - `mcp__cve__bulk_cve_lookup` — when a host has many CVEs, batch all of them in one call
 
+If the CVE server runs offline (its tool list then has `mcp__cve__data_status` and none of the reputation tools), only `lookup_cve`, `search_cves`, `get_epss_score`, `check_kev`, `list_kev` and `data_status` exist. They answer from a local copy of NVD, EPSS and KEV: pass several ids at once as `cve_ids`, and mention the `warning` of an answer in your report if there is one (the copy is outdated). IP, domain, hash and exploit lookups are then not available through `mcp__cve__*`.
+
 **MITRE ATT&CK techniques (from `rule_mitre_id`):**
 - `mcp__cve__get_mitre_techniques` — technique definition, tactic, sub-techniques, common actor groups, mitigations
 - `mcp__cve__get_attack_patterns` — related attack patterns + IOCs

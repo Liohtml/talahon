@@ -8,5 +8,6 @@
 | [PROVIDER_SELECTION.md](PROVIDER_SELECTION.md) | vLLM setup, model and parser choice, gateway settings |
 | [COPILOT_INTEGRATION.md](COPILOT_INTEGRATION.md) | CoPilot integration, MySQL schema, MCP tool reference |
 | [ANON_PROXY.md](ANON_PROXY.md) | Anonymizing proxy: flow, token types, `fields.yaml` |
+| [CVE_OFFLINE.md](CVE_OFFLINE.md) | Offline CVE / EPSS / KEV data: setup, firewall hosts, tools |
 | [provider-examples/](provider-examples/) | Per-group `container.json` example for vLLM |
 | [../groups/copilot/prompts/README.md](../groups/copilot/prompts/README.md) | Writing alert-type investigation templates |

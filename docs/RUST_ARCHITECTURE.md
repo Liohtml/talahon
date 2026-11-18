@@ -31,6 +31,7 @@ crates/
   talon-anon       PII anonymizer + `talahon-anon-proxy` MCP proxy binary
   talon-mcp-opensearch  native read-only OpenSearch MCP server `talahon-opensearch-mcp` (opt-in: TALAHON_OPENSEARCH_MCP=rust)
   talon-mcp-mysql  native MySQL MCP server `talahon-mysql-mcp` (opt-in: TALAHON_MYSQL_MCP=rust)
+  talon-cve        offline CVE/EPSS/KEV database + MCP server `talahon-cve-mcp`, no network (opt-in: TALAHON_CVE_MCP=offline); the host fills it with `talahon cve sync`
   talon-container  hardened docker/podman launcher, mounts, output-marker parser, snapshots, image files
   talon-scheduler  GroupQueue (per-lane serialization, global concurrency) + task scheduler loop
   talon-ipc        host-side IPC watcher (authorized, audited, hardened file handling)
