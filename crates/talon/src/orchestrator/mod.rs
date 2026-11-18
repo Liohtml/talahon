@@ -17,6 +17,7 @@
 pub mod commands;
 pub mod host;
 mod ledger;
+pub mod memory_history;
 pub mod messages;
 pub mod run;
 pub mod tasks;
