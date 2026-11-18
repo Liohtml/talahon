@@ -82,15 +82,15 @@ missing or older than `TALAHON_CVE_MAX_AGE_DAYS` (default 3).
 
 ## Size and duration
 
-Measured on @@MEASURED_ON@@:
+Measured on a desktop machine (Intel Core i7-12700K, NVMe SSD) on 18 November 2026; the duration of the first run depends mostly on the line:
 
 | | First run (full) | Daily run |
 |---|---|---|
-| Download | @@FULL_DL@@ | @@INC_DL@@ |
-| Duration | @@FULL_TIME@@ | @@INC_TIME@@ |
-| Peak memory | @@FULL_RSS@@ | @@INC_RSS@@ |
+| Download | 254 MB | 11 MB |
+| Duration | 65 s | 12 s |
+| Peak memory | 98 MB | 97 MB |
 
-The database is @@DB_SIZE@@ (@@CVES@@ CVEs, @@EPSS@@ EPSS scores, @@KEV@@ KEV
+The database is 1.1 GB (427,567 CVEs, 407,165 EPSS scores, 1,782 KEV
 entries). During a run the directory briefly holds two copies plus one
 download, so plan for about three times the database size in
 `cve-mcp/data/`.

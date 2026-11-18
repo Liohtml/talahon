@@ -54,7 +54,7 @@ pub fn service_unit(
          Type=oneshot\n\
          WorkingDirectory={root}\n\
          ExecStart={bin} cve sync\n\
-         # A full first run downloads about 1.5 GB; later runs a few MB.\n\
+         # A full first run downloads about 250 MB; later runs about 10 MB.\n\
          TimeoutStartSec=3h\n\
          Nice=10\n\
          IOSchedulingClass=idle\n\
