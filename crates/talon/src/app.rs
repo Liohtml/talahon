@@ -246,12 +246,13 @@ pub async fn gateway_bind_ip(
     }
 }
 
-/// The context `talahon setup <step>` and `talahon doctor` run with. Its
-/// gateway bind address is the one [`gateway_bind_ip`] resolves — what
-/// `talahon run` will bind — instead of the `127.0.0.1` placeholder the
-/// configuration holds while `TALAHON_LLM_GATEWAY_BIND` is unset, so
-/// `setup environment` shows and probes the real address (on Linux with
-/// docker: the default bridge, e.g. `172.17.0.1`).
+/// The context `talahon doctor` and `talahon setup environment` run with
+/// (see [`setup_step_context`]). Its gateway bind address is the one
+/// [`gateway_bind_ip`] resolves — what `talahon run` will bind — instead of
+/// the `127.0.0.1` placeholder the configuration holds while
+/// `TALAHON_LLM_GATEWAY_BIND` is unset, so `setup environment` shows and
+/// probes the real address (on Linux with docker: the default bridge, e.g.
+/// `172.17.0.1`).
 pub async fn setup_context(project_root: &Path) -> talon_setup::SetupContext {
     let mut ctx = talon_setup::SetupContext::detect(project_root);
     if ctx.config.env.get("TALAHON_LLM_GATEWAY_BIND").is_none()
@@ -262,6 +263,19 @@ pub async fn setup_context(project_root: &Path) -> talon_setup::SetupContext {
             .to_string();
     }
     ctx
+}
+
+/// The context `talahon setup <step>` runs with: [`setup_context`] for the
+/// `environment` step, the only one that reads the gateway bind address;
+/// the plain detected context for every other step, which so does not pay
+/// for the container runtime queries (each with a 30 s timeout) or print
+/// their loopback fallback warning.
+pub async fn setup_step_context(project_root: &Path, step: &str) -> talon_setup::SetupContext {
+    if talon_setup::Step::parse(step) == Some(talon_setup::Step::Environment) {
+        setup_context(project_root).await
+    } else {
+        talon_setup::SetupContext::detect(project_root)
+    }
 }
 
 async fn start_gateway(
@@ -619,6 +633,21 @@ mod tests {
             upstream_ca_file(&c, ProviderKind::Anthropic),
             Some(PathBuf::from("/etc/ssl/corp.pem"))
         );
+    }
+
+    #[tokio::test]
+    async fn steps_other_than_environment_keep_the_configured_gateway_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        // Whatever the configuration says (the `127.0.0.1` placeholder
+        // here): no container runtime is asked for the bridge address.
+        let configured = TalonConfig::from_env(dir.path(), EnvFile::load(dir.path()));
+        for step in ["timezone", "egress", "service", "verify", "no-such-step"] {
+            let ctx = setup_step_context(dir.path(), step).await;
+            assert_eq!(
+                ctx.config.llm_gateway_bind, configured.llm_gateway_bind,
+                "{step}"
+            );
+        }
     }
 
     fn group_with_model(model: &str, base: &str) -> RegisteredGroup {
