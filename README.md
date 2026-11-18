@@ -495,7 +495,7 @@ All endpoints except `/health` require `X-Api-Key` or `Authorization: Bearer`.
 | `<mcp-dir>/.env` | Per-MCP credentials — gitignored |
 | `groups/copilot/AGENT.md` | SOC agent identity and investigation workflow (read-only inside containers); add client context such as assets, known-good ranges and crown jewels at the bottom |
 | `groups/<group>/MEMORY.md` | The group's own agent-written notes (shown to the agent as untrusted data) |
-| `data/memory-history/<group>/` | Copies of `MEMORY.md` from before each run that changed it (newest 50). The agent cannot reach them; copy one back to undo an overwrite |
+| `data/memory-history/<group>/` | Copies of `MEMORY.md` from before each run that changed it (the newest 50, plus the newest of each day for 30 days). No container can write or delete them, but the main group can read them like the rest of the project, and a secret removed from `MEMORY.md` stays in the older copies until they are pruned. Copy one back to undo an overwrite |
 | `groups/copilot/.mcp.json` | MCP servers and their `runAs` users (mounted read-only) |
 | `groups/copilot/prompts/` | Per-alert-type investigation templates — add `.txt` files, no code changes |
 | `siem/anon_proxy/fields.yaml` | PII field definitions for the anonymizing proxy |

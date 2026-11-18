@@ -294,19 +294,27 @@ impl Orchestrator {
 
         self.write_snapshots(group, chat_jid);
         // The agent may rewrite MEMORY.md whole; keep what it held before
-        // this run. Never a reason not to run.
-        match super::memory_history::snapshot(
-            &self.config.groups_dir,
-            &self.config.data_dir,
-            &group.folder,
-            chrono::Utc::now(),
-        ) {
-            Ok(Some(copy)) => {
+        // this run. Disk work, so on the blocking pool; never a reason not
+        // to run.
+        let (groups_dir, data_dir, folder) = (
+            self.config.groups_dir.clone(),
+            self.config.data_dir.clone(),
+            group.folder.clone(),
+        );
+        let kept = tokio::task::spawn_blocking(move || {
+            super::memory_history::snapshot(&groups_dir, &data_dir, &folder, chrono::Utc::now())
+        })
+        .await;
+        match kept {
+            Ok(Ok(Some(copy))) => {
                 tracing::debug!(group = %group.name, copy = %copy.display(), "kept a copy of MEMORY.md");
             }
-            Ok(None) => {}
-            Err(e) => {
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => {
                 tracing::warn!(group = %group.name, error = %e, "cannot keep a copy of MEMORY.md");
+            }
+            Err(e) => {
+                tracing::warn!(group = %group.name, error = %e, "the MEMORY.md copy task failed");
             }
         }
         // Follow-ups an earlier container left unread are sent again from
