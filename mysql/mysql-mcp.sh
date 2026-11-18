@@ -55,23 +55,25 @@ _load_env() {
     # is data, and a credentials file must not be able to run code. Same rules
     # as Talahon's own .env reader (talon_core::env::parse_env): optional
     # `export`, single or double quotes, ` # comment` after an unquoted value.
-    local line key value quote
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%$'\r'}"
-        [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
-        key="${BASH_REMATCH[2]}"
-        value="${BASH_REMATCH[3]}"
-        value="${value#"${value%%[![:space:]]*}"}"
-        quote="${value:0:1}"
-        if [[ "$quote" == '"' || "$quote" == "'" ]] && [[ "${value:1}" == *"$quote"* ]]; then
-            value="${value:1}"
-            value="${value%%"$quote"*}"
+    local _le_line _le_key _le_raw _le_value _le_quote
+    while IFS= read -r _le_line || [[ -n "$_le_line" ]]; do
+        _le_line="${_le_line%$'\r'}"
+        [[ "$_le_line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+        _le_key="${BASH_REMATCH[2]}"
+        _le_raw="${BASH_REMATCH[3]}"
+        _le_value="${_le_raw#"${_le_raw%%[![:space:]]*}"}"
+        _le_quote="${_le_value:0:1}"
+        if [[ "$_le_quote" == '"' || "$_le_quote" == "'" ]] && [[ "${_le_value:1}" == *"$_le_quote"* ]]; then
+            _le_value="${_le_value:1}"
+            _le_value="${_le_value%%"$_le_quote"*}"
         else
-            if [[ "$value" =~ ^(.*[^[:space:]])?[[:space:]]+#.*$ ]]; then value="${BASH_REMATCH[1]}"; fi
-            if [[ "$value" == '#'* ]]; then value=""; fi
-            value="${value%"${value##*[![:space:]]}"}"
+            # A comment starts at the first `#` that follows whitespace, so
+            # `a#b` and a value that begins with `#` keep their `#`.
+            _le_value="${_le_raw%%[[:space:]]#*}"
+            _le_value="${_le_value#"${_le_value%%[![:space:]]*}"}"
+            _le_value="${_le_value%"${_le_value##*[![:space:]]}"}"
         fi
-        export "$key=$value"
+        export "$_le_key=$_le_value"
     done < "$1"
     # Accept both spellings of the password and database keys.
     if [[ -n "${MYSQL_PASS:-}" && -z "${MYSQL_PASSWORD:-}" ]]; then export MYSQL_PASSWORD="$MYSQL_PASS"; fi

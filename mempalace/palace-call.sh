@@ -12,11 +12,35 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+_load_env() {
+    # Read literally, never `source`d: a `$`, a backtick or a `;` in a password
+    # is data, and a credentials file must not be able to run code. Same rules
+    # as Talahon's own .env reader (talon_core::env::parse_env): optional
+    # `export`, single or double quotes, ` # comment` after an unquoted value.
+    local _le_line _le_key _le_raw _le_value _le_quote
+    while IFS= read -r _le_line || [[ -n "$_le_line" ]]; do
+        _le_line="${_le_line%$'\r'}"
+        [[ "$_le_line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+        _le_key="${BASH_REMATCH[2]}"
+        _le_raw="${BASH_REMATCH[3]}"
+        _le_value="${_le_raw#"${_le_raw%%[![:space:]]*}"}"
+        _le_quote="${_le_value:0:1}"
+        if [[ "$_le_quote" == '"' || "$_le_quote" == "'" ]] && [[ "${_le_value:1}" == *"$_le_quote"* ]]; then
+            _le_value="${_le_value:1}"
+            _le_value="${_le_value%%"$_le_quote"*}"
+        else
+            # A comment starts at the first `#` that follows whitespace, so
+            # `a#b` and a value that begins with `#` keep their `#`.
+            _le_value="${_le_raw%%[[:space:]]#*}"
+            _le_value="${_le_value#"${_le_value%%[![:space:]]*}"}"
+            _le_value="${_le_value%"${_le_value##*[![:space:]]}"}"
+        fi
+        export "$_le_key=$_le_value"
+    done < "$1"
+}
+
 if [[ -r "$SCRIPT_DIR/.env" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/.env"
-    set +a
+    _load_env "$SCRIPT_DIR/.env"
 fi
 
 PALACE_PATH="${MEMPALACE_PALACE_PATH:-$SCRIPT_DIR/../mempalace-data/palace}"

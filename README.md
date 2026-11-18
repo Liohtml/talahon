@@ -358,6 +358,16 @@ container they are readable only by that server's user.
 | `cve-mcp/` *(optional)* | `bash cve-mcp/setup.sh` | `NVD_API_KEY`, optional VirusTotal/Shodan/AbuseIPDB/GreyNoise/urlscan keys |
 | `mempalace/` *(optional)* | `bash mempalace/setup.sh` | — (local ChromaDB + SQLite in `mempalace-data/`) |
 
+The wrappers read these `.env` files literally; they are not shell scripts.
+A `$`, a backtick or a `\` in a value is part of the value, and `${OTHER}` is
+not expanded. Quote a value with single or double quotes if it has leading or
+trailing spaces or contains ` #`.
+
+> **Upgrading:** earlier versions ran the file through the shell. If you
+> escaped a character to get it past the shell (`PASS=pa\$word`,
+> `PASS="a\"b"`), remove the backslash now, and replace any `${VAR}` reference
+> with its value.
+
 The versions of all MCP servers are pinned in
 [`container/mcp-versions.env`](container/mcp-versions.env), for the image and
 for the `setup.sh` scripts alike. To update one, review the upstream diff,

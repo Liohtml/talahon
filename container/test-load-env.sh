@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks `_load_env` of every MCP wrapper: values are read literally (a `$`,
+# Checks `_load_env` of every MCP wrapper and helper script: values are read literally (a `$`,
 # a backtick or a `;` is data, nothing is executed) with the same rules as
 # talon_core::env::parse_env. Run from anywhere; exits non-zero on a failure.
 set -euo pipefail
@@ -22,6 +22,12 @@ INLINE=131072	# tokens
 HASH=abc#123
 SPACED = padded  
 EMPTY=
+LEADHASH=#Secr3t!
+TWOCOMMENTS=https://h:55000 # prod # see wiki
+ONLYCOMMENT= # nothing
+ESCAPED="pa\$word"
+line=kept
+value=kept too
 ENV
 printf 'CRLF=dos\r\nLAST=no-newline' >> "$TMP/.env"
 
@@ -34,7 +40,11 @@ check() { # name expected actual
 }
 
 count=0
-for wrapper in "$ROOT"/*/*-mcp.sh; do
+for wrapper in "$ROOT"/*/*-mcp.sh "$ROOT/container/mysql-tools/mysql-query" "$ROOT/mempalace/palace-call.sh"; do
+    if grep -qE '^\s*(source|\.)\s+"?\$[A-Za-z_{]*(ENV|env)' "$wrapper"; then
+        echo "FAIL $wrapper: sources an .env file" >&2
+        fail=1
+    fi
     body="$(sed -n '/^_load_env() {$/,/^}$/p' "$wrapper")"
     [[ -n "$body" ]] || continue
     count=$((count + 1))
@@ -46,7 +56,7 @@ for wrapper in "$ROOT"/*/*-mcp.sh; do
     out="$(cd "$TMP" && env -i HOME=/home/x bash -c "set -euo pipefail
 $body
 _load_env '$TMP/.env'
-for k in PLAIN DOLLAR BACKTICK SUBSHELL SEMI EXPORTED SINGLE DOUBLE INLINE HASH SPACED EMPTY CRLF LAST; do
+for k in PLAIN DOLLAR BACKTICK SUBSHELL SEMI EXPORTED SINGLE DOUBLE INLINE HASH SPACED EMPTY LEADHASH TWOCOMMENTS ONLYCOMMENT ESCAPED line value CRLF LAST; do
     printf '%s=[%s]\n' \"\$k\" \"\${!k-UNSET}\"
 done")"
     get() { sed -n "s/^$1=\[\(.*\)\]$/\1/p" <<<"$out"; }
@@ -62,6 +72,12 @@ done")"
     check HASH 'abc#123' "$(get HASH)"
     check SPACED 'padded' "$(get SPACED)"
     check EMPTY '' "$(get EMPTY)"
+    check LEADHASH '#Secr3t!' "$(get LEADHASH)"
+    check TWOCOMMENTS 'https://h:55000' "$(get TWOCOMMENTS)"
+    check ONLYCOMMENT '' "$(get ONLYCOMMENT)"
+    check ESCAPED 'pa\$word' "$(get ESCAPED)"
+    check line 'kept' "$(get line)"
+    check value 'kept too' "$(get value)"
     check CRLF 'dos' "$(get CRLF)"
     check LAST 'no-newline' "$(get LAST)"
     if [[ -e "$TMP/INJECTED" ]]; then
@@ -71,9 +87,9 @@ done")"
     fi
 done
 
-if [[ "$count" -lt 8 ]]; then
-    echo "FAIL: only $count wrappers with _load_env found (expected at least 8)" >&2
+if [[ "$count" -lt 10 ]]; then
+    echo "FAIL: only $count scripts with _load_env found (expected at least 10)" >&2
     fail=1
 fi
-[[ "$fail" -eq 0 ]] && echo "ok: $count wrappers read .env literally"
+[[ "$fail" -eq 0 ]] && echo "ok: $count scripts read .env literally"
 exit "$fail"
